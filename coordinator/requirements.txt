@@ -1,0 +1,53 @@
+# NOTE (self-host / Python 3.14): the cloud fork pinned these to exact old
+# versions that predate cp314 wheels (pydantic-core, fastapi, sqlalchemy, ...)
+# and won't build from source without a Rust toolchain. The self-host carve
+# relaxes them to CVE-safe floors that ship prebuilt 3.14 wheels. Bump the
+# floors, never drop below them (the comments record the CVE each floor fixes).
+fastapi>=0.115  # 3.14-compatible; pulls a starlette/pydantic that ship cp314 wheels
+python-multipart>=0.0.18  # CVE-2024-24762 (ReDoS), CVE-2024-53981 (DoS)
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0.36  # 2.0.36+ ships cp314 wheels; async core unchanged from 2.0.25
+aiosqlite>=0.19  # async SQLite driver — self-host coordinator DB (Postgres carved out)
+greenlet>=3.0  # REQUIRED by SQLAlchemy async (sqlalchemy[asyncio]); not auto-installed on all platforms
+# No external Redis SERVER is required: the self-host coordinator backs all
+# former Redis usage (rate-limit, presence, dedup, agent-state, pub/sub, report/
+# dispatch streams) with an in-process fakeredis client sharing one keyspace
+# (utils/inproc_redis.py). fakeredis speaks the full async Redis API in-memory.
+# The `redis` package itself stays (fakeredis depends on it, and a few modules
+# import `redis.asyncio` only for type annotations) but nothing connects out.
+fakeredis>=2.21  # in-process Redis (async) — removes the external Redis-server dependency
+redis>=5.0.1     # kept: fakeredis dependency + `redis.asyncio` type imports (no server connection)
+argon2-cffi>=23.1.0
+python-dotenv>=1.0.0
+pydantic[email]>=2.9  # 2.9+ ships pydantic-core cp314 wheels (2.5.3 has none → source build fails)
+pydantic-settings>=2.5
+httpx>=0.27
+# The ONLY JWT library in use: security/jwt.py, utils/recorder_auth.py and
+# routers/recorder_proxy.py all `from jose import jwt`. Signing is HS256 only,
+# with algorithms pinned on every decode (no alg-confusion surface, and the
+# `ecdsa` transitive dependency's timing advisory is unreachable — see
+# pip-audit-ignore.txt).
+python-jose[cryptography]>=3.4.0  # CVE-2024-33664 (JWT bomb), CVE-2024-33663 (alg confusion)
+# NOTE: PyJWT was listed here for "EdDSA entitlement signing + APNs ES256
+# tokens" — features whose modules (security/entitlements.py, scheduler/apns.py)
+# do not exist in this build. Nothing imported it, so it was a dependency that
+# could only ever contribute CVE surface to the runtime image. Removed.
+cryptography>=43.0.3  # multiple CVEs fixed since 41.0.7 (e.g. CVE-2024-26130); >=43.0.3 required by webauthn 2.5.0
+passlib>=1.7.4
+alembic>=1.13.1
+beautifulsoup4>=4.12.3
+lxml>=4.9.0  # capable/fast parser used by BeautifulSoup in content extraction (extractor/targets/target_selectors/persona_service)
+websockets>=12.0
+dnspython>=2.4.0
+pyotp>=2.9.0
+webauthn>=2.5.0  # FIDO2/WebAuthn passkeys (passwordless + biometric 2FA) — server-side ceremony verification
+prometheus-fastapi-instrumentator>=7.0.0  # /metrics for Prometheus scraping
+prometheus-client>=0.20.0  # explicit (dep of the instrumentator; pin so a stale build installs it)
+unidecode>=1.3.8  # correct non-ASCII transliteration for slug_service (graceful NFKD fallback if absent)
+regex>=2024.5.15  # ReDoS hard-timeout guarantee: regex.search/findall(..., timeout=) releases the GIL (the stdlib `re` cannot be timed out). Used by security.validation safe_regex_* + validate_regex probe.
+apscheduler>=3.10  # in-process monitor/workflow/housekeeping scheduling (replaces the cloud Redis-backed scheduler; wired up in a later self-host stage)
+cachetools>=5.3  # in-process TTL caches (replaces some Redis usages in the self-host carve)
+
+# Visual monitoring: MinIO object storage + Pillow for region screenshot diffs
+minio>=7.2
+Pillow>=10.0

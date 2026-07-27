@@ -1,0 +1,49 @@
+# Ruff config for the backend (lint only; formatting left to developers for now).
+#
+# Standalone ruff.toml rather than a [tool.ruff] block: the backend has no
+# pyproject.toml (config lives in pytest.ini / alembic.ini), so a dedicated file
+# keeps the same one-file-per-tool convention and avoids clobbering anything.
+#
+# CI (.github/workflows/ci.yml) gates on the CORRECTNESS subset only —
+#   ruff check --select E9,F6,F7,F81,F82,B002,B006,B012 .   (in the `lint` job)
+# — because `ruff check .` with the full ruleset below still reports ~3.4k
+# findings, almost all UP006/UP007 typing modernization and I001 import order.
+# Ratchet: when a group here reaches zero, add it to the CI --select list.
+#
+# Run the full set locally from coordinator/:
+#   ruff check .
+
+target-version = "py311"   # matches the CI runner + Dockerfile interpreter
+line-length = 100
+
+# Generated / vendored / non-source trees we never want linted.
+extend-exclude = [
+    "alembic/versions",
+    "__pycache__",
+    "logs",
+    "worker-templates",
+]
+
+[lint]
+# Start pragmatic: pyflakes (F) + a curated pycodestyle/bugbear/import set.
+# This is a real gate (errors fail CI) but intentionally NOT the full ruleset —
+# ratchet additional rule groups in over time rather than landing a red board.
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes (undefined names, unused imports, …)
+    "W",    # pycodestyle warnings
+    "I",    # isort (import ordering)
+    "B",    # flake8-bugbear (likely bugs)
+    "UP",   # pyupgrade (modern syntax)
+    "C4",   # flake8-comprehensions
+]
+# Tolerated for now (style-only / high-churn); revisit as the codebase tightens.
+ignore = [
+    "E501",  # line-too-long — enforced softly via line-length, not as a hard fail
+    "B008",  # function call in argument default — FastAPI Depends() idiom
+]
+
+[lint.per-file-ignores]
+# Tests favour readability over import hygiene; `__init__` re-exports are fine.
+"tests/**" = ["B", "F401", "F811"]
+"**/__init__.py" = ["F401"]

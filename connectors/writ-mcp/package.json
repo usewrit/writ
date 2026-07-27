@@ -1,0 +1,46 @@
+{
+  "name": "writ-mcp",
+  "version": "1.0.0",
+  "description": "Official Writ MCP server connector — bridges a stdio MCP client (Claude Code, Claude Desktop, Cursor) to Writ Cloud or a self-hosted Writ coordinator. Turns your saved browser workflows into callable tools.",
+  "license": "MIT",
+  "author": "The Writ Project Authors",
+  "homepage": "https://usewrit.app",
+  "bugs": {
+    "url": "https://github.com/usewrit/writ/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/usewrit/writ.git",
+    "directory": "connectors/writ-mcp"
+  },
+  "type": "commonjs",
+  "bin": {
+    "writ-mcp": "index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "writ",
+    "claude",
+    "browser-automation",
+    "workflows"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test test/*.test.js",
+    "prepublishOnly": "node --test test/*.test.js"
+  }
+}

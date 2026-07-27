@@ -1,0 +1,122 @@
+# Single-container self-hosted Writ coordinator.
+#
+#   - Stage 1 (node): builds the Vite SPA (selfhost/frontend -> dist).
+#   - Stage 2 (python): installs the TRIMMED coordinator requirements, copies the
+#     coordinator source and the built SPA, runs alembic then `python serve.py`.
+#
+# The coordinator runs NO browsers (fleet agents do), so this image ships only
+# Python + FastAPI + the built UI — no chromium / playwright / xvfb.
+#
+# BUILD CONTEXT: the selfhost/ directory (parent of docker/). Both `frontend/`
+# and `coordinator/` must be reachable, so build with:
+#   docker build -f docker/Dockerfile.coordinator -t writ-coordinator .
+# (docker-compose.yml sets context: .. and this dockerfile for you.)
+
+# ---------------------------------------------------------------------------
+# Stage 1 — build the SPA
+# ---------------------------------------------------------------------------
+# Digest-pinned. A floating tag means two builds of the same commit can produce
+# different images, and a compromised upstream tag lands straight in your
+# deployment. The digest below is the multi-arch INDEX digest, so amd64/arm64
+# both still resolve. Dependabot bumps it (see .github/dependabot.yml).
+#   node:20-slim as of 2026-04-22
+FROM node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS ui-build
+
+WORKDIR /build
+
+# Install deps first (cached until package*.json change).
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+# Build the SPA. Vite emits to ./dist (see frontend/vite.config.ts: outDir 'dist').
+COPY frontend/ ./
+RUN npm run build
+
+# ---------------------------------------------------------------------------
+# Stage 2 — the coordinator runtime
+# ---------------------------------------------------------------------------
+#   python:3.12-slim (3.12.13-slim-trixie) as of 2026-07-14
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    WRIT_UI_DIR=/app/ui \
+    WRIT_DB_PATH=/data/writ.db \
+    WRIT_FILES_DIR=/data/files
+
+# curl is used by the container HEALTHCHECK / compose healthcheck (GET /health).
+# No build toolchain: the trimmed requirements resolve to prebuilt wheels.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python deps first for layer caching (the TRIMMED coordinator set:
+# SQLite + in-process fakeredis, no Postgres/Redis server, no browser stack).
+#
+# The IMAGE installs from requirements.lock, not requirements.txt: every package
+# is pinned to an exact version with a SHA-256 hash, and --require-hashes makes
+# pip refuse anything that does not match. That gives byte-identical dependency
+# closures across rebuilds, and means a compromised or re-uploaded release on the
+# index fails the build instead of silently shipping.
+#
+# requirements.txt remains the human-edited input (with the reasoning behind each
+# floor). Regenerate the lock after editing it — inside this same base image, so
+# the resolution matches the runtime platform:
+#
+#   docker run --rm -v "$PWD/coordinator:/w" -w /w python:3.12-slim \
+#     sh -c 'pip install -q uv && uv pip compile requirements.txt \
+#            --generate-hashes --output-file requirements.lock'
+COPY coordinator/requirements.txt coordinator/requirements.lock ./
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
+
+# Coordinator source (app code, alembic migrations, models, routers, services).
+COPY coordinator/ ./
+
+# Normalise permissions on the application code: readable and traversable by
+# everyone, writable by nobody but root (who is not the runtime user).
+#
+# `COPY` preserves the source mode, and several package directories are 0700 on
+# a developer checkout — which made the image depend on a `chown -R … /app` to
+# be importable at all. That worked, but only by granting the runtime user WRITE
+# access to its own code. `a+rX` gives exactly the access the app needs (the
+# capital X adds the execute/traverse bit to directories only, never to plain
+# files) and nothing more, so the code is immutable at runtime.
+RUN chmod -R a+rX /app
+
+# The built SPA from stage 1 -> WRIT_UI_DIR (/app/ui). main.py serves
+# <ui>/index.html + <ui>/assets and falls back to the shell for client routes.
+COPY --from=ui-build /build/dist /app/ui
+
+# Runtime data (the SQLite DB + stored file bytes) lives on a persistent volume.
+# Create it now and hand ownership to the non-root user so a fresh mount is
+# writable even before the entrypoint runs.
+#
+# /data ONLY. /app holds the application code, which the runtime user has no
+# reason to write: leaving it writable turns any file-write primitive into
+# persistent code execution (drop a .py next to the modules it already imports
+# and it survives every restart). The image is built as root, so the code stays
+# root-owned and world-readable — which is all the app needs to run it.
+RUN useradd -m -u 10001 -s /usr/sbin/nologin writ \
+    && mkdir -p /data /data/files \
+    && chown -R writ:writ /data
+
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+USER writ
+
+# Persist the DB + files across container recreation.
+VOLUME ["/data"]
+
+EXPOSE 8000
+
+# Container-level healthcheck (GET /health returns JSON; NOT /api/health).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS http://localhost:8000/health || exit 1
+
+# entrypoint: alembic upgrade head, then `python serve.py` :8000.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

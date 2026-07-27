@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Defense-in-depth Content-Security-Policy. The app is a same-origin SPA:
+      API (XHR/fetch) and WebSockets (/ws, /api/recorder) are served from the
+      app's own origin, so connect-src is 'self' plus ws:/wss: for the live
+      recorder/HMR sockets. Screenshots render as data:/blob: images, and
+      Tailwind/headless-ui inject inline styles, hence img-src data: blob: and
+      style-src 'unsafe-inline'. Scripts are bundled (no inline), so script-src
+      stays 'self'. Fonts are self-hosted and bundled — no CDN origin appears
+      here or in the response header.
+
+      This policy must stay IDENTICAL to the Content-Security-Policy header set
+      by coordinator/main.py's security_headers_middleware. A browser enforces
+      both at once and takes their INTERSECTION, so any drift silently applies
+      the stricter of the two and is painful to diagnose.
+
+      frame-ancestors is deliberately ABSENT: CSP3 says a browser ignores that
+      directive when it arrives in a <meta> element, so declaring it here would
+      only be documentation that reads like enforcement. Framing is denied by the
+      response header (frame-ancestors 'none') plus X-Frame-Options: DENY.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; frame-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
+    />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="writ — callable web-action workflows and automations for any site." />
+    <title>writ</title>
+    <script type="module" crossorigin src="/assets/index-Yjl-lF-2.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/vendor-d7DVr-Ys.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-QwZu5GaC.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

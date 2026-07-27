@@ -1,0 +1,449 @@
+/* Self-hosted Inter (bundled from @fontsource/inter) — no runtime request to
+   Google Fonts, so air-gapped installs render identically and nothing phones
+   home. Weights mirror the old Google Fonts import (400/500/600/700). */
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/inter/700.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Design tokens consumed by inline styles (utils/tint.ts) ──────────────────
+   The Tailwind color scale is hardcoded hex, but the ported master-detail lists
+   paint tinted icon-tiles via `tintStyle()`, which reads these as `rgb(var(--x))`
+   (space-separated R G B channels). Category tints = "color from content"; the
+   neutral tile falls back to --hover / --secondary. Light values (admin is
+   light-only) mirror frontend-desktop's theme.css :root. */
+:root {
+  --canvas: 239 239 241;     /* #EFEFF1 */
+  --surface: 255 255 255;    /* #FFFFFF */
+  --border: 214 215 220;     /* #D6D7DC */
+  --ink: 13 13 13;           /* #0D0D0D */
+  --hover: 234 234 236;      /* #EAEAEC */
+  --secondary: 86 86 86;     /* #565656 */
+  --tertiary: 105 105 108;   /* #69696C */
+  /* Brand accent + the emphasized rule, as RGB channels. These MIRROR
+     tailwind.config.js (the live source for the `.bg-*` / `.text-*` utilities);
+     they exist here because hand-written CSS — the sidebar hover minis below —
+     needs `rgb(var(--token))`. Keep the two in sync BY HAND. */
+  --accent: 226 58 20;        /* #E23A14 — graphical brand red */
+  --accent-strong: 180 48 15; /* #B4300F — accent that carries type (AA) */
+  --border-strong: 197 198 204; /* #C5C6CC — emphasized rule */
+  --tint-blue-a: 234 238 244;   --tint-blue-b: 224 230 239;   --tint-blue-fg: 82 102 134;
+  --tint-green-a: 233 240 234;  --tint-green-b: 222 232 224;  --tint-green-fg: 84 116 92;
+  --tint-amber-a: 244 239 228;  --tint-amber-b: 236 228 210;  --tint-amber-fg: 140 114 68;
+  --tint-violet-a: 238 236 244; --tint-violet-b: 228 225 238; --tint-violet-fg: 108 100 136;
+  --tint-teal-a: 231 240 238;   --tint-teal-b: 219 232 229;   --tint-teal-fg: 74 114 108;
+  --tint-rose-a: 244 236 237;   --tint-rose-b: 236 224 227;   --tint-rose-fg: 150 104 112;
+
+  /* Motion — the single source of truth for the app's "feel", mirrored from
+     frontend-desktop's theme.css so the two apps animate identically. `--ease-out`
+     is an expo-out (fast→soft settle, reads premium/decisive) and is the exact
+     curve the keyframes already use; naming it here also fixes <Expand> and other
+     primitives that reference `var(--ease-out)` (previously undefined → they fell
+     back to the browser default `ease`). Durations form a 3-step ramp. */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --dur-fast: 120ms; /* presses, tiny state flips */
+  --dur: 180ms;      /* the default for hover/color/border */
+  --dur-slow: 280ms; /* entrances, larger moves */
+
+  /* Premium chrome gradient — a whisper-soft vertical wash on the shell frame so
+     chrome surfaces read with dimension instead of one flat #EDEBE8 fill: a touch
+     brighter at the top, settling a few RGB steps darker toward the bottom. Kept
+     deliberately subtle (never a visible band), mirroring frontend-desktop. */
+  --chrome-grad: linear-gradient(180deg, #f3f1ee 0%, #edebe8 42%, #e8e6e2 100%);
+  /* Inverse — for topbars/headers: darker at the top edge, lightening down into
+     the content so the header reads as a subtle lifted lip. */
+  --chrome-grad-inv: linear-gradient(180deg, #e8e6e2 0%, #edebe8 58%, #f3f1ee 100%);
+}
+
+/* Every solid `bg-chrome` frame surface (sidebar, top bar, chrome-toned master
+   lists, modals) shares ONE viewport-anchored gradient sheet instead of a flat
+   fill, so the whole shell reads as a single crafted surface. `background-
+   attachment: fixed` anchors `--chrome-grad` to the viewport, so each surface
+   reveals only its slice and adjacent chrome regions align seamlessly; tiny
+   chrome chips show a near-flat slice. The solid `background-color` Tailwind
+   already sets stays under it as the fallback. The `bg-chrome/NN` alpha tints
+   compile to different class names and are intentionally left flat. */
+.bg-chrome {
+  background-image: var(--chrome-grad);
+  background-attachment: fixed;
+}
+
+/* Topbars/headers invert the wash and anchor it to their OWN box (scroll, not
+   fixed) so the gradient runs top→bottom across the ~48px bar: darker at the top
+   edge, lightening down to meet the content — a subtle lifted header lip. Applied
+   alongside `bg-chrome`; source order after `.bg-chrome` lets it win. */
+.chrome-topbar {
+  background-image: var(--chrome-grad-inv);
+  background-attachment: scroll;
+}
+
+@layer base {
+  html {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-canvas text-ink;
+    margin: 0;
+  }
+
+  ::selection {
+    @apply bg-ink/10 text-ink;
+  }
+}
+
+@layer utilities {
+  .text-display {
+    @apply text-2xl font-semibold tracking-tight;
+  }
+  .text-title {
+    @apply text-xl font-semibold;
+  }
+}
+
+@layer components {
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply bg-border rounded-full;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    @apply bg-secondary/40;
+  }
+}
+
+@layer base {
+  /* Baseline keyboard focus outline. Kept in @layer base so any element that opts
+     out with `outline-none` / `focus-visible:outline-none` (rounded tabs, pills,
+     segmented controls, the engine pill — which all supply their OWN rounded ring)
+     WINS over it. Otherwise this offset outline stacks on top and, because WebKit
+     renders an offset outline as a SQUARE, breaks the rounded shape. */
+  /* The ring reads brand red (tape DNA: the marketing site uses
+     `outline: 2px solid var(--accent)` for the same job). `accent`, not
+     `accent-strong` — an outline is a pure graphic, so the 3:1 non-text bar
+     applies. Full opacity: the old ink/30 was a faint gray keyboard users
+     routinely lost against the canvas. */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-accent;
+  }
+}
+
+/* Focus modality (set in main.tsx): while the user is on the pointer, drop the
+   focus outline. WebKit's WKWebView matches :focus-visible on click, which would
+   otherwise leave a stray offset outline on a list row/control after a mouse
+   select — including on the item that was previously keyboard-focused. Real
+   keyboard navigation removes `.using-mouse`, restoring the outline. */
+html.using-mouse :focus-visible {
+  outline: none;
+}
+/* Shelf rows + their inline controls also drop the box-shadow focus ring while on
+   the pointer (same WebKit quirk); the selected-slab styling already marks state
+   for mouse users, and keyboard nav restores the ring. */
+html.using-mouse [role="button"][aria-pressed]:focus-visible,
+html.using-mouse [role="button"][aria-pressed] button:focus-visible {
+  box-shadow: none;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Premium interaction baseline (mirrored from frontend-desktop). A high-end app
+   never *snaps* between states — color, background, border and shadow changes
+   ease in. Rather than bolting a `transition` utility onto every file that uses
+   `hover:`, set a sane default on interactive elements here. Anything that
+   declares its own Tailwind `transition-*` utility keeps it (class specificity
+   beats this element selector). The property list is explicit (no `all`, no
+   width/height) so LAYOUT never animates, and the reduced-motion block below
+   neutralizes it. This is the biggest single reason admin used to feel "snappy"
+   next to desktop — hover/select/active states now settle instead of blinking.
+   ───────────────────────────────────────────────────────────────────────── */
+a,
+button,
+summary,
+label[for],
+input,
+select,
+textarea,
+[role='button'],
+[role='tab'],
+[role='option'],
+[role='menuitem'],
+[role='switch'],
+[role='checkbox'] {
+  transition-property: color, background-color, border-color, outline-color,
+    box-shadow, opacity, transform, fill, stroke;
+  transition-duration: var(--dur);
+  transition-timing-function: var(--ease-out);
+}
+
+/* Reusable hover-lift for interactive cards/rows: a small rise + soft shadow on
+   hover, settling on the expo curve, with a slight press-down on click. Opt-in
+   via `class="hover-lift"`; pair with a `cursor-pointer` clickable surface. */
+.hover-lift {
+  transition-property: transform, box-shadow, border-color, background-color;
+  transition-duration: var(--dur);
+  transition-timing-function: var(--ease-out);
+}
+.hover-lift:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 10px 26px -10px rgba(0, 0, 0, 0.18),
+    0 2px 6px -3px rgba(0, 0, 0, 0.12);
+}
+.hover-lift:active {
+  transform: translateY(-1px);
+  transition-duration: var(--dur-fast);
+}
+
+/* ── Sidebar hover minis (markup: components/ui/NavMini.tsx) ─────────────────
+   Ported from the marketing site's mega-menu (`.fl-mini` in Nav.astro). The
+   site's mechanism is kept exactly: the strip is invisible at rest AND its
+   children sit at `animation-play-state: paused`, so nothing animates until the
+   row is actually hovered — a resting sidebar is completely still.
+
+   The site expands the row to reveal it (`max-height: 0 → 24px`); we do NOT.
+   The mega-menu is a transient overlay, but the sidebar is persistent, so
+   growing a row would push every item below it down on every hover. The strip
+   lives in the row's trailing space at a fixed 14px instead: same reveal, no
+   reflow. Keyboard focus reveals it too, so it isn't pointer-only.
+
+   Red is `--accent` (the true brand red): these are bars and dots, never type,
+   so the 3:1 non-text threshold applies rather than 4.5:1. */
+.navmini {
+  display: inline-flex;
+  align-items: center;
+  height: 14px;
+  opacity: 0;
+  transition: opacity 180ms var(--ease-out);
+}
+.navmini * {
+  animation-play-state: paused;
+}
+.nav-row:hover .navmini,
+.nav-row:focus-visible .navmini {
+  opacity: 1;
+}
+.nav-row:hover .navmini *,
+.nav-row:focus-visible .navmini * {
+  animation-play-state: running;
+}
+
+/* Workflows — N browser steps fold into a couple of direct HTTP calls. */
+.navmini-collapse { display: inline-flex; flex-direction: column; gap: 2px; width: 28px; }
+.navmini-collapse i { display: block; height: 3px; border-radius: 2px; }
+.navmini-collapse i.a { background: rgb(var(--border-strong)); width: 100%; animation: navmini-collapse 1.6s ease infinite; }
+.navmini-collapse i.b { background: rgb(var(--accent)); width: 0; animation: navmini-grow 1.6s ease infinite; }
+@keyframes navmini-collapse { 0%, 100% { width: 100%; } 55%, 92% { width: 32%; } }
+@keyframes navmini-grow { 0%, 100% { width: 0; } 55%, 92% { width: 32%; } }
+
+/* Monitors — a flat series, then one bar moves. */
+.navmini-spark { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; }
+.navmini-spark i { width: 3px; border-radius: 1px; background: rgb(var(--border-strong)); height: 55%; }
+.navmini-spark i.h { background: rgb(var(--accent)); height: 38%; animation: navmini-hit 1.4s ease infinite; }
+@keyframes navmini-hit { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+
+/* Automations — a trigger fires a chain, in order. */
+.navmini-pops { display: inline-flex; align-items: center; gap: 3px; }
+.navmini-pops i { width: 4px; height: 4px; border-radius: 50%; background: rgb(var(--accent)); opacity: 0; animation: navmini-pop 1.9s ease infinite; }
+.navmini-pops i:nth-child(2) { animation-delay: 0.22s; }
+.navmini-pops i:nth-child(3) { animation-delay: 0.44s; }
+@keyframes navmini-pop { 0% { opacity: 0; transform: translateY(3px); } 14%, 72% { opacity: 1; transform: none; } 100% { opacity: 0; } }
+
+/* Harvest — a shared frontier, agents pulling in parallel. */
+.navmini-frontier { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; }
+.navmini-frontier i { width: 3px; border-radius: 1px; background: rgb(var(--accent)); height: 30%; animation: navmini-pull 1.5s ease infinite; }
+.navmini-frontier i:nth-child(2) { animation-delay: 0.18s; }
+.navmini-frontier i:nth-child(3) { animation-delay: 0.36s; }
+@keyframes navmini-pull { 0%, 100% { height: 30%; opacity: 0.45; } 50% { height: 100%; opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .navmini { display: none; }
+}
+
+/* Stagger animation: items start visible, then get the enter class via JS */
+.stagger-item-enter {
+  animation: stagger-in 0.3s var(--ease-out) both;
+}
+
+@keyframes stagger-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Suspense fallback spinners: hold invisible for 150ms, then ease in. A lazy
+   chunk that resolves quickly never flashes a spinner frame — the content just
+   appears; only genuinely slow loads earn the loading state. */
+.fallback-in {
+  animation: fallback-in 200ms var(--ease-out) 150ms both;
+}
+@keyframes fallback-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Hover marquee for truncated names in tight master-list rows: pause at start,
+   scroll to reveal the trailing overflow, pause at the end, ping back. The
+   translate uses `100cqw` (container inline-size) minus the span's own `100%`
+   width, so a NAME THAT FITS produces a 0px translate and stays put — no visible
+   motion until content actually overflows. Requires `container-type: inline-size`
+   on the parent (set inline in the JSX). Reduced-motion below neutralizes this. */
+@keyframes marquee-hover {
+  0%, 12%   { transform: translateX(0); }
+  85%, 100% { transform: translateX(calc(100cqw - 100%)); }
+}
+
+/* ── Automation blocks ─────────────────────────────────────────────────────
+   Colored blocks paint from three family variables (`--bk-a` soft wash,
+   `--bk-b` icon-chip fill, `--bk-fg` icon/accent) set inline per block type via
+   blockStyle.ts → blockVars(), resolving to the category-tint tokens. */
+.block-card {
+  background-color: rgb(var(--bk-a));
+  border-color: rgb(var(--bk-fg) / 0.22);
+  transition:
+    box-shadow var(--dur, 180ms) var(--ease-out, ease),
+    transform var(--dur, 180ms) var(--ease-out, ease),
+    border-color var(--dur, 180ms) var(--ease-out, ease);
+}
+.block-card:hover { border-color: rgb(var(--bk-fg) / 0.42); }
+.block-icon { background-color: rgb(var(--bk-b)); color: rgb(var(--bk-fg)); }
+.block-badge { background-color: rgb(var(--bk-b)); color: rgb(var(--bk-fg)); }
+.block-connector { background-color: rgb(var(--bk-fg) / 0.32); }
+.block-in {
+  animation: block-in 0.28s var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) both;
+}
+@keyframes block-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+.block-menu-in {
+  animation: block-menu-in 0.16s var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) both;
+  transform-origin: left center;
+}
+@keyframes block-menu-in {
+  from { opacity: 0; transform: translateY(-2px) scale(0.97); }
+  to   { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Hide the OS-drawn number-input spin buttons — our <NumberInput> renders its
+   own tokenized +/- steppers instead. The native controls are not themable
+   (they never invert in dark mode and look especially awful on Chromium/Linux),
+   so we hide them wherever the `.ni-no-spin` class is present. */
+.ni-no-spin::-webkit-outer-spin-button,
+.ni-no-spin::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.ni-no-spin[type='number'] {
+  -moz-appearance: textfield;
+}
+
+/* Bulk-selection toolbar — slide + fade in when list items are selected. */
+@keyframes bulkbar-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.bulkbar-enter { animation: bulkbar-in var(--dur-slow, 280ms) var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)); }
+@media (prefers-reduced-motion: reduce) {
+  .bulkbar-enter { animation: none; }
+}
+@media (min-width: 1024px) {
+  .shelf-list-col {
+    position: relative;
+  }
+
+  .shelf-list-col::after {
+    content: '';
+    position: absolute;
+    z-index: 20;
+    top: 0;
+    right: -4px;
+    bottom: 0;
+    width: 8px;
+    cursor: col-resize;
+    border-left: 1px solid transparent;
+    transition: border-color 120ms ease;
+  }
+
+  .shelf-list-col:hover::after {
+    border-left-color: rgb(var(--border));
+  }
+}
+
+/* Dragnet crawl motion — a running progress bar's sheen sweep, and an
+   indeterminate glide while the crawl is still mapping (total not known yet).
+   Pure transforms, so they're palette-agnostic. */
+@keyframes dragnet-sheen {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+.dragnet-sheen { animation: dragnet-sheen 1.9s var(--ease-in-out, ease) infinite; }
+@keyframes dragnet-indeterminate {
+  0%   { transform: translateX(-120%); }
+  60%, 100% { transform: translateX(360%); }
+}
+.dragnet-indeterminate { animation: dragnet-indeterminate 1.5s var(--ease-in-out, ease) infinite; }
+
+/* ── Crawl detail: laid out against the PANE, not the window ──────────────
+   CrawlDetailView renders BOTH as the /crawls/:id page and as the /crawls shelf
+   detail pane, and that pane's width is the draggable splitter (the list column
+   runs 260–560px). The pane only exists at lg, where the viewport is ALWAYS
+   ≥640px — so every `sm:` inside it was permanently on, holding a side-by-side
+   header and a 3-up stat grid inside a column that can be ~460px wide. These
+   query the view root instead, so the detail reflows with the splitter. */
+.crawl-cq { container-type: inline-size; }
+
+/* Identity + actions. Below the threshold the buttons cannot sit beside the
+   name without squeezing it to nothing, so they take a row of their own. */
+.crawl-head { display: flex; flex-direction: column; gap: 0.75rem; }
+.crawl-head-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+@container (min-width: 640px) {
+  .crawl-head { flex-direction: row; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+  .crawl-head-actions { flex: 0 0 auto; justify-content: flex-end; }
+}
+
+/* Overview stats — 3-up only once a cell can hold its label unwrapped. */
+.crawl-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 1.5rem; row-gap: 1.1rem; }
+@container (min-width: 520px) { .crawl-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+
+/* ── Writ brand: the handoff construction ─────────────────────────────
+   Wordmark = Schibsted Grotesk 600 skeleton (subsetted, self-hosted via
+   data URI — CSP font-src 'self' data: compatible) + three proprietary
+   cuts: square i-dot, wedge-cut drawn t (SVG), and the Signal bar that
+   completes the t's missing right arm on the crossbar line.
+   Scale with font-size; all geometry is in em. Color via currentColor;
+   the bar reads var(--writ-signal) (#E23A14 on light, #FF4A24 on dark). */
+@font-face {
+  font-family: 'WritBrand';
+  src: url(data:font/woff2;base64,d09GMgABAAAAAARYAA8AAAAACLgAAAP9AAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGhYbgVYcgUoGYD9TVEFURABcEQgKgmiCOQsUAAE2AiQDJAQgBYU8ByAbcAfIBB7ou7JXNdUDhepQs7nLQugIQ27vEf6DGOnvALRP3K90czxqPIVX6Ue/rejrAGsPsKXrADw7Eb5V3CYXNxjP6IuOIgAvRlwiVNjTz4CbeQSQza3dBv5M0MyRAGoJ968YSEdLOZwlHb+scOFEchZuBBJaaFx/9Xa60dDA+sv6S3NrwhZqeMDaZe1fuTrIWX9Z/9Eo9vO4yak2FScVthLarSFbnECdwJsUjB2RVBq2vpPIkOER9cZLQWvY3KLT2DRoUHNlV8Nmc8BoMMxLjMEu9xx53cpV29TSK+DgoCHosJbJhzOUp8qAcplygVsHi6JKm1tKxwCZ1fCGTN/rlJxiDaX2y40A5rUy9aHuvQW0AwflS1S826z0M+/Udqyx0aCzX0EXqx2f/Pcjned6S5brcO24gyrX7gIWRjh1jE9l8wonxhPmY/QlzWBGOLhnPPwugRp37jbCJje+S0AyjF9D5RpFO/y3vdmOTpISJieK1XCtbd9ofWHdZF1jXW1d+f+nbE1AYZm0GFXCNSYfKzqo2K/JT8F0UVQgSVxYjOjz/b1Savz40V5x6riTTxnjGu1xeZwel4epe/d6Ln1zvvGe+5Jdu3YhfZfsEZpbeMQG6cGtznrY48F3iu9k96mx2XOS95RnTr1kjzh7r+fS3Zy1C54dQf+1imOh6kPV3Fj+Rzk3lH/3/eWrzeeHUzPffX7CvlcrlyZmbhuqvu30L3g0NJzY+vQ9L9yz//eKcR+98NFFc+bPuv8FOsYY5dL7y6PT/WWPtvmbnprtm/vUX2Mi5Zt8n7+1zPfLW+jqw55gsKc3uLOnd+fO3p6dQewLkIADpzUW7AuQgAOnNRb6AcIgXrMvJZyHnjjrKdw65RZ1QeNtO0ZV/+a04Vc4cuWYbnbnsYVP7P5/7f9iiua67BNkr5d5ZaaeEvl/7T+uKdqlwPUlDs4nLOdzY/6C7XRukN9QZt/FGvHpARjYMZ2LCA624bCY2yW83PDCSOpi0++JrbVVsEYsskr8YqrVRiu7dqt5q0Ylt1jtBEhY/BxPQBJi3AuY1cZoJlodeHGLTu0pGCRPliA5OjC1qzIkCTNElCz9SSN5MkTYQJQkcRKY8VyTAsNUslJ7apgwJZIUMBlmBf3NJBlWkKdEnJX00Uo3Q4RJkCTEMCZRIrRRIl+fP0ya5eLk61G60dw8OXRWs4KLq7SFVcSJYZJfNXeYLaxiBRXu2QDHsY2Kjc5pG1SJlg/2xxkhQ5BtsHc/XXeuDzeRp8DJwDCwvawTYBUBytAxSBDdse5NnS9Hf1ueQvgGyQZGUKDgFYf5/osQScZJzg6PEGIFYYQZnNYRs2H/4HLiorH4Z0eaF1kfcRsBAAA=) format('woff2');
+  font-weight: 600;
+  font-display: block;
+}
+.writ-wm { font-family: 'WritBrand', system-ui, sans-serif; font-weight: 600; letter-spacing: -0.032em; line-height: 1; white-space: nowrap; display: inline-block; }
+.writ-wm .wx-i { position: relative; display: inline-block; }
+.writ-wm .wx-dot { position: absolute; left: 50%; transform: translateX(-50%); top: 0.045em; width: 0.12em; height: 0.12em; background: currentColor; }
+.writ-wm .wx-t { display: inline-block; margin-left: 0.015em; height: 0.76em; width: 0.34em; vertical-align: baseline; }
+.writ-wm .wx-bar { display: inline-block; width: 0.15em; height: 0.53em; background: var(--writ-signal, #E23A14); margin-left: 0.12em; }
+:root { --writ-signal: #E23A14; } /* Signal on light grounds; the only brand accent */

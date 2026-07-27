@@ -1,0 +1,31 @@
+# pip-audit ignore-list — already-mitigated / unreachable CVEs.
+#
+# Format: one advisory id per line (GHSA-… or PyPI-… / CVE-…). Lines starting
+# with `#` and blank lines are ignored. Each entry passed to pip-audit via
+# `--ignore-vuln <id>` in the advisory `quality` job of .github/workflows/ci.yml.
+#
+# RULES:
+#   - Only add an id here with a one-line rationale ABOVE it (why it does not
+#     apply, or where it is already mitigated in requirements.txt).
+#   - Prefer BUMPING the pinned version in requirements.txt over ignoring.
+#   - Revisit on every dependency bump; stale ignores are a liability.
+#
+# requirements.txt already pins fixed versions for the known advisories called
+# out inline there (python-multipart ReDoS/DoS, python-jose JWT-bomb/alg-
+# confusion, cryptography multi-CVE). Those need NO ignore entry — the pin is
+# the fix. This file is intentionally EMPTY of active ignores at launch.
+#
+# `ecdsa` is a transitive dependency of python-jose[cryptography]. The advisory
+# is a Minerva-class timing side-channel in ECDSA signing/verification, and it
+# has NO fixed version — the maintainers state that side-channel resistance is
+# out of scope for the pure-Python implementation, so there is nothing to bump
+# to. It is unreachable here: the coordinator signs and verifies exclusively
+# with HS256 (security/jwt.py pins JWT_ALGORITHM = "HS256" and passes
+# algorithms=["HS256"] on every decode), so no ECDSA code path is entered. The
+# real remediation is migrating off python-jose to PyJWT, which removes the
+# dependency entirely; until then this is a documented, verified no-op.
+PYSEC-2026-1325
+
+# Example (DO NOT uncomment without a real, current justification):
+#   # transitive-only, not reachable from our import graph; tracked in #1234
+#   GHSA-xxxx-xxxx-xxxx

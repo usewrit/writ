@@ -1,0 +1,29 @@
+# Backend dev / CI-quality tooling (NOT shipped in the runtime image).
+#
+# Installed by the `tests`, `lint` and `quality` jobs in
+# .github/workflows/ci.yml. Kept SEPARATE from requirements.txt so the
+# production Docker images stay lean and a CVE in a linter never lands in prod.
+#
+# Runtime deps (fastapi, sqlalchemy, …) live in requirements.txt — install
+# BOTH in CI when a job needs the app importable (mypy/bandit import-follow)
+# or runs the test suite. Versions are pinned for reproducible CI runs;
+# bump deliberately.
+
+# Test harness (moved out of requirements.txt so the runtime image ships
+# without pytest).
+pytest>=8.0
+pytest-asyncio>=0.23
+
+# Lint + format (fast, replaces flake8/isort/pyupgrade).
+ruff==0.6.9
+
+# Static type checking. Started non-strict / targeted (see mypy.ini) so the
+# job is green today and can be ratcheted toward strict per-module over time.
+mypy==1.11.2
+
+# Security static analysis (AST-based). Fails the build on MEDIUM+ findings.
+bandit==1.7.10
+
+# Dependency CVE auditing against requirements.txt. Honoured ignore-list lives
+# in pip-audit-ignore.txt (one GHSA/CVE id per line, with an inline rationale).
+pip-audit==2.7.3

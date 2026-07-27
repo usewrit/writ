@@ -1,0 +1,52 @@
+# The document + OCR extraction service.
+#
+# Kept as its own image on purpose. Everything heavy in the whole deployment
+# lives here — PDFium, ONNX Runtime, OpenCV, the OCR model weights — which is
+# why the coordinator image can stay small and why the agents stay a single
+# static binary. Nothing else needs these libraries, so nothing else pays for
+# them.
+#
+# BUILD CONTEXT: the selfhost/ directory (parent of docker/), so this file can
+# reach doc-extract/. docker-compose.yml sets that for you.
+
+#   python:3.12-slim (3.12.13-slim-trixie) as of 2026-07-14 — same digest as the
+#   coordinator image, so the two share every base layer on disk.
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DOC_EXTRACT_PORT=8092
+
+# libgl1 + libglib2.0-0 are OpenCV's runtime shared libraries (RapidOCR pulls
+# opencv-python-headless). curl serves the HEALTHCHECK below.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY doc-extract/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY doc-extract/ ./
+
+# Same rule as the coordinator image: the application code is readable and
+# traversable by everyone and writable by nobody the app runs as, so a
+# file-write primitive cannot turn into persistent code execution. `COPY`
+# preserves source modes, and developer checkouts routinely have 0700 dirs.
+RUN chmod -R a+rX /app
+
+RUN useradd -m -u 10002 -s /usr/sbin/nologin docx
+
+USER docx
+
+EXPOSE 8092
+
+# The OCR weights load lazily on the first request, but import alone is slow on
+# a cold container — hence the long start period.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+    CMD curl -fsS http://localhost:8092/health || exit 1
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8092"]

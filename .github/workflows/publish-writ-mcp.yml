@@ -1,0 +1,98 @@
+name: Publish writ-mcp
+
+# Releases the npm connector. Triggered by a tag so the published tarball is
+# always tied to an immutable commit — never to whatever `main` happened to be.
+#
+#   git tag writ-mcp-v1.0.0 && git push origin writ-mcp-v1.0.0
+#
+# The tag version MUST match connectors/writ-mcp/package.json; the job refuses to
+# publish otherwise, because a mismatch means the git tag and the npm version
+# point at different code and nobody can tell which one shipped.
+on:
+  push:
+    tags:
+      - "writ-mcp-v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Pack and verify, but do not publish"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      # Required for npm provenance: the job mints a short-lived OIDC token that
+      # cryptographically binds the tarball to this workflow, repo, and commit.
+      id-token: write
+    defaults:
+      run:
+        working-directory: connectors/writ-mcp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      # Provenance needs npm >= 9.5; trusted publishing (OIDC, no long-lived
+      # token) needs >= 11.5.1. Pin forward rather than trusting the runner's npm.
+      - name: Use a current npm
+        run: npm install -g npm@latest
+
+      - name: Check the tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF#refs/tags/writ-mcp-v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag writ-mcp-v$tag does not match package.json version $pkg"
+            exit 1
+          fi
+          echo "publishing writ-mcp@$pkg"
+
+      # Belt and braces: prepublishOnly runs these too, but a failure here is a
+      # clearer signal than one buried in npm publish output.
+      - name: Test
+        run: npm test
+
+      - name: Verify the publish tarball
+        run: |
+          npm pack --dry-run --json > /tmp/pack.json
+          node -e '
+            const p = require("/tmp/pack.json")[0];
+            const files = p.files.map(f => f.path).sort();
+            const want = ["CHANGELOG.md", "LICENSE", "README.md", "index.js", "package.json"];
+            const missing = want.filter(f => !files.includes(f));
+            const extra = files.filter(f => !want.includes(f));
+            if (missing.length) { console.error("missing from tarball:", missing); process.exit(1); }
+            if (extra.length) { console.error("unexpected in tarball:", extra); process.exit(1); }
+            console.log("tarball ok:", files.join(", "));
+          '
+
+      # Publishes with provenance (package.json sets publishConfig.provenance).
+      #
+      # AUTH — either works, no workflow change needed:
+      #   • Trusted publishing (preferred): configure this repo + workflow as a
+      #     trusted publisher on npmjs.com. npm then exchanges the OIDC token
+      #     above for a short-lived credential and NPM_TOKEN can be deleted.
+      #   • NPM_TOKEN: a granular access token scoped to writ-mcp, stored as a
+      #     secret in the `npm-publish` environment so a release needs whatever
+      #     approvals that environment requires.
+      - name: Publish
+        if: github.event_name == 'push' || inputs.dry_run == false
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Dry run only
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run == true
+        run: echo "dry_run=true — tarball verified, nothing published."

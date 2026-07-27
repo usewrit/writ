@@ -1,0 +1,14 @@
+# Routes the "New issue" chooser. `blank_issues_enabled: false` forces every
+# report through one of the two templates (or one of the links below), which is
+# what keeps setup questions and security reports out of the bug tracker.
+blank_issues_enabled: false
+contact_links:
+  - name: 📚 Documentation
+    url: https://github.com/usewrit/writ#readme
+    about: Setup, workflows, the API, and MCP — read this first; most questions are answered here.
+  - name: 💬 Questions & setup help
+    url: https://github.com/usewrit/writ/discussions
+    about: Ask in Discussions rather than opening an issue — installs, configuration, and show & tell.
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/usewrit/writ/security/advisories/new
+    about: Report privately through GitHub Security Advisories. Never open a public issue for a vulnerability.

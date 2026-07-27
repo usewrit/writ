@@ -1,0 +1,237 @@
+import client from './client';
+
+// Fleet — the coordinator's view of its connected agent fleet. Backs the
+// /fleet page. Served by coordinator/routers/fleet.py (prefix "/api/fleet").
+
+export interface FleetAgentCapacity {
+  max_sessions: number | null;
+  active_sessions: number | null;
+  free_slots: number | null;
+}
+
+export interface FleetAgent {
+  id: string;
+  name: string;
+  platform: string;
+  online: boolean;
+  last_seen: string | null;
+  capacity: FleetAgentCapacity;
+  status: string | null;
+  is_trusted: boolean;
+  /** When this agent's durable row was first created (ISO). */
+  created_at?: string | null;
+  /**
+   * Whether this agent can host local workflows (advertises the
+   * `local_workflows=1` connect param, captured into the coordinator's
+   * `_agent_meta`). Added by the P1/coordinator layer; may be undefined until
+   * that lands, so treat an ABSENT value as capable (see `local_capable !== false`
+   * filtering in SendToAgentModal).
+   */
+  local_capable?: boolean;
+}
+
+export interface FleetAgentsResponse {
+  agents: FleetAgent[];
+  online_count: number;
+  total: number;
+}
+
+export interface AgentInstallCommands {
+  /** macOS/Linux: resolve the release asset for this platform, download, chmod. */
+  unix: string;
+  /** Windows PowerShell equivalent. */
+  windows: string;
+  /** git clone + cargo build, for platforms with no published asset. */
+  source: string;
+}
+
+export interface FleetConnectInfo {
+  ws_url: string | null;
+  public_url: string | null;
+  github_url: string;
+  /** `owner/name` of the agent source repo. */
+  repo: string;
+  repo_url: string;
+  install_commands: AgentInstallCommands;
+  docker_image: string;
+  saas_url: string | null;
+}
+
+/** GET/POST /api/fleet/local-agent — an agent run on the coordinator's own host. */
+export interface LocalAgentStatus {
+  /** False when this host can't run one (unknown platform, containerised). */
+  supported: boolean;
+  blockers: string[];
+  target: string | null;
+  platform: string;
+  running: boolean;
+  pid: number | null;
+  agent_name: string | null;
+  binary_installed: boolean;
+  installed_version: string | null;
+  log_path: string;
+  /** Present on POST: whether an already-running agent was adopted. */
+  adopted?: boolean;
+  status?: 'started' | 'already_running';
+  /** True only when the release published a checksum that we verified. */
+  checksum_verified?: boolean;
+}
+
+export interface FleetTokenMeta {
+  token_id: string;
+  name: string;
+  agent_id: string;
+  token_prefix: string;
+  created_at: string;
+  revoked_at: string | null;
+}
+
+export interface FleetCapacityPreset {
+  interval_ms: number;
+  agents_required: number;
+  feasible: boolean;
+}
+
+/** Advisory of how the connected-agent count bounds the min check interval. */
+export interface FleetCapacity {
+  agents_online: number;
+  per_agent_floor_ms: number;
+  /** Fastest interval a single monitor can effectively run at (= 60000/agents). */
+  min_interval_ms: number;
+  active_monitors: number;
+  under_provisioned_monitors: number;
+  presets: FleetCapacityPreset[];
+  fleet_stats: Record<string, unknown> | null;
+  explanation: string;
+}
+
+export interface MintedFleetToken {
+  token_id: string;
+  name: string;
+  agent_id: string;
+  /** Raw token — returned ONCE at mint time. */
+  token: string;
+  channel_key: string | null;
+  /**
+   * Runnable invocation for the stock `writ-agent` binary. Multi-line: the URL
+   * is a CONFIG value, not an env var, so it is set first and the token is then
+   * passed in the environment —
+   *   ./writ-agent config set saas.url <coordinator>
+   *   WRIT_SERVICE_TOKEN=<raw> ./writ-agent start --headless
+   * (There is no `--token` flag and the binary does not read WRIT_COORDINATOR_URL.)
+   */
+  connect_command: string;
+  /** Docker variant using the published image's WRIT_SERVICE_TOKEN env. */
+  docker_command: string;
+  /** How to GET the binary in the first place — the connect command assumes it. */
+  install_commands: AgentInstallCommands;
+  repo_url: string;
+  created_at: string;
+}
+
+// ---- Send-to-agent (deploy) ------------------------------------------------
+// A workflow / secret / persona is sealed under the target agent's channel key
+// and pushed over the persistent WS. `mode` decides whether the coordinator
+// keeps its copy (mirror) or transfers it fully (move).
+
+export interface DeployRequest {
+  kind: 'workflow' | 'secret' | 'persona';
+  id: number;
+  /** workflow only: bundle its referenced secrets + persona. */
+  include_deps?: boolean;
+  mode?: 'mirror' | 'move';
+}
+
+export interface DeployResponse {
+  local_id: string;
+  mode: 'mirror' | 'move';
+}
+
+/** Lightweight preview of what a workflow deploy would carry along. */
+export interface WorkflowDepsPreview {
+  secrets: string[];
+  persona: string | null;
+}
+
+export const fleetApi = {
+  async listAgents(): Promise<FleetAgentsResponse> {
+    const r = await client.get('/fleet/agents');
+    return r.data;
+  },
+  /**
+   * Send a workflow/secret/persona to a connected fleet agent. Backed by the
+   * coordinator's `POST /api/fleet/agents/{agent_id}/deploy` (P1 layer) — will
+   * 404 until that endpoint lands.
+   */
+  async deploy(agentId: string, body: DeployRequest): Promise<DeployResponse> {
+    const r = await client.post(`/fleet/agents/${agentId}/deploy`, body);
+    return r.data;
+  },
+  /**
+   * Preview a workflow's referenced secrets + persona. Backed by the
+   * lightweight `GET /api/automation/workflows/{id}/deps` (P1 layer). Callers
+   * should try/catch so a 404 (before P1 lands) degrades to "no preview".
+   */
+  async workflowDeps(workflowId: number): Promise<WorkflowDepsPreview> {
+    const r = await client.get(`/automation/workflows/${workflowId}/deps`);
+    // Normalize to the promised shape — some backends omit `secrets` (or send it
+    // null) when a workflow references none, and the raw body would then break
+    // every `secrets.length`/`.map` consumer. Make the contract honest here.
+    return {
+      secrets: Array.isArray(r.data?.secrets) ? r.data.secrets : [],
+      persona: r.data?.persona ?? null,
+    };
+  },
+  async connectInfo(): Promise<FleetConnectInfo> {
+    const r = await client.get('/fleet/connect-info');
+    return r.data;
+  },
+  async listTokens(): Promise<FleetTokenMeta[]> {
+    const r = await client.get('/fleet/tokens');
+    return r.data?.tokens ?? [];
+  },
+  async mintToken(name: string): Promise<MintedFleetToken> {
+    const r = await client.post('/fleet/tokens', { name });
+    return r.data;
+  },
+  /** Can this coordinator run an agent on its own host, and is one running? */
+  async localAgentStatus(): Promise<LocalAgentStatus> {
+    const r = await client.get('/fleet/local-agent');
+    return r.data;
+  },
+  /**
+   * Mint a token, download the agent for this host, configure and launch it.
+   * The token never reaches the browser — nothing has to be pasted anywhere.
+   */
+  async startLocalAgent(name: string): Promise<LocalAgentStatus> {
+    const r = await client.post('/fleet/local-agent', { name });
+    return r.data;
+  },
+  async stopLocalAgent(): Promise<{ stopped: boolean }> {
+    const r = await client.delete('/fleet/local-agent');
+    return r.data;
+  },
+  async capacity(): Promise<FleetCapacity> {
+    const r = await client.get('/fleet/capacity');
+    return r.data;
+  },
+  async revokeToken(tokenId: string): Promise<void> {
+    await client.delete(`/fleet/tokens/${tokenId}`);
+  },
+  /**
+   * Remove a single agent from the fleet. Durable: revokes any bound fleet
+   * token, evicts the live socket, drops Redis state, and deletes the DB row.
+   * Backed by `DELETE /api/fleet/agents/{agent_id}`.
+   */
+  async removeAgent(agentId: string): Promise<void> {
+    await client.delete(`/fleet/agents/${agentId}`);
+  },
+  /**
+   * Bulk-remove agents in one call (the ids the operator selected, or every
+   * offline machine). Backed by `POST /api/fleet/agents/prune`.
+   */
+  async pruneAgents(agentIds: string[]): Promise<{ removed: number; requested: number }> {
+    const r = await client.post('/fleet/agents/prune', { agent_ids: agentIds });
+    return r.data;
+  },
+};

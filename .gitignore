@@ -1,0 +1,94 @@
+# ---------------------------------------------------------------------------
+# This file is the TEMPLATE for the published repository's root .gitignore.
+# scripts/export.sh copies it to dist/.gitignore, so it ships as the top-level
+# .gitignore that operators and contributors actually get when they clone.
+#
+# It is NOT this monorepo's .gitignore (that one lives at .gitignore and also
+# ignores dist/ itself). Keep the two in sync when you add a new secret path.
+#
+# The critical entries are the secret ones. `scripts/gen-env.sh` writes a live
+# `.env` at the repository root and `run-local.sh` writes `.local/env.sh` with
+# every signing key in it — without this file, the very first thing a new
+# operator does produces a commit-able secret.
+# ---------------------------------------------------------------------------
+
+# --- Secrets. Only the *.example templates are committed. -------------------
+.env
+.env.local
+.env.*.local
+**/env.sh
+/.local/
+
+# --- Local runtime state ----------------------------------------------------
+# The SQLite database, uploaded/extracted file bytes, and anything else the
+# coordinator writes while running.
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+/data/
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+sdist/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+ENV/
+
+# Test + lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- Frontend ---------------------------------------------------------------
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# --- Credentials / key material ---------------------------------------------
+*.pem
+*.key
+*.p8
+*.p12
+
+# --- Logs -------------------------------------------------------------------
+*.log
+logs/
+recorder.log*
+
+# --- Editor / OS cruft ------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- Temp -------------------------------------------------------------------
+tmp/
+temp/
+*.tmp

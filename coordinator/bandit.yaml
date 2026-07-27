@@ -1,0 +1,28 @@
+# Bandit configuration for the Writ coordinator.
+#
+# Run by the `quality` job in .github/workflows/ci.yml:
+#   bandit -q -c bandit.yaml -r . -x ./tests,./alembic/versions,./worker-templates -ll
+#
+# The `-ll` flag already limits reporting to MEDIUM+ severity. This file exists
+# to skip ONE check that is structurally a false positive for a containerised
+# server, so that the job can be a hard gate rather than a permanently-noisy
+# advisory one. Everything else stays on.
+#
+# Do not add skips here to silence a finding you have not understood. If a
+# specific line is a justified exception, prefer an inline `# nosec BXXX -
+# <reason>` at that line so the reason lives next to the code.
+
+skips:
+  # B104 hardcoded_bind_all_interfaces.
+  #
+  # A server in a container MUST bind 0.0.0.0 to be reachable through the port
+  # mapping at all — binding loopback inside the container would make it
+  # unreachable from the host. The actual exposure decision is made where the
+  # port is published, and docker-compose.yml deliberately publishes to
+  # "127.0.0.1:8000:8000" (loopback on the host), so the default deployment is
+  # not network-exposed.
+  #
+  # The other B104 hits are not binds at all — they are the string "0.0.0.0"
+  # appearing in SSRF DENYLISTS (security/validation.py, services/url_policy.py),
+  # i.e. code that blocks that address. Reporting those inverts their meaning.
+  - B104

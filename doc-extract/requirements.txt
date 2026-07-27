@@ -1,0 +1,40 @@
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.0.0
+
+# --- Direct text-layer extraction (exact, free — the primary path) ---
+# PERMISSIVE ONLY. PyMuPDF/pymupdf4llm were removed on purpose: they are AGPL-3.0
+# (dual licensed by Artifex), and AGPL section 13 obliges a NETWORK service to
+# offer the corresponding source of the combined work — a live constraint for a
+# hosted deployment. The replacements were benchmarked at parity on text, tables
+# and the rasterize-to-OCR path scanned documents depend on.
+pypdfium2>=4.30.0         # BSD-3-Clause/Apache-2.0 (PDFium): rasterize pages for OCR
+pdfplumber>=0.11.0        # MIT (over pdfminer.six, MIT): text layer, chars, tables
+pypdf>=4.2.0              # BSD-3-Clause: /StructTreeRoot — a tagged PDF's real headings
+python-docx>=1.1.0        # .docx
+openpyxl>=3.1.0           # .xlsx
+python-pptx>=0.6.23       # .pptx
+
+# --- HTML → markdown (a .pdf/doc URL that actually served HTML: soft-404s,
+# login walls, WAF interstitials). Same layered pipeline as the crawl agents;
+# each layer degrades gracefully if its dep is absent. ---
+trafilatura>=1.8.0        # boilerplate-stripped main content + metadata + tables
+readability-lxml>=0.8.1   # main-content isolation (fallback engine)
+markdownify>=0.11.6       # HTML → markdown
+beautifulsoup4>=4.12.0    # chrome strip + text/meta helpers
+lxml>=4.9.0               # parser backend for the above
+
+# --- OCR (last resort: pixels with no text layer) ---
+# RapidOCR = ONNX-Runtime PP-OCRv5 models: CPU-only, offline, no torch/paddle.
+# Ships model weights in the wheel → works air-gapped in OSS self-host.
+rapidocr-onnxruntime>=1.3.0
+onnxruntime>=1.17.0
+opencv-python-headless>=4.8.0
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# --- Optional: rich tier (DOC_EXTRACT_TIER=rich) ---
+# docling>=2.0.0          # DocLayNet layout + TableFormer tables (pulls torch)
+#
+# Deliberately absent: any error-reporting / analytics client. This service
+# makes no outbound network calls at all — see README.md.

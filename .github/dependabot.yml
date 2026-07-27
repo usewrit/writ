@@ -1,0 +1,49 @@
+# Dependency updates. Weekly and grouped, so the board is a handful of reviewable
+# PRs rather than one per package — with security updates ungrouped so they land
+# on their own and can be merged immediately.
+version: 2
+
+updates:
+  - package-ecosystem: pip
+    directory: /coordinator
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
+    labels: [dependencies, python]
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+    labels: [dependencies, javascript]
+
+  - package-ecosystem: npm
+    directory: /connectors/writ-mcp
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    labels: [dependencies, javascript]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies, ci]
+
+  # The Dockerfile pins both base images by DIGEST (node:20-slim,
+  # python:3.12-slim), so builds are reproducible and a re-pushed tag cannot
+  # change what ships. Dependabot understands digest pins and opens a PR with the
+  # new digest when the upstream tag moves — which is the point: the bump becomes
+  # a reviewable change instead of something that happens silently on next build.
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly
+    labels: [dependencies, docker]

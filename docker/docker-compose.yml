@@ -1,0 +1,158 @@
+# Self-hosted Writ — the coordinator plus the document/OCR extractor.
+# No external database, cache, or object store.
+#
+# The coordinator stores everything in a single SQLite file and uses an
+# in-process fakeredis (no Redis server). Browser work is dispatched to your
+# fleet of `writ-agent` processes, so this image runs no browsers.
+#
+# `doc-extract` is what gives a crawl coverage of PDFs, office documents and
+# scanned pages. Your AGENTS call it directly (the coordinator never does), so
+# it is published on the host rather than kept on the compose network — see the
+# comment on its `ports` below. To run without it:
+#
+#   docker compose -f docker/docker-compose.yml up -d coordinator
+#
+# and leave DOC_EXTRACT_URL unset on your agents; crawls then skip every
+# non-HTML resource they reach, which is a no-op, not an error.
+#
+# Usage (from the repository root):
+#   ./scripts/gen-env.sh         # creates .env with fresh secrets
+#                                # (or: cp .env.example .env and fill them in)
+#   docker compose -f docker/docker-compose.yml --env-file .env up -d --build
+#   open http://localhost:8000
+#
+# The build context is the selfhost/ root (..), so the Dockerfile can reach
+# both frontend/ (SPA build) and coordinator/ (Python app). Every value below
+# is supplied through your .env (loaded both as `env_file` for the container
+# and, via --env-file, for ${...} interpolation).
+
+services:
+  coordinator:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.coordinator
+    image: writ-coordinator:latest
+    ports:
+      # Loopback by default — put a TLS reverse proxy in front for network
+      # access (see docs/DEPLOYMENT.md). Change to "8000:8000" only on a
+      # trusted network.
+      - "127.0.0.1:8000:8000"
+    # Pass every variable from .env straight into the container. This is the
+    # authoritative source for the secrets, admin bootstrap, and agent hints
+    # (WRIT_JWT_SECRET, JWT_SECRET_KEY, API_SECRET_KEY, HMAC_SECRET_KEY,
+    #  SECRET_ENCRYPTION_KEY, RECORDER_AUTH_SECRET, WRIT_PUBLIC_URL,
+    #  WRIT_ADMIN_EMAIL, WRIT_ADMIN_PASSWORD, WRIT_ADMIN_NAME,
+    #  WRIT_AGENT_RELEASES_URL, WRIT_AGENT_DOCKER_IMAGE, ENVIRONMENT, ...).
+    env_file:
+      # Your filled-in secrets/config. required:false so `docker compose config`
+      # works on a fresh checkout before you create it — but you MUST create it
+      # (cp .env.example .env) before `up`, or the app has no secrets.
+      - path: ../.env
+        required: false
+    environment:
+      # `environment` overrides `env_file` on conflicts, so it holds only the
+      # two things we must guarantee regardless of the .env:
+      #
+      # 1. The JWT signing key. The app reads JWT_SECRET_KEY (falling back to
+      #    API_SECRET_KEY). WRIT_JWT_SECRET is the operator-facing name, so map
+      #    it onto JWT_SECRET_KEY when JWT_SECRET_KEY itself is not set.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-${WRIT_JWT_SECRET:-}}
+      # 2. Storage paths pinned to the persistent volume (never overridable via
+      #    .env — the volume mount is fixed at /data below).
+      WRIT_DB_PATH: /data/writ.db
+      WRIT_FILES_DIR: /data/files
+      WRIT_UI_DIR: /app/ui
+      # 3. Where the document/OCR extractor is, AS YOUR AGENTS SEE IT. The
+      #    coordinator never calls it; it only passes this to an agent when the
+      #    agent connects, which is what makes PDF/OCR work with no extra setup.
+      #    The default matches the loopback port the doc-extract service below
+      #    publishes, which is right for an agent on this same host. Agents
+      #    elsewhere need a routable address — set DOC_EXTRACT_URL in .env.
+      DOC_EXTRACT_URL: ${DOC_EXTRACT_URL:-http://127.0.0.1:8092}
+      DOC_EXTRACT_SECRET: ${DOC_EXTRACT_SECRET:-}
+    depends_on:
+      # Start order only — the coordinator does not call doc-extract and stays
+      # perfectly healthy without it, so this is deliberately not a
+      # service_healthy condition that would gate the whole app on OCR imports.
+      - doc-extract
+    volumes:
+      - writ-data:/data
+    # Defence in depth on top of the image's non-root USER. The container needs
+    # exactly one writable location — the /data volume — so everything else is
+    # mounted read-only. That means an attacker who reaches a file-write
+    # primitive cannot modify the application code and cannot persist across a
+    # restart. /tmp is a tmpfs because Python, httpx and SQLite all want a
+    # scratch directory; it is noexec so nothing dropped there can be run.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    # The app never needs to gain a privilege it was not started with.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  # Document + OCR extraction (pdfplumber + PDFium + RapidOCR). CPU-only and fully
+  # offline — the OCR weights ship inside the wheel — so it works air-gapped.
+  #
+  # Without it a crawl still works, but it drops every non-HTML resource it
+  # reaches: PDFs, Word/Excel/PowerPoint files, images, scanned pages. Plain
+  # HTML is unaffected.
+  doc-extract:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.doc-extract
+    image: writ-doc-extract:latest
+    ports:
+      # Published on loopback, NOT left on the compose network, because the
+      # callers are your AGENTS — the coordinator never calls this service.
+      # An agent on this same host reaches it at http://127.0.0.1:8092.
+      #
+      # Agents on OTHER machines need a route of their own: put it behind the
+      # same TLS reverse proxy as the coordinator (a separate hostname, or a
+      # path you forward), and set DOC_EXTRACT_URL on each agent to that
+      # address. Never publish it on a public interface unprotected — the
+      # shared secret is the only thing in front of it.
+      - "127.0.0.1:8092:8092"
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      # Must match the DOC_EXTRACT_SECRET you set on each agent. Generated by
+      # scripts/gen-env.sh; with ENVIRONMENT=production the service refuses to
+      # boot if it is empty or a well-known default.
+      DOC_EXTRACT_SECRET: ${DOC_EXTRACT_SECRET:-}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      # auto = read the text layer when there is one, OCR only true scans and
+      # images. Direct extraction is exact and free, so this is the right default.
+      DOC_EXTRACT_OCR_MODE: ${DOC_EXTRACT_OCR_MODE:-auto}
+      # light = pdfplumber/PDFium + the office parsers + RapidOCR (ONNX, CPU, offline).
+      # rich additionally tries docling for complex tables and pulls torch.
+      DOC_EXTRACT_TIER: ${DOC_EXTRACT_TIER:-light}
+    # This service holds no state: it takes bytes in a request and returns JSON.
+    # Nothing it does needs a writable filesystem beyond scratch space.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8092/health"]
+      interval: 30s
+      timeout: 10s
+      # Importing onnxruntime + opencv is slow on a cold container.
+      start_period: 90s
+      retries: 3
+
+volumes:
+  writ-data:

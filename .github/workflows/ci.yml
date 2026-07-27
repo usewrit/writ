@@ -1,0 +1,306 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A PR that opens while an earlier run is still going supersedes it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (compile + migrate)
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: development
+      ALLOW_INSECURE_DEV: "true"
+      JWT_SECRET_KEY: ci-scratch-jwt-secret
+      API_SECRET_KEY: ci-scratch-api-secret
+      HMAC_SECRET_KEY: ci-scratch-hmac-secret
+      RECORDER_AUTH_SECRET: ci-scratch-recorder-secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: coordinator/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r coordinator/requirements.txt
+
+      - name: Byte-compile every module
+        run: python -m compileall -q coordinator
+
+      - name: Generate a scratch Fernet key
+        run: echo "SECRET_ENCRYPTION_KEY=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> "$GITHUB_ENV"
+
+      - name: Apply migrations to a fresh SQLite database
+        working-directory: coordinator
+        env:
+          WRIT_DB_PATH: ${{ runner.temp }}/ci-writ.db
+        run: python -m alembic upgrade head
+
+  tests:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: development
+      ALLOW_INSECURE_DEV: "true"
+      JWT_SECRET_KEY: ci-scratch-jwt-secret
+      API_SECRET_KEY: ci-scratch-api-secret
+      HMAC_SECRET_KEY: ci-scratch-hmac-secret
+      RECORDER_AUTH_SECRET: ci-scratch-recorder-secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            coordinator/requirements.txt
+            coordinator/requirements-dev.txt
+
+      # Both files: the suite imports the app, so the runtime deps must be here
+      # too (see the header of requirements-dev.txt).
+      - name: Install runtime + dev dependencies
+        run: pip install -r coordinator/requirements.txt -r coordinator/requirements-dev.txt
+
+      - name: Generate a scratch Fernet key
+        run: echo "SECRET_ENCRYPTION_KEY=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> "$GITHUB_ENV"
+
+      # No DATABASE_URL is exported on purpose: the fixtures in tests/conftest.py
+      # then bind to a throwaway SQLite file, which is the engine this
+      # coordinator actually ships. That is also what a contributor gets on a
+      # bare checkout, so CI certifies the same thing they run.
+      #
+      # It used to demand Postgres and skip otherwise, which meant the shipped
+      # database had zero DB-backed coverage anywhere — 17 tests that never ran.
+      # Setting DATABASE_URL to a postgresql:// URL still switches the suite over
+      # for anyone running the coordinator against one.
+      #
+      # -ra so any skip is reported rather than silently absorbed.
+      - name: Run the test suite
+        working-directory: coordinator
+        run: python -m pytest -q -ra
+
+  lint:
+    name: Backend (ruff — correctness rules)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: coordinator/requirements-dev.txt
+
+      - name: Install ruff
+        run: pip install -r coordinator/requirements-dev.txt
+
+      # This gate is the CORRECTNESS subset, not the full ruff.toml ruleset:
+      # undefined names (F82), unreachable/always-true asserts (F7, B002, B012),
+      # mutable default args (B006), and any syntax error (E9). Those are bugs,
+      # and the tree is clean of them — so this job is a hard gate.
+      #
+      # `ruff check .` with the repo's full ruff.toml still reports ~3.4k
+      # findings, almost entirely typing modernization (UP006/UP007 → PEP 604
+      # unions) and import ordering (I001). Those are being ratcheted in rather
+      # than landed as one mechanical sweep; when a rule group reaches zero,
+      # move it from ruff.toml's aspiration into the --select list below.
+      - name: Ruff (correctness)
+        working-directory: coordinator
+        run: ruff check --output-format concise --select E9,F6,F7,F81,F82,B002,B006,B012 .
+
+  quality:
+    name: Quality + SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            coordinator/requirements.txt
+            coordinator/requirements-dev.txt
+
+      - name: Install runtime + dev dependencies
+        run: pip install -r coordinator/requirements.txt -r coordinator/requirements-dev.txt
+
+      # ADVISORY, and the only step here that is. bandit and pip-audit below are
+      # hard gates because the tree is verifiably clean for both. mypy is not:
+      # its first real run reports 541 errors across 89 of 220 files, almost all
+      # of them consequences of the codebase being largely unannotated (Any
+      # flowing into typed signatures) rather than defects.
+      #
+      # Publishing a permanently-red required check trains everyone to ignore
+      # the board, which costs more than it buys. The ratchet is per-module:
+      # annotate a package, add a `[mypy-<pkg>.*] disallow_untyped_defs = True`
+      # section in mypy.ini, and when the count reaches zero drop this line.
+      - name: mypy (advisory)
+        continue-on-error: true
+        working-directory: coordinator
+        run: mypy --config-file mypy.ini .
+
+      # MEDIUM+ severity AND MEDIUM+ confidence (-ll -ii). The confidence floor
+      # matters: bandit's LOW-confidence B608 heuristic flags any f-string that
+      # merely contains a SQL-ish word, which on this tree means log lines. The
+      # tree is genuinely clean at this threshold, so it is a hard gate.
+      # Justified exceptions live in coordinator/bandit.yaml with their reasons.
+      - name: bandit (SAST)
+        working-directory: coordinator
+        run: bandit -q -c bandit.yaml -r . -x ./tests,./alembic/versions,./worker-templates -ll -ii
+
+      # Ignore-list (one GHSA/CVE per line with a rationale) lives in
+      # coordinator/pip-audit-ignore.txt.
+      - name: pip-audit
+        working-directory: coordinator
+        run: |
+          IGNORES=$(grep -vE '^\s*(#|$)' pip-audit-ignore.txt | awk '{print "--ignore-vuln " $1}' | tr '\n' ' ')
+          # shellcheck disable=SC2086
+          pip-audit -r requirements.txt $IGNORES
+
+  # The document/OCR service ships in the bundle and `docker compose up` starts
+  # it, so it is not optional and cannot be untested. The suite importorskips
+  # each heavy dependency, which means it reports green on a bare env with every
+  # real extraction path unexercised — DOC_EXTRACT_REQUIRE_DEPS=1 turns a missing
+  # dependency into a failure instead, so this job certifies the real stack.
+  doc-extract:
+    name: doc-extract (PDF / office / OCR)
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: development
+      DOC_EXTRACT_REQUIRE_DEPS: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: doc-extract/requirements.txt
+
+      # opencv-python-headless (pulled in by RapidOCR) needs these at import.
+      - name: Install OpenCV runtime libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0
+
+      - name: Install dependencies
+        working-directory: doc-extract
+        run: pip install -r requirements.txt pytest
+
+      - name: Run the test suite
+        working-directory: doc-extract
+        run: python -m pytest -q -ra
+
+      # The README promises this service makes no outbound calls and carries no
+      # analytics. export.sh enforces that on the published tree; enforce it here
+      # too, so a dependency cannot be added in a PR without the claim being revisited.
+      - name: No telemetry client
+        working-directory: doc-extract
+        run: |
+          if grep -rhiE 'sentry|posthog|segment\.io|mixpanel|datadog' \
+               --include='*.py' --include='*.txt' . | grep -vE '^\s*#' | grep -q .; then
+            echo "::error::doc-extract references a telemetry client; README.md promises none"
+            exit 1
+          fi
+          echo "clean"
+
+  frontend:
+    name: Frontend (build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # `npm run build` is `vite build`, which does NOT type-check — esbuild
+      # strips types without reading them. Run tsc explicitly or a type error
+      # ships silently.
+      - name: Type-check
+        working-directory: frontend
+        run: npx tsc --noEmit -p tsconfig.json
+
+      # Natural-language i18n keys degrade to English when a translation is
+      # missing, so nothing else in this job would notice. Also rejects
+      # module-level i18n.t(), which freezes a string at import time and makes a
+      # language switch a no-op for that module.
+      - name: i18n coverage
+        run: node scripts/check-i18n.mjs
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+      # A HARD GATE. It was advisory while the tree carried 30 errors; those are
+      # fixed, as are the 172 the React Compiler rules in eslint-plugin-react-hooks
+      # 7 then surfaced — components rebuilt every render, setState cascades in
+      # effects, refs and impure calls read during render. Errors are zero, so
+      # the gate holds that line.
+      #
+      # ~1000 `no-explicit-any` WARNINGS remain and do not fail the build. Add
+      # --max-warnings once that count is driven down; failing on them today
+      # would just mean turning this gate straight back off.
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+  # The connector is PUBLISHED TO npm, so it is the one thing here a third party
+  # installs directly. It must be green on every Node it claims to support —
+  # `engines` says >=18, and nothing else in this repo would catch a regression
+  # on the oldest one.
+  connector:
+    name: writ-mcp connector (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["18", "20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No `npm ci` — the package has zero dependencies and no lockfile, which is
+      # the point. If a dependency ever appears, the test suite fails on the
+      # zero-dependency assertion before it can reach npm.
+      - name: Test
+        working-directory: connectors/writ-mcp
+        run: npm test
+
+      # Catches an over-broad `files` list, a missing LICENSE, or a stray
+      # node_modules before it becomes a published tarball.
+      - name: Verify the publish tarball
+        working-directory: connectors/writ-mcp
+        run: |
+          npm pack --dry-run --json > /tmp/pack.json
+          node -e '
+            const p = require("/tmp/pack.json")[0];
+            const files = p.files.map(f => f.path).sort();
+            const want = ["CHANGELOG.md", "LICENSE", "README.md", "index.js", "package.json"];
+            const missing = want.filter(f => !files.includes(f));
+            const extra = files.filter(f => !want.includes(f));
+            if (missing.length) { console.error("missing from tarball:", missing); process.exit(1); }
+            if (extra.length) { console.error("unexpected in tarball:", extra); process.exit(1); }
+            console.log("tarball ok:", files.join(", "));
+          '

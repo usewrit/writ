@@ -1,0 +1,50 @@
+# Build context is this selfhost/ directory (see docker/docker-compose.yml
+# context: ..). Keep it lean: the image builds the SPA from frontend/ and runs
+# the app from coordinator/, and needs nothing else.
+
+# VCS / tooling
+.git
+.gitignore
+**/.DS_Store
+
+# Node — the image runs `npm ci` fresh in stage 1, so never ship node_modules
+# or the built dist (stage 1 rebuilds it).
+**/node_modules
+frontend/dist
+
+# Python virtualenvs / caches — the image installs from requirements.txt fresh.
+**/.venv
+**/.venv-*
+**/venv
+**/env
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+# The test suite ships in the repo (CI and contributors run it) but never in the
+# runtime image — it is dev-only weight and pytest is not a runtime dependency.
+coordinator/tests
+**/.mypy_cache
+**/.ruff_cache
+**/.hypothesis
+
+# Local SQLite databases + WAL/SHM — the container creates its own on the volume.
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.sqlite
+
+# Local secrets / env — never bake these into the image.
+**/.env
+**/.env.local
+
+# Docs and helper scripts not needed at build time.
+docs
+scripts
+**/*.md
+
+# Other Dockerfiles / compose kept for reference in subdirs (avoid confusion).
+coordinator/Dockerfile
+coordinator/Dockerfile.api
+coordinator/Dockerfile.worker
+coordinator/docker-compose.yml

@@ -51,19 +51,65 @@ PDFs and scanned pages, and dispatches all browser work to a fleet of lightweigh
 - **No external database or cache services to run.** SQLite on disk plus an in-process queue. Back up one file.
 - **MCP-native.** Point Claude Code, Claude Desktop, Cursor, or any MCP client at your
   coordinator and your saved workflows become tools it can run, read, schedule, and build.
-- **Open core, AGPL-3.0.** Read it, fork it, run it. No feature gates on the self-host build.
 
 ## What you can do
 
-| | Capability |
+**Capture the task once**
+
+| | |
 | --- | --- |
-| 🎬 **Record** | Capture a browser flow once — logins, forms, clicks, extractions — and save it as a replayable workflow. |
-| ▶️ **Run** | Replay any saved workflow on your fleet and get structured data back. Locally, at zero AI-token cost. |
-| 🗓️ **Schedule** | Run a workflow on an interval or a daily/weekly wall-clock time. |
-| 🔀 **Automate** | Chain events → actions: when one workflow finishes, run another or send a notification. |
-| 🕸️ **Crawl** | Point a distributed **Harvest** crawl at a whole site across your agent fleet. |
-| 📄 **Read documents** | PDFs, Word/Excel/PowerPoint, images and scanned pages — OCR'd on your own CPU, offline. |
-| 🔌 **Expose** | Turn any workflow into a callable REST endpoint, or an **MCP tool** for your AI assistant. |
+| 🎬 **Record** | Click through the task in a real browser — logins, forms, navigation, extractions — and save it as a replayable workflow. |
+| 🧩 **Edit as steps** | Every recording is an editable step list, not an opaque blob. Fix a selector, add a wait, branch on a condition. |
+| 🔐 **Personas** | Store a site's login once as a persona: credentials and TOTP seeds Fernet-encrypted at rest, and a warm cookie/localStorage session reused across every workflow that needs it. Handles 2FA (TOTP, email OTP, SMS). |
+
+**Then run it, on your terms**
+
+| | |
+| --- | --- |
+| ▶️ **Run** | Replay on your fleet and get structured data back — locally, at zero AI-token cost. Recording uses AI once; replay never does. |
+| 🗓️ **Schedule** | An interval, or a daily/weekly wall-clock time. |
+| 👀 **Monitor** | Watch a page or a CSS selector for changes. Keeps uptime, SSL-expiry and change history, and can fire a workflow the moment something moves. |
+| 🔀 **Automate** | Chain events to actions: when a workflow finishes or a monitor trips, run another, POST a webhook, or send a notification. |
+| 🕸️ **Crawl** | Point a distributed crawl at a whole site, sharded across your agent fleet. |
+| 📄 **Read documents** | PDFs, Word/Excel/PowerPoint, images and scanned pages — parsed and OCR'd on your own CPU, fully offline. |
+
+**And hand it to whatever consumes it**
+
+| | |
+| --- | --- |
+| 🔌 **REST endpoint** | Publish any workflow as an HTTP endpoint with its own API key and scopes. |
+| 🤖 **MCP tool** | Your saved workflows become 25 tools an AI assistant can run, read, schedule, expose — and *build*, by driving a live recording session. |
+| 💬 **OpenAI-compatible** | Serve a workflow as `/v1/chat/completions`, `/v1/models` and `/v1/responses`, so any OpenAI SDK can point at it with a base-URL change. |
+| 🗃️ **Datasets** | Every run appends to a searchable dataset. Query across all history, or export it. |
+
+## Why this and not a scraping API or an AI agent
+
+Three approaches exist for "get me this data off the web". They differ in where
+the intelligence sits, and that decides everything else.
+
+| | Hosted scraping API | AI browser agent | **Writ** |
+| --- | --- | --- | --- |
+| **When AI is used** | Never — you write selectors | **Every run**, re-reasoning the page each time | **Once**, at record time |
+| **Cost per run** | Per page/credit, forever | LLM tokens per run — scales with how often you run it | **Zero.** Replay is deterministic execution |
+| **Same result twice?** | Yes, until the markup shifts | Not guaranteed — a fresh decision each time | Yes — it replays the steps you recorded |
+| **Where your data lands** | Their cloud | Their cloud, plus a model provider | **Your disk.** One SQLite file |
+| **Logged-in sites** | Usually out of scope | Fragile — credentials go to a third party | First-class: encrypted logins, TOTP/OTP, warm sessions |
+| **Which IPs browse** | Theirs | Theirs | Yours — agents run wherever you put them |
+| **Runs air-gapped** | No | No | Yes, including OCR |
+
+The cost line is the one that compounds. An agent that reasons its way through a
+checkout flow costs tokens on run 1 and the same again on run 10,000. Writ
+spends the AI once — while you record — and every replay after that is your own
+machine executing a saved step list. A daily monitor costs nothing to keep
+running.
+
+The determinism line is the one that wakes you at 3am. Re-deciding the page each
+run means a run can silently do something *different* from yesterday's. A
+recorded workflow does what it did last time, and when a site really does change,
+it fails loudly and points at the step that broke instead of improvising.
+
+And it is AGPL-3.0 with **no feature gates**: everything above is in this
+repository. Nothing here is a locked trial tier — read it, fork it, run it.
 
 ## How it fits together
 

@@ -12,7 +12,7 @@
 # Test harness (moved out of requirements.txt so the runtime image ships
 # without pytest).
 pytest>=8.0
-pytest-asyncio>=0.23
+pytest-asyncio>=1.4.0
 
 # Lint + format (fast, replaces flake8/isort/pyupgrade).
 ruff==0.6.9

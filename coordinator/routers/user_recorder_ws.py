@@ -1002,11 +1002,7 @@ async def _recorder_ws_handler(websocket: WebSocket):
         elif msg_type == "agent_action_result":
             _handle_agent_reply(agent_id, msg, correlate_by="request_id")
         elif msg_type == "session_opened":
-            # The agent created its relay for a live-recording session; unblock the
-            # browser /ws/record handler so it can start relaying frames.
-            sess = _record_sessions.get(msg.get("session_id"))
-            if sess:
-                sess["opened"].set()
+            _handle_session_opened_ack(agent_id, msg)
         elif msg_type == "session_closed":
             # The agent tore the session down (idle timeout / its own close). Close
             # the browser side so the UI stops waiting for frames — or, for a
@@ -1219,6 +1215,54 @@ async def ai_gateway_ws(websocket: WebSocket):
 #                      [0x01][4B sid_len BE][sid][payload] (binary screencast).
 # The inner browser payload/screencast bytes are byte-identical to what the old
 # ws-gateway forwarded, so the frontend sees the exact same wire it always has.
+#
+# The opening frame MUST carry `purpose:"record"` (see RECORD_SESSION_OPEN). The
+# agent multiplexes THREE kinds of session on that one socket — recording,
+# streaming, and backend-orchestrated concierge/browse — and `session_open` is
+# the open frame for all of them. `purpose` is the only discriminator: the agent
+# routes a record open to its recorder driver (which is what emits `started`,
+# `step_recorded` and the screencast) and everything else falls through to the
+# browse handler, which opens a page, acks `session_opened`, and then silently
+# drops every subsequent recorder frame — a browser that loads forever.
+
+
+def _handle_session_opened_ack(agent_id: str, msg: dict) -> None:
+    """Apply an agent's ``session_opened`` ack to the waiting record session.
+
+    On success this just unblocks the opener so it can start relaying frames.
+
+    ``success:false`` is a NAK, not an open — a browserless agent build, or a
+    session-id collision. Unblock the waiter (it must never hang) but ALSO mark
+    the session closed and keep the agent's reason, so the opener fails loudly
+    instead of relaying frames into a session with no driver behind it. An ack
+    with no ``success`` key at all is a leaner agent's plain "opened", not a NAK.
+    """
+    session_id = msg.get("session_id")
+    sess = _record_sessions.get(session_id)
+    if not sess:
+        return
+    if msg.get("success") is False:
+        sess["open_error"] = str(msg.get("error") or "agent refused the recording session")
+        logger.warning(
+            "Agent %s refused record session %s: %s",
+            agent_id, str(session_id)[:8], sess["open_error"],
+        )
+        sess["closed"].set()
+    sess["opened"].set()
+
+
+def _record_session_open(session_id: str) -> dict:
+    """The `session_open` frame that opens a RECORDING session on an agent.
+
+    `purpose:"record"` is load-bearing (see the note above); `config` is sent for
+    parity with the agent's contract, which reads `purpose` at the top level or
+    nested under `config`."""
+    return {
+        "type": "session_open",
+        "session_id": session_id,
+        "purpose": "record",
+        "config": {},
+    }
 
 async def _route_session_json_to_browser(session_id, inner):
     """Forward one unwrapped agent session-event to the owning consumer.
@@ -1311,11 +1355,15 @@ async def open_server_record_session(
         "browser_ws": None,
     }
     try:
-        await agent_ws.send_json({"type": "session_open", "session_id": session_id})
+        await agent_ws.send_json(_record_session_open(session_id))
         await asyncio.wait_for(opened.wait(), timeout=timeout)
     except Exception:
         _record_sessions.pop(session_id, None)
         return None
+    # `closed` is also set when the agent NAKs the open (session_opened
+    # success:false — browserless build, session-id collision): there is no
+    # driver behind this id, so fail the open instead of returning a session
+    # whose every frame would be dropped.
     if closed.is_set():
         _record_sessions.pop(session_id, None)
         return None
@@ -1589,7 +1637,7 @@ async def browser_record_ws_handler(websocket: WebSocket):
             return
 
         # Open the multiplexed session on the agent's persistent WS.
-        await agent_ws.send_json({"type": "session_open", "session_id": session_id})
+        await agent_ws.send_json(_record_session_open(session_id))
 
         # Wait for the agent to create its relay before relaying any browser frame —
         # the agent drops channel:session frames for an unknown session_id, so an
@@ -1599,7 +1647,20 @@ async def browser_record_ws_handler(websocket: WebSocket):
         except asyncio.TimeoutError:
             await websocket.close(code=4003, reason="Agent did not open session")
             return
+        # A NAKed open (session_opened success:false — browserless agent, or a
+        # session-id collision) sets `closed` alongside `opened`. Close the browser
+        # socket with the agent's reason: without this the UI would sit on a
+        # "connecting" spinner forever waiting for frames from a driver that was
+        # never created. 4003 is the code the recorder maps to its no-agent panel.
         if closed.is_set():
+            try:
+                await websocket.close(
+                    code=4003,
+                    reason=(_record_sessions.get(session_id, {}).get("open_error")
+                            or "Agent could not open a recording session")[:120],
+                )
+            except Exception:
+                pass
             return
 
         # Relay browser -> agent until either side closes.

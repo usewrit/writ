@@ -38,6 +38,12 @@ PDFs and scanned pages, and dispatches all browser work to a fleet of lightweigh
 > point it at this coordinator. This repo is the coordinator only (Python API + built
 > web UI); it never launches a browser itself.
 
+<div align="center">
+  <img src="./assets/media/record-steps.gif" alt="Recording a workflow: a live browser inside step 2 of the wizard, with each click captured as an editable step" width="100%">
+  <br/>
+  <sub><b>Record once.</b> Drive a real browser and every action lands as an editable step — then replay it forever at zero AI-token cost.</sub>
+</div>
+
 ## Why self-host
 
 - **You own everything.** One SQLite file, one volume. No managed cloud, no third-party
@@ -81,6 +87,19 @@ PDFs and scanned pages, and dispatches all browser work to a fleet of lightweigh
 | 🤖 **MCP tool** | Your saved workflows become 25 tools an AI assistant can run, read, schedule, expose — and *build*, by driving a live recording session. |
 | 💬 **OpenAI-compatible** | Serve a workflow as `/v1/chat/completions`, `/v1/models` and `/v1/responses`, so any OpenAI SDK can point at it with a base-URL change. |
 | 🗃️ **Datasets** | Every run appends to a searchable dataset. Query across all history, or export it. |
+
+## What it looks like
+
+<table>
+<tr>
+<td width="50%"><img src="./assets/media/monitors.png" alt="Monitors: three live checks with countdown to the next run, watched selector, and change history"><br/><sub><b>Monitors</b> — watch a page or a selector. Uptime, SSL expiry and change history, with the next check counting down.</sub></td>
+<td width="50%"><img src="./assets/media/connect-mcp.png" alt="Connect page: copy-paste MCP setup for Claude Code, Claude Desktop and Cursor, listing the tools the assistant receives"><br/><sub><b>Connect your AI</b> — paste one command and your workflows become tools. The page generates the snippet for your client, prefilled.</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="./assets/media/workflows.png" alt="Workflows list with schedules, step counts and run state"><br/><sub><b>Workflows</b> — every recording is an editable step list, with its schedule and run history beside it.</sub></td>
+<td width="50%"><img src="./assets/media/fleet.png" alt="Fleet page showing a connected agent with its free capacity"><br/><sub><b>Fleet</b> — connect as many agents as you like, wherever you run them. The connect command is generated for you.</sub></td>
+</tr>
+</table>
 
 ## Why this and not a scraping API or an AI agent
 

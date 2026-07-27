@@ -1094,6 +1094,8 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   // can map clicks/drags to page coordinates. Only active when `selectionMode` is set.
   const selectionContainerRef = useRef<HTMLDivElement>(null);
   const frameSizeRef = useRef<{ w: number; h: number }>({ w: 1280, h: 800 });
+  // Throttle for the cursor trajectory streamed during normal recording (~50ms).
+  const lastMouseMoveRef = useRef<number>(0);
   const selection = useRecorderSelection({
     wsRef,
     canvasRef,
@@ -1941,9 +1943,10 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
     }));
   }, [connectionState, isExtracting]);
 
-  // Handle canvas mouse move for extraction hover highlighting
+  // Handle canvas mouse move: extraction hover highlighting, or — during normal
+  // recording — the live cursor trajectory.
   const handleCanvasMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isExtracting || connectionState !== 'recording' || !wsRef.current) return;
+    if (connectionState !== 'recording' || !wsRef.current) return;
 
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -1958,17 +1961,26 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
     const x = Math.round((e.clientX - rect.left) * scaleX);
     const y = Math.round((e.clientY - rect.top) * scaleY);
 
-    // Throttle: only send every 100ms
-    const now = Date.now();
-    if ((window as any).__lastHighlight && now - (window as any).__lastHighlight < 100) return;
-    (window as any).__lastHighlight = now;
+    if (isExtracting) {
+      // Extraction mode: highlight the element under the cursor (100ms throttle).
+      const now = Date.now();
+      if ((window as any).__lastHighlight && now - (window as any).__lastHighlight < 100) return;
+      (window as any).__lastHighlight = now;
+      wsRef.current.send(JSON.stringify({ type: 'action', action: 'highlight_element', x, y }));
+      return;
+    }
 
-    wsRef.current.send(JSON.stringify({
-      type: 'action',
-      action: 'highlight_element',
-      x,
-      y,
-    }));
+    // Normal recording: stream the cursor trajectory (throttled ~50ms). The agent
+    // moves the REAL cursor for each sample, which is the only thing that makes
+    // hover-only UI — dropdown menus, tooltips, "show on hover" buttons — open in
+    // the live page; it also buffers a downsampled path the recorder attaches to
+    // the next click (human-behavior layer). Without this the canvas was inert
+    // unless you were extracting, so hover-gated elements could never be reached.
+    // Silently ignored by an agent that doesn't implement `mousemove`.
+    const now = Date.now();
+    if (lastMouseMoveRef.current && now - lastMouseMoveRef.current < 50) return;
+    lastMouseMoveRef.current = now;
+    wsRef.current.send(JSON.stringify({ type: 'action', action: 'mousemove', x, y }));
   }, [isExtracting, connectionState]);
 
   // Confirm extraction step

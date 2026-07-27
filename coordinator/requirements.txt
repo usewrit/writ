@@ -6,7 +6,7 @@
 fastapi>=0.115  # 3.14-compatible; pulls a starlette/pydantic that ship cp314 wheels
 python-multipart>=0.0.18  # CVE-2024-24762 (ReDoS), CVE-2024-53981 (DoS)
 uvicorn[standard]>=0.30
-sqlalchemy>=2.0.36  # 2.0.36+ ships cp314 wheels; async core unchanged from 2.0.25
+sqlalchemy>=2.0.51  # 2.0.36+ ships cp314 wheels; async core unchanged from 2.0.25
 aiosqlite>=0.19  # async SQLite driver — self-host coordinator DB (Postgres carved out)
 greenlet>=3.0  # REQUIRED by SQLAlchemy async (sqlalchemy[asyncio]); not auto-installed on all platforms
 # No external Redis SERVER is required: the self-host coordinator backs all

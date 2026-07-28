@@ -14,10 +14,10 @@ import { CreateRail, FleetStatus } from '../components/home/HomeRail';
 import { homeHealthApi } from '../api/homeHealth';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
+import { Stagger } from '../components/ui/Animated';
+import { NavMini, type NavMiniKind } from '../components/ui/NavMini';
 import {
   ArrowRightIcon,
-  EyeIcon,
-  CodeBracketIcon,
 } from '@heroicons/react/24/outline';
 
 // Small inline status pill for the header. Optionally a link (counts → their list
@@ -40,6 +40,46 @@ const Pill: React.FC<{ label: string; dot?: 'ok' | 'idle'; warn?: boolean; fille
   );
   return to ? <Link to={to} className={cls}>{inner}</Link> : <span className={cls}>{inner}</span>;
 };
+
+// The direct start doors — one per core surface. Same shape and vocabulary as the
+// managed app's empty home so a self-hoster and a cloud user learn ONE home.
+//
+// These were two filled/outlined CARD buttons that named only two of the three
+// surfaces: HARVEST was missing entirely, so the crawl product had no door on the
+// page that is supposed to be the map of the product. Authored as RULED COLUMNS,
+// not cards (the design language's "de-card by default" rule): the top hairline IS
+// the frame, it asserts to the brand accent on hover, and the mono glyph reuses the
+// same `▸API` / `MON` / `CRWL` vocabulary the nav uses for these surfaces.
+const START_DOORS: Array<{
+  id: string; glyph: string; mini: NavMiniKind; tour?: string;
+  title: string; description: string; to: string;
+}> = [
+  {
+    id: 'record',
+    glyph: '▸API',
+    mini: 'collapse',
+    tour: 'home-workflow',
+    title: 'Record a workflow',
+    description: 'Capture it once, replay it as an API.',
+    to: '/workflows/new',
+  },
+  {
+    id: 'monitor',
+    glyph: 'MON',
+    mini: 'spark',
+    title: 'Monitor a target',
+    description: 'Watch a page, get alerted when it moves.',
+    to: '/checks/new',
+  },
+  {
+    id: 'harvest',
+    glyph: 'CRWL',
+    mini: 'frontier',
+    title: 'Harvest a site',
+    description: 'An AI agent crawls a whole site into data.',
+    to: '/crawls/new',
+  },
+];
 
 export const Dashboard: React.FC = () => {
   const { t } = useTranslation();
@@ -108,47 +148,31 @@ export const Dashboard: React.FC = () => {
         </div>
       </div>
 
-      {/* The two doors. On the managed app this row is the assistant command bar;
-          self-host has no concierge, so rather than leave the slot empty (or hide
-          the actions in the header as two small buttons), the create paths take
-          it over at full width. They are the point of the product, so they get
-          the weight: convert a website into an API, or put one under watch. The
-          rail below stays the exhaustive menu — this is just the two headline
-          verbs. */}
-      <div className="mt-3.5 grid grid-cols-1 @pair/stage:grid-cols-2 gap-3">
-        <button
-          data-tour="home-workflow"
-          onClick={() => navigate('/workflows/new')}
-          className="group flex items-center gap-3 rounded-xl bg-accent-strong px-4 py-3.5 text-left text-accent-on shadow-sm transition-colors hover:bg-accent-strong/90"
-        >
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white/15">
-            <CodeBracketIcon className="h-[18px] w-[18px]" />
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="block text-[14.5px] font-semibold leading-tight">{t('Convert a website into an API')}</span>
-            <span className="mt-0.5 block truncate text-[12px] leading-relaxed text-accent-on/75">
-              {t('Record it once, then call it as REST or MCP.')}
+      {/* The direct doors — ruled columns, one per core surface. The rail below
+          stays the exhaustive menu; this is just the three headline verbs. */}
+      <Stagger className="mt-5 grid grid-cols-1 @pair/stage:grid-cols-3 gap-x-6 gap-y-6" staggerMs={60}>
+        {START_DOORS.map(door => (
+          <button
+            key={door.id}
+            data-tour={door.tour}
+            onClick={() => navigate(door.to)}
+            className="nav-row group flex h-full flex-col border-t-2 border-border-strong pt-3.5 text-left transition-colors duration-200 hover:border-accent"
+          >
+            <span className="flex items-center gap-2">
+              <span className="font-mono text-[10px] leading-none tracking-[0.08em] text-tertiary transition-colors duration-200 group-hover:text-accent-strong">
+                {door.glyph}
+              </span>
+              <h2 className="text-[13px] font-semibold text-ink">{t(door.title)}</h2>
+              <ArrowRightIcon className="w-3 h-3 shrink-0 text-tertiary transition-transform duration-200 group-hover:translate-x-0.5 motion-reduce:transition-none" />
+              <NavMini kind={door.mini} />
             </span>
-          </span>
-          <ArrowRightIcon className="h-4 w-4 shrink-0 transition-transform duration-200 group-hover:translate-x-0.5 motion-reduce:transition-none" />
-        </button>
+            <p className="mt-1.5 text-xs leading-relaxed text-tertiary transition-colors duration-200 group-hover:text-secondary">
+              {t(door.description)}
+            </p>
+          </button>
+        ))}
+      </Stagger>
 
-        <button
-          onClick={() => navigate('/checks/new')}
-          className="group flex items-center gap-3 rounded-xl border border-ink/30 bg-surface px-4 py-3.5 text-left transition-colors hover:border-ink/45 hover:bg-hover/40"
-        >
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-chrome transition-colors group-hover:bg-ink">
-            <EyeIcon className="h-[18px] w-[18px] text-ink transition-colors group-hover:text-white" />
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="block text-[14.5px] font-semibold leading-tight text-ink">{t('Create a monitor')}</span>
-            <span className="mt-0.5 block truncate text-[12px] leading-relaxed text-tertiary transition-colors group-hover:text-secondary">
-              {t('Watch a page and get notified when it changes.')}
-            </span>
-          </span>
-          <ArrowRightIcon className="h-4 w-4 shrink-0 text-tertiary transition-transform duration-200 group-hover:translate-x-0.5 motion-reduce:transition-none" />
-        </button>
-      </div>
 
       {/* Working grid: operational feed (main) · create + local status (rail) */}
       <div className="mt-5 grid grid-cols-1 @split/stage:grid-cols-[minmax(0,1fr)_320px] gap-6 items-start">

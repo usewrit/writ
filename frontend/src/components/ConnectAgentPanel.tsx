@@ -1,42 +1,8 @@
 import React, { useState } from 'react';
-import { Link } from 'react-router-dom';
-import {
-  CommandLineIcon,
-  ClipboardDocumentIcon,
-  ComputerDesktopIcon,
-  CloudIcon,
-} from '@heroicons/react/24/outline';
-import clsx from 'clsx';
-import toast from 'react-hot-toast';
+import { ComputerDesktopIcon, CloudIcon } from '@heroicons/react/24/outline';
 import { useTranslation } from 'react-i18next';
 import type { RecorderCapability } from '../hooks/useRecorderCapability';
-
-// Canonical connect story, in the order it actually has to happen: get the
-// binary, point it at this coordinator, run it with a minted token.
-//
-// These were previously a single line reading
-//   WRIT_SERVICE_TOKEN=<token> WRIT_COORDINATOR_URL=<url> writ-agent-fleet
-// which could not work: the stock binary is `writ-agent`, it takes its
-// coordinator URL from the `saas.url` CONFIG value, and it never reads
-// WRIT_COORDINATOR_URL (see _build_connect_commands in routers/fleet.py). It
-// also skipped the download entirely, so step one was a binary the reader did
-// not have. Commands are literal shell — not translated.
-const INSTALL_STEPS: { os: string; commands: string[] }[] = [
-  {
-    os: 'macOS / Linux',
-    commands: [
-      './writ-agent config set saas.url <coordinator-url>',
-      'WRIT_SERVICE_TOKEN=<token> ./writ-agent start --headless',
-    ],
-  },
-  {
-    os: 'Windows (PowerShell)',
-    commands: [
-      '.\\writ-agent.exe config set saas.url <coordinator-url>',
-      "$env:WRIT_SERVICE_TOKEN='<token>'; .\\writ-agent.exe start --headless",
-    ],
-  },
-];
+import { FastConnectAgentModal } from './fleet/FastConnectAgentModal';
 
 interface ConnectAgentPanelProps {
   /**
@@ -57,17 +23,16 @@ interface ConnectAgentPanelProps {
  */
 export const ConnectAgentPanel: React.FC<ConnectAgentPanelProps> = ({ kind, capability }) => {
   const { t } = useTranslation();
-  const [selectedOs, setSelectedOs] = useState(0);
-
-  const copyCommand = (cmd: string) => {
-    navigator.clipboard?.writeText(cmd).then(
-      () => toast.success(t('Copied')),
-      () => {},
-    );
-  };
+  const [connectOpen, setConnectOpen] = useState(false);
 
   const used = capability?.cloud_quota_used ?? 0;
-  const limit = capability?.cloud_quota_limit ?? null;
+  // A self-host coordinator reports `cloud_quota_limit: 0` — there IS no cloud
+  // recording lane here. Treating "not null" as "has a quota" rendered the cloud
+  // upsell copy as "You've used your 0/0 free cloud recordings this month", which
+  // is both meaningless and about a product this build does not have. Only speak
+  // about a quota when there is a real, positive one.
+  const rawLimit = capability?.cloud_quota_limit ?? null;
+  const limit = rawLimit != null && rawLimit > 0 ? rawLimit : null;
 
   if (kind === 'waiting_cloud') {
     return (
@@ -104,45 +69,25 @@ export const ConnectAgentPanel: React.FC<ConnectAgentPanelProps> = ({ kind, capa
           </p>
         </div>
 
-        {/* Install steps */}
-        <div className="bg-white border border-zinc-200/80 rounded-xl overflow-hidden">
-          <div className="border-b border-border px-5 flex gap-0">
-            {INSTALL_STEPS.map((step, i) => (
-              <button
-                key={step.os}
-                onClick={() => setSelectedOs(i)}
-                className={clsx(
-                  'py-2.5 px-4 text-xs font-medium border-b-2 transition-colors -mb-px',
-                  selectedOs === i
-                    ? 'border-zinc-900 text-ink'
-                    : 'border-transparent text-secondary hover:text-ink',
-                )}
-              >
-                {step.os}
-              </button>
-            ))}
-          </div>
-          <div className="p-5 space-y-3">
-            {INSTALL_STEPS[selectedOs].commands.map((cmd, i) => (
-              <div key={i} className="flex items-center gap-3">
-                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-zinc-100 text-zinc-500 text-xs flex items-center justify-center font-mono">
-                  {i + 1}
-                </span>
-                <div className="flex-1 flex items-center gap-2 bg-canvas border border-zinc-200 rounded-lg px-3 py-2 font-mono text-sm">
-                  <CommandLineIcon className="w-4 h-4 text-zinc-400 flex-shrink-0" />
-                  <code className="flex-1 text-zinc-800 truncate">{cmd}</code>
-                  <button
-                    onClick={() => copyCommand(cmd)}
-                    className="flex-shrink-0 p-1 text-zinc-400 hover:text-zinc-700 transition-colors"
-                    title={t('Copy')}
-                  >
-                    <ClipboardDocumentIcon className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
+        {/* The connect flow itself — the SAME modal the Fleet page opens (run one on
+            this machine / one-line / mint a token). This used to be two hand-fill
+            shell snippets (`saas.url <coordinator-url>`, `WRIT_SERVICE_TOKEN=<token>`)
+            that nobody could run as printed, while the real flow — which can start an
+            agent here in one click, or hand out a working one-liner — sat two clicks
+            away on /fleet. */}
+        <div className="flex flex-col items-center gap-2">
+          <button
+            onClick={() => setConnectOpen(true)}
+            className="inline-flex items-center gap-2 rounded-xl bg-accent-strong px-4 py-2 text-[13px] font-semibold text-accent-on shadow-sm transition-colors hover:bg-accent-strong/90"
+          >
+            <ComputerDesktopIcon className="h-4 w-4" />
+            {t('Connect an agent')}
+          </button>
+          <p className="text-[11.5px] text-tertiary text-center">
+            {t('Start one on this machine in a click, or copy a one-line command for another machine.')}
+          </p>
         </div>
+
 
         {/* Live waiting indicator — auto-resolves when the agent connects */}
         <div className="mt-4 flex items-center justify-center gap-2 text-[13px] text-secondary">
@@ -153,21 +98,10 @@ export const ConnectAgentPanel: React.FC<ConnectAgentPanelProps> = ({ kind, capa
           {t('Waiting for your agent to connect — recording starts automatically.')}
         </div>
 
-        {/* Primary way out of this gate. Fleet resolves the download command for
-            the reader's platform and can install + start an agent on this
-            machine in one click — the snippets above are reference for a
-            binary that is already downloaded, with placeholders to fill. */}
-        <div className="mt-5 flex flex-col items-center gap-2">
-          <Link
-            to="/fleet"
-            className="inline-flex items-center gap-2 rounded-xl bg-accent-strong px-4 py-2 text-[13px] font-semibold text-accent-on shadow-sm transition-colors hover:bg-accent-strong/90"
-          >
-            {t('Set up an agent')}
-          </Link>
-          <p className="text-[11.5px] text-tertiary">
-            {t('Get the download command for your platform, or run one on this machine in a click.')}
-          </p>
-        </div>
+        {/* Refreshing capability is the recorder's job (it polls); connecting here
+            simply makes an agent appear, and the waiting indicator above resolves. */}
+        <FastConnectAgentModal isOpen={connectOpen} onClose={() => setConnectOpen(false)} />
+
       </div>
     </div>
   );

@@ -32,9 +32,8 @@ import { ExecutionTargetPicker } from '../../workflows/ExecutionTargetPicker';
 import { PersonaPicker } from '../../workflows/PersonaPicker';
 import { TierBadge, deriveProspectiveTier } from '../../TierBadge';
 import { workflowHasLogin } from '../../../utils/persona';
-import { automationApi, selectorsApi, userRecorderApi } from '../../../api/endpoints';
+import { apiKeysApi, automationApi, selectorsApi, userRecorderApi } from '../../../api/endpoints';
 import { mcpPublishApi } from '../../../api/publish';
-import client from '../../../api/client';
 import { useQuery } from '../../../hooks/useQuery';
 import { Q } from '../../../stores/queryKeys';
 import { useCredits, AI_COSTS } from '../../CreditGuard';
@@ -190,12 +189,21 @@ export const FinalizeStep: React.FC = () => {
     if (!workflowId || keyBusy) return;
     setKeyBusy(true);
     try {
-      const resp = await client.post('/auth/api-keys', {
+      // Scoped to THIS workflow and to running it — the narrowest key that
+      // makes the endpoint callable. `resource_ids` pins it to the one
+      // workflow, so the key cannot run anything else the owner later creates.
+      //
+      // This used to post `{role: 'client', workflow_id}`, the pre-scopes-v2
+      // shape. The current model has neither field, so both were dropped on the
+      // floor: the key came back with NO scopes and pinned to nothing, and the
+      // secret was read from `resp.data.key` when the response field is
+      // `api_key` — so the wizard also showed nothing to copy.
+      const resp = await apiKeysApi.create({
         label: state.config.name ? `${state.config.name} key` : 'api-key',
-        role: 'client',
-        workflow_id: workflowId,
+        scopes: ['workflows:read', 'workflows:execute', 'runs:read', 'datasets:read'],
+        resource_ids: { workflows: [workflowId] },
       });
-      dispatch({ type: 'UPDATE_CREATED_IDS', updates: { apiKeyId: resp.data.id, apiKeyValue: resp.data.key } });
+      dispatch({ type: 'UPDATE_CREATED_IDS', updates: { apiKeyId: resp.id, apiKeyValue: resp.api_key } });
       toast.success(t('API key created'));
     } catch {
       toast.error(t('Failed to create API key'));

@@ -148,22 +148,34 @@ export const Dashboard: React.FC = () => {
         </div>
       </div>
 
-      {/* The direct doors — ruled columns, one per core surface. The rail below
-          stays the exhaustive menu; this is just the three headline verbs. */}
-      <Stagger className="mt-5 grid grid-cols-1 @pair/stage:grid-cols-3 gap-x-6 gap-y-6" staggerMs={60}>
+      {/* The direct doors — one per core surface.
+          Ruled columns (the managed app's empty home) were tried here and read as
+          three unanchored text blocks: that treatment needs the airy hero page it
+          was designed for, and this is a POPULATED command center with a dense
+          header directly above and the working grid directly below. Per the design
+          language, an element cannot just be "placed there" — so the three doors
+          share ONE container and become a single deliberate band, divided rather
+          than boxed so it still reads as columns and not as three cards. The band
+          spans the full width, which also lets it sit flush with the grid below.
+          The mono glyph vocabulary (`▸API` / `MON` / `CRWL`) is kept — it is how
+          the nav names these same surfaces. */}
+      <Stagger
+        className="mt-5 grid grid-cols-1 divide-y divide-border overflow-hidden rounded-xl border border-ink/15 bg-surface shadow-sm @pair/stage:grid-cols-3 @pair/stage:divide-x @pair/stage:divide-y-0"
+        staggerMs={60}
+      >
         {START_DOORS.map(door => (
           <button
             key={door.id}
             data-tour={door.tour}
             onClick={() => navigate(door.to)}
-            className="nav-row group flex h-full flex-col border-t-2 border-border-strong pt-3.5 text-left transition-colors duration-200 hover:border-accent"
+            className="nav-row group flex h-full flex-col justify-start px-5 py-4 text-left transition-colors duration-200 hover:bg-hover/50"
           >
             <span className="flex items-center gap-2">
               <span className="font-mono text-[10px] leading-none tracking-[0.08em] text-tertiary transition-colors duration-200 group-hover:text-accent-strong">
                 {door.glyph}
               </span>
-              <h2 className="text-[13px] font-semibold text-ink">{t(door.title)}</h2>
-              <ArrowRightIcon className="w-3 h-3 shrink-0 text-tertiary transition-transform duration-200 group-hover:translate-x-0.5 motion-reduce:transition-none" />
+              <h2 className="text-[13.5px] font-semibold leading-tight text-ink">{t(door.title)}</h2>
+              <ArrowRightIcon className="h-3 w-3 shrink-0 text-tertiary transition-transform duration-200 group-hover:translate-x-0.5 motion-reduce:transition-none" />
               <NavMini kind={door.mini} />
             </span>
             <p className="mt-1.5 text-xs leading-relaxed text-tertiary transition-colors duration-200 group-hover:text-secondary">

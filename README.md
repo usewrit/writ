@@ -22,6 +22,7 @@
     <a href="#what-you-can-do"><b>Features</b></a> ·
     <a href="#connect-your-ai-assistant-mcp"><b>Connect your AI</b></a> ·
     <a href="#agents-in-more-detail"><b>Agents</b></a> ·
+    <a href="#the-writ-family"><b>SDKs</b></a> ·
     <a href="./docs/DEPLOYMENT.md"><b>Deploy</b></a> ·
     <a href="./SECURITY.md"><b>Security</b></a>
   </p>
@@ -174,6 +175,7 @@ fill these into `.env`. Never commit the filled-in `.env`.
 | 🤖 **MCP tool** | Your saved workflows become 25 tools an AI assistant can run, read, schedule, expose — and *build*, by driving a live recording session. |
 | 💬 **OpenAI-compatible** | Serve a workflow as `/v1/chat/completions`, `/v1/models` and `/v1/responses`, so any OpenAI SDK can point at it with a base-URL change. |
 | 🗃️ **Datasets** | Every run appends to a searchable dataset. Query across all history, or export it. |
+| 📦 **Typed SDKs** | Official [TypeScript, Python, Go and Rust clients](https://github.com/usewrit/writ-sdks) generated from one OpenAPI spec — same contract against this coordinator or Writ Cloud. |
 
 ## What it looks like
 
@@ -401,6 +403,23 @@ and the compose healthcheck.
 To run without document extraction, start `docker compose up -d coordinator`
 alone and set `DOC_EXTRACT_URL=` (empty) in `.env`. Crawls then skip every
 non-HTML resource they reach — a silent no-op, never an error.
+
+## The Writ family
+
+This repository is the coordinator. Three sibling repositories complete it —
+each is independently useful and separately licensed.
+
+| Repository | What it is | Install |
+| --- | --- | --- |
+| **[`writ`](https://github.com/usewrit/writ)** *(you are here)* | The self-hosted coordinator: API, web UI, scheduler, document/OCR extraction. | `docker compose up` |
+| **[`writ-agent`](https://github.com/usewrit/writ-agent)** | The Rust fleet agent that actually drives the browsers. Dials out over WebSocket; no inbound ports. | [Releases](https://github.com/usewrit/writ-agent/releases) · `ghcr.io/usewrit/writ-agent` · or the one-line installer in the quickstart |
+| **[`writ-mcp`](https://github.com/usewrit/writ-mcp)** | The MCP connector — a zero-dependency stdio↔HTTP bridge that turns your workflows into tools any MCP client can call. Also bundled here at [`connectors/writ-mcp`](./connectors/writ-mcp). | `npx -y writ-mcp` |
+| **[`writ-sdks`](https://github.com/usewrit/writ-sdks)** | Official clients for **TypeScript, Python, Go and Rust** — one contract, generated from a shared OpenAPI spec. Drive this coordinator, a local `writ-agentd`, or Writ Cloud from the same client. | Build from the repo — registry releases are still pending |
+
+Why the agent is separate: it is a compiled Rust binary with its own release
+cadence and its own license, and you install it on the machines that browse —
+which are usually not the machine running the coordinator. Keeping it here would
+mean shipping a browser stack inside an image that never launches one.
 
 ## Community & support
 

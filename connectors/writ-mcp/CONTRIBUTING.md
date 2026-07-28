@@ -35,7 +35,7 @@ thing works. Start a [self-host coordinator](https://github.com/usewrit/writ),
 create an API key under **Settings → Developers → API keys**, then:
 
 ```bash
-claude mcp add writ-dev -- node ./index.js --url http://localhost:8000 --api-key <YOUR_API_KEY>
+claude mcp add writ-dev -e WRIT_API_KEY=<YOUR_API_KEY> -- node ./index.js --url http://localhost:8000
 ```
 
 `claude mcp list` will tell you whether it connected.

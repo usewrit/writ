@@ -247,7 +247,7 @@ with your endpoint.
 <summary><b>Claude Code</b></summary>
 
 ```bash
-claude mcp add writ-selfhost -- npx -y writ-mcp --url http://localhost:8000 --api-key <YOUR_API_KEY>
+claude mcp add writ-selfhost -e WRIT_API_KEY=<YOUR_API_KEY> -- npx -y writ-mcp --url http://localhost:8000
 ```
 </details>
 
@@ -259,7 +259,8 @@ claude mcp add writ-selfhost -- npx -y writ-mcp --url http://localhost:8000 --ap
   "mcpServers": {
     "writ-selfhost": {
       "command": "npx",
-      "args": ["-y", "writ-mcp", "--url", "http://localhost:8000", "--api-key", "<YOUR_API_KEY>"]
+      "args": ["-y", "writ-mcp", "--url", "http://localhost:8000"],
+      "env": { "WRIT_API_KEY": "<YOUR_API_KEY>" }
     }
   }
 }

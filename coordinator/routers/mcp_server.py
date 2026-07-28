@@ -1426,14 +1426,21 @@ async def connect_info(
     # Register under the distinct slug (NOT "writ") so this coexists with the
     # official Writ desktop app, which registers as "writ".
     slug = SERVER_NAME
+    # The key rides in `env`, never in argv. A `--api-key` flag is readable by
+    # every local process through `ps` and lands in the user's shell history;
+    # writ-mcp itself warns on startup when a key arrives that way. `claude mcp
+    # add` takes `-e KEY=value` before the `--`, and every JSON-config client
+    # accepts an `env` block beside `command`/`args`.
     claude_code = (
-        f'claude mcp add {slug} -- npx -y writ-mcp --url {base} --api-key <YOUR_API_KEY>'
+        f'claude mcp add {slug} -e WRIT_API_KEY=<YOUR_API_KEY> '
+        f'-- npx -y writ-mcp --url {base}'
     )
     node_json = {
         "mcpServers": {
             slug: {
                 "command": "npx",
-                "args": ["-y", "writ-mcp", "--url", base, "--api-key", "<YOUR_API_KEY>"],
+                "args": ["-y", "writ-mcp", "--url", base],
+                "env": {"WRIT_API_KEY": "<YOUR_API_KEY>"},
             }
         }
     }

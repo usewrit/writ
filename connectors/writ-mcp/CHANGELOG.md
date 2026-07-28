@@ -5,7 +5,16 @@ All notable changes to `writ-mcp` are documented here. This project follows
 
 ## [Unreleased]
 
-### Fixed
+## [1.0.0] — 2026-07-27
+
+First public release on npm.
+
+Development of this connector predates the release: it shipped bundled inside
+self-host installs before it was ever published to the registry. The entries
+below therefore cover everything in 1.0.0, including fixes made to code that was
+only ever distributed that way. Nothing was published under an earlier version.
+
+### Fixed — credential handling and hangs
 
 - **A request the server never addressed left the client hanging forever.** The
   connector relayed whatever came back and stopped there, so a response carrying
@@ -34,7 +43,7 @@ All notable changes to `writ-mcp` are documented here. This project follows
 - Documentation used a `wk_` API-key prefix that no Writ surface has ever issued;
   real keys are `wt_`.
 
-### Added
+### Added — relayed server capabilities
 
 - Workflow tools now accept an optional `max_age` (seconds) so an agent can reuse a
   recent result instead of re-driving the browser. Omitted or `0` still always runs
@@ -47,16 +56,20 @@ logic, so no client update is needed to pick them up.
 
 ### Changed
 
+- The publish-tarball check moved into `scripts/verify-tarball.mjs`, called by CI,
+  the release workflow and the monorepo's assembly script alike. It had been
+  inlined in all three, which is how they came to disagree: the release workflow
+  installs `npm@latest`, and **npm 12 changed `npm pack --json` from an array to
+  an object keyed by package name** — so the check died there with an unrelated
+  `TypeError` while CI stayed green on the runner's npm 11. It now accepts both
+  shapes, says so plainly when it recognises neither, and CI runs it a second
+  time under `npm@latest` so the next such change is caught before a release.
 - The connector now lives in its own repository,
   [`usewrit/writ-mcp`](https://github.com/usewrit/writ-mcp), and is released from
   there. `repository`, `bugs` and `homepage` point at it. It continues to ship
   bundled inside a self-host install at `connectors/writ-mcp`.
 
-## [1.0.0] — 2026-07-25
-
-First public release on npm.
-
-### Added
+### Added — the connector itself
 
 - stdio ↔ Streamable-HTTP bridge for Writ Cloud, self-hosted coordinators, and
   published per-workflow `/mcp/<slug>` endpoints. Zero runtime dependencies.
@@ -74,7 +87,7 @@ First public release on npm.
 - Test suite (`npm test`, `node:test`, no dev dependencies) driving the real
   binary over stdio against a mock server.
 
-### Fixed
+### Fixed — protocol correctness
 
 - **JSON-RPC batches were silently dropped.** A batch is an array, and an array's
   `.id` is `undefined`, so batches were misread as notifications and their

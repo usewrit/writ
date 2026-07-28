@@ -4,7 +4,7 @@
 blank_issues_enabled: false
 contact_links:
   - name: 📚 Documentation
-    url: https://github.com/usewrit/writ#readme
+    url: https://github.com/usewrit/writ/wiki
     about: Setup, workflows, the API, and MCP — read this first; most questions are answered here.
   - name: 💬 Questions & setup help
     url: https://github.com/usewrit/writ/discussions

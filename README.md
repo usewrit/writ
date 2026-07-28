@@ -18,6 +18,7 @@
 
   <p align="center">
     <a href="#quickstart"><b>Quickstart</b></a> ·
+    <a href="https://github.com/usewrit/writ/wiki"><b>Docs</b></a> ·
     <a href="#what-you-can-do"><b>Features</b></a> ·
     <a href="#connect-your-ai-assistant-mcp"><b>Connect your AI</b></a> ·
     <a href="#agents-in-more-detail"><b>Agents</b></a> ·
@@ -403,12 +404,14 @@ non-HTML resource they reach — a silent no-op, never an error.
 
 ## Community & support
 
-- **Operator documentation** lives in this repository, so it can never drift
-  from the version you are running: [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)
-  for putting it behind TLS in production, [`docs/CONNECT_AGENT.md`](./docs/CONNECT_AGENT.md)
-  for the full agent walkthrough (install paths, env reference, healthchecks,
-  troubleshooting), and [`doc-extract/README.md`](./doc-extract/README.md) for
-  the extraction service. This README covers everything else.
+- **Documentation** — the [**wiki**](https://github.com/usewrit/writ/wiki) is the operator's manual:
+  [Quickstart](https://github.com/usewrit/writ/wiki/Quickstart), [Connecting agents](https://github.com/usewrit/writ/wiki/Connecting-Agents),
+  a full [configuration reference](https://github.com/usewrit/writ/wiki/Configuration),
+  [production deployment](https://github.com/usewrit/writ/wiki/Production-Deployment),
+  [backup and restore](https://github.com/usewrit/writ/wiki/Backup-and-Restore),
+  the [security model](https://github.com/usewrit/writ/wiki/Security-Model) and
+  [troubleshooting](https://github.com/usewrit/writ/wiki/Troubleshooting).
+  In-repo copies of the operator guides live under [`docs/`](./docs).
 - **Bugs & feature requests** — open a [GitHub Issue](../../issues); templates
   are provided.
 - **Questions, setup help, show & tell** — use

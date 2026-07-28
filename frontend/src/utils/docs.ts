@@ -1,4 +1,3 @@
-import i18n from '../i18n';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Documentation links.
@@ -19,7 +18,7 @@ import i18n from '../i18n';
 // "read the docs" link in the UI follows, rather than sending readers somewhere
 // that does not answer.
 export const DOCS_BASE =
-  import.meta.env.VITE_DOCS_BASE || 'https://usewrit.app/docs';
+  import.meta.env.VITE_DOCS_BASE || 'https://github.com/usewrit/writ/wiki';
 
 /**
  * Absolute URL for a docs page.
@@ -27,17 +26,35 @@ export const DOCS_BASE =
  * @param path    Section path, e.g. 'api' or 'workflows/steps'. Omit for the index.
  * @param anchor  Optional #fragment.
  *
- * The reader's UI language rides along as `?lang=`, which the site uses to send
- * them to the matching localized tree instead of always landing on English.
+ * NOTE: no `?lang=` hand-off. The wiki has no localized tree, so appending one
+ * only produced `…/wiki?lang=fr` on every link. If VITE_DOCS_BASE is pointed at
+ * a site that does have localized docs, reinstate it there.
  */
+/**
+ * Call sites ask for a topic, not a filename. Mapping here means a page can be
+ * renamed or a docs host swapped without touching every component — and a topic
+ * with no page yet lands on the index rather than a 404.
+ */
+const PAGES: Record<string, string> = {
+  api: 'REST-API',
+  authentication: 'Personas-and-Secrets',
+  agents: 'Connecting-Agents',
+  workflows: 'Workflows',
+  monitors: 'Monitors',
+  crawl: 'Crawling',
+  documents: 'Documents-and-OCR',
+  mcp: 'MCP',
+  configuration: 'Configuration',
+  deployment: 'Production-Deployment',
+  security: 'Security-Model',
+  troubleshooting: 'Troubleshooting',
+};
+
 export const docsUrl = (path?: string, anchor?: string): string => {
-  const clean = (path || '').replace(/^\/+|\/+$/g, '');
-  let url = clean ? `${DOCS_BASE}/${clean}` : DOCS_BASE;
-
-  const lang = (i18n.resolvedLanguage || i18n.language || '').split('-')[0];
-  if (lang && lang !== 'en') url += `?lang=${encodeURIComponent(lang)}`;
+  const topic = (path || '').replace(/^\/+|\/+$/g, '');
+  const page = topic ? PAGES[topic] : undefined;
+  let url = page ? `${DOCS_BASE}/${page}` : DOCS_BASE;
   if (anchor) url += `#${anchor}`;
-
   return url;
 };
 

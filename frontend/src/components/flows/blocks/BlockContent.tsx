@@ -1715,13 +1715,15 @@ function RecipientsSelector({ block, selectedChannels, selectedRecipients, recip
   );
 }
 
-function AISessionConfig({ block, blocks, sessions, updateBlockConfig }: any) {
+function AISessionConfig({ block, blocks, sessions: _sessions, updateBlockConfig }: any) {
   const { t } = useTranslation();
-  // This build cannot create AI sessions, so the picker is empty; the block can
-  // still REFERENCE an existing session where one is present.
+  // GOAL-shaped, not id-shaped. The cloud build picks a SAVED AI-session recipe by
+  // id; self-host has no recipe table — its `ai_sessions` rows are RUN RECORDS and
+  // `POST /ai-sessions/start` takes the goal inline. The old dropdown listed
+  // `aiSessionsApi.listAll()`, which was hardcoded to `[]`, so it could never be
+  // filled in: the block was addable and permanently unconfigurable.
   const hasChangeDetected = blocks.some((b: FlowBlock) => b.blockType === 'change_detected');
-  const hasSession = block.config.session_ids?.length > 0;
-  const selectedSession = hasSession ? sessions.find((s: any) => s.id === block.config.session_ids[0]) : null;
+  const hasGoal = !!(block.config.goal || '').trim();
 
   return (
     <div className="space-y-3">
@@ -1729,24 +1731,63 @@ function AISessionConfig({ block, blocks, sessions, updateBlockConfig }: any) {
       <p className="text-[11px] leading-relaxed text-tertiary">
         {t('An autonomous browser agent works toward a goal on its own, then saves its steps as a replayable workflow — not Scribe, the chat assistant.')}
       </p>
-      <label className="text-xs font-medium text-zinc-500">{t('AI Session')}</label>
 
-      <Select<number>
-        value={block.config.session_ids?.[0] || undefined}
-        onChange={v => updateBlockConfig(block.id, { ...block.config, session_ids: v ? [v] : [] })}
-        placeholder={t('Select AI session...')}
-        options={sessions.map((s: any) => ({ value: Number(s.id), label: s.name }))}
-        className="w-full"
-      />
-      {selectedSession && (
-        <div className="text-[11px] text-zinc-400 flex items-center gap-1.5">
-          <CpuChipIcon className="h-3 w-3" />
-          <span>{selectedSession.mode} — {selectedSession.goal || t('No goal set')}</span>
+      <div>
+        <div className="mb-1 flex items-center justify-between">
+          <label className="block text-xs font-medium text-zinc-500">{t('Goal')}</label>
+          <FieldRef
+            blockId={block.id}
+            onInsert={token => updateBlockConfig(block.id, { ...block.config, goal: `${block.config.goal || ''}${token}` })}
+          />
         </div>
-      )}
+        <textarea
+          value={block.config.goal || ''}
+          onChange={e => updateBlockConfig(block.id, { ...block.config, goal: e.target.value })}
+          placeholder={t('What should the agent accomplish? e.g. Find the cheapest plan and record the steps.')}
+          className={`w-full px-3 py-2 bg-white border border-zinc-200 rounded-lg text-sm text-zinc-900 resize-none focus:border-zinc-400 outline-none transition-colors${boundInputClass(block.config.goal)}`}
+          rows={2}
+        />
+      </div>
+
+      <div>
+        <label className="mb-1 block text-xs font-medium text-zinc-500">{t('Start URL (optional)')}</label>
+        <input
+          type="text"
+          value={block.config.entry_url || ''}
+          onChange={e => updateBlockConfig(block.id, { ...block.config, entry_url: e.target.value })}
+          placeholder="https://..."
+          className={`w-full px-3 py-2 bg-white border border-zinc-200 rounded-lg text-sm text-zinc-900 focus:border-zinc-400 outline-none transition-colors${boundInputClass(block.config.entry_url)}`}
+        />
+      </div>
+
+      <div className="flex items-center gap-3">
+        <div className="flex-1">
+          <label className="mb-1 block text-xs font-medium text-zinc-500">{t('Max steps')}</label>
+          <input
+            type="number"
+            min={1}
+            value={block.config.max_steps ?? 20}
+            onChange={e => updateBlockConfig(block.id, { ...block.config, max_steps: Number(e.target.value) || 20 })}
+            className="w-full px-3 py-2 bg-white border border-zinc-200 rounded-lg text-sm text-zinc-900 focus:border-zinc-400 outline-none transition-colors"
+          />
+        </div>
+        <label className="mt-4 flex flex-1 items-center gap-2 text-xs text-zinc-600">
+          <input
+            type="checkbox"
+            checked={block.config.generate_workflow !== false}
+            onChange={e => updateBlockConfig(block.id, { ...block.config, generate_workflow: e.target.checked })}
+          />
+          {t('Save what it did as a workflow')}
+        </label>
+      </div>
+
+      <div className="flex items-center gap-1.5 text-[11px] text-zinc-400">
+        <CpuChipIcon className="h-3 w-3" />
+        <span>{t('Runs on a connected fleet agent with local AI. It is picked automatically.')}</span>
+      </div>
 
       {/* Context override */}
-      {hasSession && (
+      {hasGoal && (
         <div>
           <div className="flex items-center justify-between mb-1">
             <label className="block text-xs font-medium text-zinc-500">{t('Context override')}</label>
@@ -1766,7 +1807,7 @@ function AISessionConfig({ block, blocks, sessions, updateBlockConfig }: any) {
       )}
 
       {/* Form Data */}
-      {hasSession && (
+      {hasGoal && (
         <div>
           <label className="block text-xs font-medium text-zinc-500 mb-1">{t('Form Data')}</label>
           <div className="space-y-1">

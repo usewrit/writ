@@ -460,8 +460,15 @@ export const BLOCK_CATALOG: Record<string, BlockDef> = {
     summary: 'Fires one autonomous AI browser session: the agent works toward your goal, then saves its steps as a replayable workflow.',
     when: 'One-shot autonomy, not a chat: the agent opens a browser, navigates/clicks/extracts toward the goal on its own, and records what it did as a replayable workflow (this is NOT Scribe, the chat concierge). Runs on the desktop daemon (using your configured AI provider) or in the cloud.',
     platforms: BOTH,
+    // GOAL-shaped, unlike cloud's `session_ids`. Self-host has no saved AI-session
+    // recipes to reference — `ai_sessions` rows are run records and the start
+    // endpoint takes the goal inline. See _dispatch_ai_session in
+    // services/unified_trigger_service.py.
     config: [
-      { key: 'session_ids', type: 'object', help: 'AI sessions to run' },
+      { key: 'goal', type: 'string', help: 'What the agent should accomplish' },
+      { key: 'entry_url', type: 'string', help: 'Where it starts (optional)' },
+      { key: 'max_steps', type: 'number', help: 'Iteration budget' },
+      { key: 'generate_workflow', type: 'boolean', help: 'Save the run as a replayable workflow' },
       { key: 'user_context', type: 'string' },
       { key: 'form_data', type: 'object' },
     ],

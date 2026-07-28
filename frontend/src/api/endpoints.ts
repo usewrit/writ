@@ -874,10 +874,24 @@ export const automationApi = {
 };
 
 // AI Sessions helper endpoints (see above).
-// Returns [] so trigger/flow source pickers list no AI sessions.
+//
+// This returned a hardcoded `[]`, which left every AI-session picker in the flow
+// builder permanently empty — the `ai_session_started` / `ai_session_completed`
+// TRIGGER blocks filter on a session id, so they could be added but never scoped.
+// Self-host does have sessions (`GET /ai-sessions`), so list them for real and
+// degrade to `[]` only on error, the way the other reference loaders do.
+//
+// NOTE the shape difference: these rows are RUN RECORDS, not saved recipes. The
+// `ai_session` ACTION block is goal-shaped and does NOT read this list.
 export const aiSessionsApi = {
   listAll: async (): Promise<any[]> => {
-    return [];
+    try {
+      const response = await client.get('/ai-sessions');
+      const rows = response.data;
+      return Array.isArray(rows) ? rows : (rows?.sessions ?? []);
+    } catch {
+      return [];
+    }
   },
 };
 

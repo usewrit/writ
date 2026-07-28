@@ -215,11 +215,23 @@ def test_pick_agent_gates():
 @pytest.fixture()
 def ai_app(db_engine):
     """A FastAPI app wiring the ai_sessions router against the throwaway schema, with
-    require_platform_admin bypassed and get_db bound to the test engine."""
+    auth bypassed and get_db bound to the test engine.
+
+    BOTH auth dependencies have to be overridden, not just the admin one. Every
+    route here also depends on `require_feature("ai_sessions")`, which always
+    allows but *deliberately still resolves auth* via `get_auth_context` so the
+    wiring matches what it replaced. Override only `require_platform_admin` and
+    the gate's own sub-dependency answers 401, which looks like an auth-logic
+    failure rather than a fixture that is one dependency short.
+    """
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from database import get_db
-    from security.dependencies import require_platform_admin, AuthContext
+    from security.dependencies import (
+        require_platform_admin,
+        get_auth_context,
+        AuthContext,
+    )
     from routers.ai_sessions import router as ai_sessions_router
 
     maker = async_sessionmaker(bind=db_engine, expire_on_commit=False, class_=AsyncSession)
@@ -235,6 +247,7 @@ def ai_app(db_engine):
     app.include_router(ai_sessions_router, prefix="/api")
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[require_platform_admin] = _override_admin
+    app.dependency_overrides[get_auth_context] = _override_admin
     return app, maker
 
 

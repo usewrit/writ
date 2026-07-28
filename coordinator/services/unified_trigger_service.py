@@ -1799,14 +1799,148 @@ class UnifiedTriggerService:
         context: Dict[str, Any],
         trigger: TriggerRule
     ) -> Dict[str, Any]:
-        """Dispatch AI session action - immediately executes on recorder.
+        """Fire one autonomous AI session at a connected fleet agent.
 
-        AI sessions are not available in this build, so an ai_session trigger
-        action can no longer be executed. Return a skipped result.
+        This used to return `{"status": "skipped", "reason": "AI sessions are not
+        available in this build"}` — a stale claim. Self-host DOES have AI sessions
+        (models/ai_session.py, routers/ai_sessions.py, alembic 0006, and the agent's
+        `ai_session_start` frame). The block stayed in the catalog as `platforms:
+        BOTH`, so an operator could add "Run AI Agent" to an automation and it
+        silently did nothing.
+
+        SHAPE. The cloud block is ID-shaped: `session_ids` referencing saved
+        `AIWorkflowSession` RECIPES. Self-host has no such recipe table — its
+        `AiSession` rows are RUN RECORDS (session_id, agent_id, goal, status, …) and
+        `POST /ai-sessions/start` takes the goal INLINE. So this block is GOAL-shaped
+        and `session_ids` is meaningless here; porting cloud's dispatch verbatim
+        could never work.
+
+        This deliberately does NOT call the HTTP route: a trigger fires with no admin
+        session, so it reuses the same internals the route does (pick agent → resolve
+        deploy target → seal creds → persist → fire-and-forget frame). Never raises:
+        a trigger action reports failure as a result, it does not abort the chain.
         """
+        import uuid
+        from datetime import datetime, timezone
+
+        from models.ai_session import AiSession
+
+        goal = self._render_template(str(config.get("goal") or ""), context).strip()
+        if not goal:
+            return {"status": "skipped", "reason": "no goal configured"}
+
+        entry_url = config.get("entry_url")
+        entry_url = self._render_template(str(entry_url), context).strip() if entry_url else None
+
+        # `user_context` is what the operator threads in from upstream blocks; it is
+        # additive to the goal rather than a separate agent input, because the
+        # self-host start frame has no user_context field.
+        user_context = config.get("user_context")
+        if user_context:
+            rendered = self._render_template(str(user_context), context).strip()
+            if rendered:
+                goal = f"{goal}\n\nContext:\n{rendered}"
+
+        # Render the form values the agent may fill with.
+        available_data: Dict[str, Any] = {}
+        for key, value in (config.get("form_data") or {}).items():
+            if key:
+                available_data[key] = self._render_template(str(value), context) if value else ""
+
+        try:
+            from routers import user_recorder_ws
+            from routers.ai_sessions import _pick_agent
+            from routers.fleet import _resolve_deploy_target, _seal_plaintext_for_agent
+        except Exception as e:  # pragma: no cover - import guard
+            logger.warning(f"[UnifiedTrigger] ai_session dispatch unavailable: {e}")
+            return {"status": "failed", "reason": f"ai_session dispatch unavailable: {e}"}
+
+        # Agent selection + capability check. `_resolve_deploy_target` is the real
+        # enforcement: it raises unless the agent is local-AI-capable and has a
+        # channel key. Both raise HTTPException, which must not escape into the
+        # trigger chain — convert to a result.
+        try:
+            agent_id = _pick_agent(config.get("agent_id"))
+            channel_key = _resolve_deploy_target(agent_id)
+        except Exception as e:
+            reason = getattr(e, "detail", None) or str(e)
+            logger.info(f"[UnifiedTrigger] ai_session not dispatched: {reason}")
+            return {"status": "failed", "reason": str(reason)}
+
+        credentials_encrypted = None
+        creds = {k: v for k, v in (config.get("credentials") or {}).items() if k}
+        if creds:
+            rendered_creds = {
+                k: self._render_template(str(v), context) if v else "" for k, v in creds.items()
+            }
+            credentials_encrypted = _seal_plaintext_for_agent(
+                json.dumps(rendered_creds), channel_key
+            )
+
+        session_id = str(uuid.uuid4())
+        name = f"AI: {goal}"[:500]
+        generate_workflow = bool(config.get("generate_workflow", True))
+        try:
+            max_steps = int(config.get("max_steps") or 20)
+        except (TypeError, ValueError):
+            max_steps = 20
+
+        # Persist BEFORE sending, exactly as the route does: a crash between the
+        # send and the terminal frame must still leave a durable row.
+        row = AiSession(
+            session_id=session_id,
+            agent_id=agent_id,
+            name=name,
+            goal=goal,
+            entry_url=entry_url,
+            status="running",
+            generate_workflow=generate_workflow,
+        )
+        self.db.add(row)
+        await self.db.commit()
+        await self.db.refresh(row)
+
+        frame = {
+            "type": "ai_session_start",
+            "session_id": session_id,
+            "request_id": str(uuid.uuid4()),
+            "name": name,
+            "goal": goal,
+            "entry_url": entry_url,
+            "available_data": available_data,
+            "credentials_encrypted": credentials_encrypted,
+            "persona_id": config.get("persona_id"),
+            "max_steps": max_steps,
+            "generate_workflow": generate_workflow,
+        }
+
+        sent = await user_recorder_ws.push_fire_and_forget(agent_id, frame)
+        if not sent:
+            # The agent vanished between the pick and the send. Mark the row terminal
+            # so it is not stuck "running" forever (same recovery as the route).
+            row.status = "error"
+            row.error = "agent_disconnected"
+            row.completed_at = datetime.now(timezone.utc)
+            await self.db.commit()
+            return {
+                "status": "failed",
+                "reason": "the chosen agent disconnected before the AI session could start",
+                "ai_session_id": row.id,
+            }
+
+        logger.info(
+            f"[UnifiedTrigger] Started AI session {row.id} ({session_id}) on agent "
+            f"{agent_id} for trigger {trigger.id}"
+        )
         return {
-            "status": "skipped",
-            "reason": "AI sessions are not available in this build",
+            "status": "completed",
+            "ai_session_id": row.id,
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "goal": goal[:500],
+            # The block-chain reader keys continuation off these (see the
+            # `ai_session_completed` continuation filter).
+            "tasks_created": [{"ai_session_id": row.id, "ai_session_name": name}],
         }
 
     async def _wait_and_resume_continuation(

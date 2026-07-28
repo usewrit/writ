@@ -43,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from models.ai_session import AiSession
 from security.dependencies import require_platform_admin
+from security.feature_gate import require_feature
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,12 @@ async def start_ai_session(
     body: StartAISessionRequest,
     db: AsyncSession = Depends(get_db),
     _admin=Depends(require_platform_admin),
+    # `ai_sessions` is a registered feature (security/feature_defs.py) but nothing
+    # ever gated on it here, so the flag was decorative. Wire it the same way
+    # routers/streaming.py does. On a single-owner coordinator the dependency
+    # always allows — the point is that the choke point EXISTS, so a future
+    # kill-switch/registry change takes effect instead of silently doing nothing.
+    _gate=Depends(require_feature("ai_sessions")),
 ):
     """Fire one autonomous AI session at a fleet agent and return the ``running`` row.
 
@@ -196,6 +203,7 @@ async def cancel_ai_session(
     session_pk: int,
     db: AsyncSession = Depends(get_db),
     _admin=Depends(require_platform_admin),
+    _gate=Depends(require_feature("ai_sessions")),
 ):
     """Force-Stop a running fleet AI session: dispatch an ``ai_session_cancel`` frame to the agent
     holding it (the agent sets the session's cancel flag and its loop aborts mid-turn, then replies
@@ -233,6 +241,7 @@ async def list_ai_sessions(
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
     _admin=Depends(require_platform_admin),
+    _gate=Depends(require_feature("ai_sessions")),
 ):
     """List AI sessions, newest first."""
     limit = max(1, min(int(limit), 500))
@@ -249,6 +258,7 @@ async def get_ai_session(
     session_pk: int,
     db: AsyncSession = Depends(get_db),
     _admin=Depends(require_platform_admin),
+    _gate=Depends(require_feature("ai_sessions")),
 ):
     """Get one AI session by its integer id."""
     row = (

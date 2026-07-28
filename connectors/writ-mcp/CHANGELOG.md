@@ -5,6 +5,35 @@ All notable changes to `writ-mcp` are documented here. This project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A request the server never addressed left the client hanging forever.** The
+  connector relayed whatever came back and stopped there, so a response carrying
+  no answer for an id we sent — a gateway serving a cached body, a proxy that
+  rewrites the payload, a server answering a batch with a single object — blocked
+  that id permanently. On `initialize` this presents as an MCP server that simply
+  never finishes starting. Every id the client is waiting on is now guaranteed a
+  response; the server's own payload is still relayed untouched, so
+  server-initiated messages keep working.
+- **The API key is now trimmed, and rejected at startup if it cannot go in a
+  header.** `WRIT_API_KEY=$(cat key.txt)` and pasting from the app both bring
+  whitespace, and a newline made Node throw inside *every* request — surfacing as
+  `Cannot reach <target> (Invalid character in header content)`, which blames the
+  network for a credential that is one character off. A `Bearer …`-prefixed value
+  is accepted without doubling the scheme.
+- **Credentials embedded in `--url` are no longer echoed to stderr.**
+  `https://user:pass@host/` is a legal URL, and MCP clients persist a server's
+  stderr to a log file on disk, so the password was written down in plaintext. It
+  is redacted from every diagnostic, and the connector now says the credentials
+  were ignored (they were never sent — Writ authenticates with the key header).
+- **An HTTP redirect is named instead of reported as `Empty response`.** A 301
+  from a reverse proxy doing `http` → `https` is a routine setup and gave a
+  message that explained none of it. Redirects are still deliberately not
+  followed: resending the `Authorization` header to whatever origin `Location`
+  names would leak the key.
+- Documentation used a `wk_` API-key prefix that no Writ surface has ever issued;
+  real keys are `wt_`.
+
 ### Added
 
 - Workflow tools now accept an optional `max_age` (seconds) so an agent can reuse a
@@ -15,6 +44,13 @@ All notable changes to `writ-mcp` are documented here. This project follows
 
 Both are server-side capabilities relayed verbatim — this connector holds no tool
 logic, so no client update is needed to pick them up.
+
+### Changed
+
+- The connector now lives in its own repository,
+  [`usewrit/writ-mcp`](https://github.com/usewrit/writ-mcp), and is released from
+  there. `repository`, `bugs` and `homepage` point at it. It continues to ship
+  bundled inside a self-host install at `connectors/writ-mcp`.
 
 ## [1.0.0] — 2026-07-25
 

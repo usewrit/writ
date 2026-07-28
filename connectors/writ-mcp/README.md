@@ -1,75 +1,104 @@
-# writ-mcp
+<div align="center">
+  <img src="./assets/banner.svg" alt="writ-mcp — the official Writ MCP server connector" width="100%">
 
-**The official Writ MCP server connector — for Writ Cloud and self-hosted coordinators.**
+  <br/>
 
-It bridges a stdio MCP client (Claude Code, Claude Desktop, Cursor, Windsurf,
-Codex, …) to a Writ MCP endpoint, so your saved browser workflows become callable
-tools — run them, read their accumulated data, search past results, schedule
-them, expose them as REST endpoints, and kick off site crawls.
+  <p align="center">
+    <a href="https://github.com/usewrit/writ-mcp/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/usewrit/writ-mcp/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
+    <a href="https://www.npmjs.com/package/writ-mcp"><img src="https://img.shields.io/npm/v/writ-mcp?style=flat-square&color=FF4A24" alt="npm version"></a>
+    <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-FF4A24?style=flat-square" alt="License: MIT"></a>
+    <img src="https://img.shields.io/badge/node-18%2B-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node 18+">
+    <img src="https://img.shields.io/badge/dependencies-0-16a34a?style=flat-square" alt="Zero dependencies">
+    <img src="https://img.shields.io/badge/provenance-signed-16a34a?style=flat-square" alt="Published with npm provenance">
+    <img src="https://img.shields.io/badge/PRs-welcome-16a34a?style=flat-square" alt="PRs welcome">
+  </p>
 
-The connector holds **no tool logic** — it's a transparent stdio↔HTTP proxy.
-Every tool lives server-side, so what you get here always matches what the app
-can do. (Clients that speak Streamable HTTP directly don't need this at all —
-point them straight at the `/mcp` endpoint with an `Authorization: Bearer` header.)
+  <h3 align="center">Your saved browser workflows, as tools your assistant can call.</h3>
 
-## Prerequisites
+  <p align="center">
+    <a href="#quick-start"><b>Quick start</b></a> ·
+    <a href="#tools-you-get"><b>Tools</b></a> ·
+    <a href="#configuration"><b>Configuration</b></a> ·
+    <a href="#security"><b>Security</b></a> ·
+    <a href="#troubleshooting"><b>Troubleshooting</b></a> ·
+    <a href="./CONTRIBUTING.md"><b>Contributing</b></a>
+  </p>
+</div>
 
-- An **API key**: in the Writ app, go to **Settings → Developers → API keys**
-  and create one — on Writ Cloud, or in your own instance for self-host.
-- For self-host, the **URL of your coordinator** (`--url`). Without it the
-  connector targets Writ Cloud at `https://api.usewrit.app`.
-- Node 18+ (`npx` fetches the connector for you). A self-host install also
-  bundles it under `connectors/writ-mcp` — run it by local path
-  (`node path/to/connectors/writ-mcp --api-key …`) if you'd rather not use npm.
+---
 
-## Add to Claude Code
+**writ-mcp** connects a stdio MCP client — Claude Code, Claude Desktop, Cursor,
+Windsurf, Codex — to [Writ](https://github.com/usewrit/writ), so the browser
+workflows you already recorded become tools your assistant can call: run them,
+read the data they collected, search past results, schedule them, expose them as
+REST endpoints, and kick off site crawls.
 
-**Writ Cloud** (the default target — no `--url` needed):
+<div align="center">
+  <img src="./assets/connect.svg" alt="Terminal: claude mcp add writ-selfhost, then claude mcp list reporting Connected" width="100%">
+</div>
+
+It is a **transparent stdio↔HTTP proxy and nothing else**. Every tool, schema and
+rule lives server-side, so what you get always matches what your instance can do —
+and a new tool never requires upgrading this package. Zero dependencies, one file,
+Node core only.
+
+> Clients that speak Streamable HTTP natively don't need this at all — point them
+> straight at the `/mcp` endpoint with an `Authorization: Bearer <key>` header.
+
+## Quick start
+
+**1. Get an API key.** In the Writ app: **Settings → Developers → API keys**. Keys
+look like `wt_…`.
+
+**2. Add the server.**
+
+Against a self-hosted coordinator:
 
 ```bash
-claude mcp add writ-cloud -- npx -y writ-mcp --api-key <YOUR_API_KEY>
+claude mcp add writ-selfhost -e WRIT_API_KEY=<YOUR_API_KEY> -- npx -y writ-mcp --url https://writ.example.com
 ```
 
-**Self-hosted coordinator**:
+Against a coordinator on this machine:
 
 ```bash
-claude mcp add writ-selfhost -- npx -y writ-mcp --url https://writ.example.com --api-key <YOUR_API_KEY>
+claude mcp add writ-selfhost -e WRIT_API_KEY=<YOUR_API_KEY> -- npx -y writ-mcp --url http://localhost:8000
 ```
 
-**A coordinator running locally**:
-
-```bash
-claude mcp add writ-selfhost -- npx -y writ-mcp --url http://localhost:8000 --api-key <YOUR_API_KEY>
-```
-
-**A published per-workflow MCP endpoint** (an "Expose as MCP" slug URL is used
+Against a published per-workflow endpoint (an "Expose as MCP" slug URL is used
 verbatim — no path rewriting):
 
 ```bash
-claude mcp add my-tools -- npx -y writ-mcp --url https://mcp.usewrit.app/mcp/my-tools --api-key <YOUR_API_KEY>
+claude mcp add my-tools -e WRIT_API_KEY=<YOUR_API_KEY> -- npx -y writ-mcp --url https://mcp.example.com/mcp/my-tools
 ```
 
-> **Prefer the environment variable for the key.** `--api-key` puts your key in
-> the process's argument list, where any local process can read it via `ps` and
-> your shell records it in history. `WRIT_API_KEY` avoids both.
+**3. Check it.**
 
-Restart / reconnect and the `writ_*` tools appear (plus one `run_<name>` tool
-per saved workflow). A running server also hands out these one-liners live at
-`GET /api/mcp/connect-info`.
+```bash
+claude mcp list
+```
 
-> **Coexists with the other Writ servers.** Each surface registers under its own
-> slug on purpose: the desktop app is `writ`, Writ Cloud is `writ-cloud`, and a
-> self-hosted coordinator is `writ-selfhost`. Keep any combination connected —
-> each server identifies itself to the AI with a distinct title so they are
-> never confused.
+> **Writ Cloud is the default target** when you pass no `--url`
+> (`https://api.usewrit.app`). The hosted service is **not live yet** — until it
+> is, always pass `--url` pointing at your own coordinator. See
+> [Status](#status).
 
-## Add to Claude Desktop / Cursor (config file)
+> **Pass the key through the environment, not the command line.** `--api-key`
+> works, but it puts your key in the process's argument list where any local
+> process can read it via `ps`, and your shell records it in history. The
+> connector prints a note when you use it.
+
+Your running coordinator also hands out these one-liners, pre-filled, on its
+**Connect** page and at `GET /api/mcp/connect-info`:
+
+<div align="center">
+  <img src="./assets/media/connect.png" alt="The Connect page of a self-hosted Writ coordinator, showing the writ-mcp one-liner and the tools it exposes" width="100%">
+</div>
+
+### Claude Desktop / Cursor (config file)
 
 Add to `claude_desktop_config.json` (Claude Desktop) or `~/.cursor/mcp.json`
-(Cursor):
-
-Passing config through `env` is the recommended form — it keeps the API key out
-of the process argument list:
+(Cursor). The `env` form is recommended — it keeps the key out of the argument
+list:
 
 ```json
 {
@@ -77,24 +106,73 @@ of the process argument list:
     "writ-selfhost": {
       "command": "npx",
       "args": ["-y", "writ-mcp"],
-      "env": { "WRIT_COORDINATOR_URL": "https://writ.example.com", "WRIT_API_KEY": "<YOUR_API_KEY>" }
+      "env": {
+        "WRIT_COORDINATOR_URL": "https://writ.example.com",
+        "WRIT_API_KEY": "<YOUR_API_KEY>"
+      }
     }
   }
 }
 ```
 
-The equivalent with flags — drop `--url` to target Writ Cloud instead:
+### Without npm
 
-```json
-{
-  "mcpServers": {
-    "writ-selfhost": {
-      "command": "npx",
-      "args": ["-y", "writ-mcp", "--url", "https://writ.example.com", "--api-key", "<YOUR_API_KEY>"]
-    }
-  }
-}
+A self-host install bundles this connector at `connectors/writ-mcp`. There is no
+build step, so you can run it straight from disk:
+
+```bash
+node /path/to/writ/connectors/writ-mcp/index.js --url https://writ.example.com
 ```
+
+> **It coexists with the other Writ servers.** Each surface registers under its
+> own slug on purpose — the desktop app is `writ`, Writ Cloud is `writ-cloud`, a
+> self-hosted coordinator is `writ-selfhost` — and each identifies itself to the
+> assistant with a distinct title. Keep any combination connected at once.
+
+## Tools you get
+
+Served by the coordinator, not by this package:
+
+| Tool | What it does |
+|---|---|
+| `writ_list_workflows` | Your saved workflows — plus a `run_<name>` tool per workflow |
+| `writ_run_workflow` | Run one and wait for the extracted data |
+| `writ_workflow_data` | Read a workflow's accumulated data table |
+| `writ_search_data` | Search across everything already collected |
+| `writ_export_data` | Export a workflow's data as CSV/JSON |
+| `writ_workflow_runs` | Run history and status |
+| `writ_set_schedule` | Schedule a workflow (interval / daily / weekly) |
+| `writ_expose_workflow_api` | Publish a workflow as a callable REST endpoint |
+| `writ_crawl_site` / `writ_crawl_status` | Start and poll a distributed site crawl |
+| `writ_create_automation` | Event → run-workflow / notify chains |
+| `writ_create_monitor` / `writ_wire_monitor` | Watch a page and react to changes |
+
+A self-hosted coordinator additionally exposes `writ_browser_use` and
+`writ_record_*` — drive a live browser on your own [fleet
+agent](https://github.com/usewrit/writ-agent) and save the session as a reusable
+workflow.
+
+### Reusing a recent result (`max_age`)
+
+Running a workflow drives a real browser, so asking the same question twice in one
+session costs two full runs and two waits. Every workflow tool takes an optional
+**`max_age`** (seconds) meaning *a recent answer is good enough*:
+
+```jsonc
+{ "name": "run_price_check", "arguments": { "sku": "B0C123", "max_age": 300 } }
+```
+
+- **omitted or `0`** — always run fresh (the default; nothing goes stale on its own).
+- **`N`** — reuse a result younger than `N` seconds, otherwise run.
+
+A reused answer carries `_cache: {hit: true, age_seconds: N}` so the assistant can
+tell how current it is.
+
+### If a tool call times out
+
+It comes back as `status: "running"` with `retryable: true`. The run was **not**
+cancelled — calling the tool again starts a *second* run. Wait, then retry with a
+`max_age` wide enough to pick up the first run's result once it lands.
 
 ## Configuration
 
@@ -103,101 +181,73 @@ Flags take precedence over environment variables.
 | Flag | Env | Default | Purpose |
 |------|-----|---------|---------|
 | `--url` | `WRIT_COORDINATOR_URL` / `WRIT_URL` | `https://api.usewrit.app` | Target base URL. A URL whose path is already `/mcp` or `/mcp/<slug>` is used verbatim. |
-| `--api-key` | `WRIT_API_KEY` | — (**required**) | API key for `Authorization: Bearer`. Prefer the env var — see above. |
-| `--insecure` | `WRIT_INSECURE_TLS=1` | off | Accept a self-signed local-CA HTTPS cert (self-host on a trusted private network only). |
+| `--api-key` | `WRIT_API_KEY` | — (**required**) | Key for `Authorization: Bearer`. Prefer the env var. |
+| `--insecure` | `WRIT_INSECURE_TLS=1` | off | Accept a self-signed local-CA cert. Private networks only. |
 | `--timeout` | `WRIT_MCP_TIMEOUT_MS` | `600000` | Per-request timeout (ms); covers long `writ_run_workflow` waits. |
+| `--help` / `--version` | — | — | Print usage or version and exit. |
 
-> **HTTPS / local CA (self-host):** if your coordinator serves HTTPS with its
-> own local CA, either trust the CA (recommended) and point `--url` at the
+> **HTTPS with a local CA (self-host):** trust the CA (recommended) and use the
 > `https://` address, or set `NODE_EXTRA_CA_CERTS=/path/to/ca.pem`. Use
-> `--insecure` only for localhost testing.
+> `--insecure` only for localhost testing — it disables certificate verification
+> entirely, which exposes your key to a man-in-the-middle.
 
 ## Security
 
 This process exists to carry a credential, so everything that could expose one is
-made loud rather than convenient.
+made loud rather than convenient. Full detail in [`SECURITY.md`](./SECURITY.md).
 
-- **The key is sent to `--url` and nowhere else.** No telemetry, no analytics, no
-  update check, no third-party host — zero dependencies means there is nothing
-  else in the process that could phone home.
-- **Warnings you should never ignore.** The connector prints a `WARNING` to
-  stderr (surfaced in your MCP client's logs) when TLS verification is disabled
-  (`--insecure`) or when the target is plaintext `http://` on a non-loopback
-  host. Both mean the key is interceptable.
-- **Prefer `WRIT_API_KEY`.** `--api-key` is readable by any local process via
-  `ps`; the connector says so at startup when you use it.
-- **Scope the key.** Give it only `workflows:read` / `workflows:execute` unless a
-  tool you actually use needs more.
-- **Retries never double-run a workflow.** Only read-only methods
-  (`initialize`, `ping`, `tools/list`, …) are retried on a transient failure.
+- **The key goes to `--url` and nowhere else.** No telemetry, no analytics, no
+  update check. **Zero dependencies** means there is no transitive code in the
+  process that could phone home — and CI fails the build if that ever changes.
+- **Redirects are never followed.** Replaying your `Authorization` header to
+  whatever origin a `Location` header names would hand your key to a host you
+  didn't choose. A 3xx becomes an error telling you to point `--url` at the final URL.
+- **Credentials in a URL are redacted from every diagnostic.** MCP clients write a
+  server's stderr to a log file on disk; `https://user:pass@host/` would otherwise
+  be written down in plaintext.
+- **Loud warnings, on stderr, for every way a key leaks:** TLS verification
+  disabled, plaintext `http://` to a non-loopback host, or a key passed on the
+  command line.
+- **Retries never double-run a workflow.** Only read-only methods are retried;
   `tools/call` is sent exactly once, because a retry could re-execute a side
-  effect the connector cannot see. The one exception is a connection that was
-  refused outright — the request provably never arrived.
-- **Responses are bounded** at 32 MB, so a broken or hostile endpoint cannot grow
-  this process until the OS kills your MCP session.
+  effect the connector cannot see.
+- **Responses are bounded** at 32 MB, so a broken endpoint can't grow this process
+  until the OS kills your session.
+- **No request is ever left unanswered** — a hung MCP client is a denial of
+  service on your assistant, and that is the failure this connector works hardest
+  to make impossible.
 
-Report vulnerabilities via the repository's [`SECURITY.md`](https://github.com/usewrit/writ/blob/main/SECURITY.md).
+**Scope your keys.** Give a key only `workflows:read` / `workflows:execute` unless
+a tool you actually use needs more.
 
 ### Verifying what you install
 
-Releases are published from CI with [npm provenance](https://docs.npmjs.com/generating-provenance-statements),
-so the tarball is cryptographically linked to the commit and workflow that built it:
+Releases are published from CI with [npm
+provenance](https://docs.npmjs.com/generating-provenance-statements), so the
+tarball is cryptographically linked to the commit and workflow that built it:
 
 ```bash
 npm audit signatures
 ```
 
-## Tools exposed
-
-On both targets:
-
-- `writ_list_workflows` — your saved workflows + a `run_<name>` tool per workflow
-- `writ_run_workflow` — run one and wait for the extracted data
-- `writ_workflow_data` — read a workflow's accumulated data table
-- `writ_search_data` — search across everything already collected
-- `writ_export_data` — export a workflow's data as CSV/JSON
-- `writ_workflow_runs` — run history / status
-- `writ_set_schedule` — schedule a workflow (interval / daily / weekly)
-- `writ_expose_workflow_api` — expose a workflow as a callable REST endpoint
-- `writ_crawl_site` / `writ_crawl_status` — start / poll a distributed site crawl
-- `writ_create_automation` — event → run-workflow / notify chains
-
-Self-host additionally exposes `writ_browser_use` / `writ_record_*` — drive a
-live browser on your own fleet agent and save the session as a reusable
-workflow. On Writ Cloud, build new workflows in the Writ app; this server
-operates what you saved.
-
-### Reusing a recent result (`max_age`)
-
-Every workflow tool takes an optional **`max_age`** (seconds). Running a workflow
-drives a real browser, so asking the same question twice in one session costs two
-full runs and two waits. Pass `max_age` to say a recent answer is good enough:
-
-```jsonc
-{ "name": "run_price_check", "arguments": { "sku": "B0C123", "max_age": 300 } }
-```
-
-- **omitted or `0`** — always runs fresh (the default; nothing gets staler on its own).
-- **`N`** — reuse a result younger than `N` seconds, otherwise run.
-
-A reused answer carries `_cache: {hit: true, age_seconds: N}` so you can tell how
-current it is.
-
-### If a tool times out
-
-A tool call that outruns its timeout returns `status: "running"` with
-`retryable: true`. The run was **not** cancelled — calling the tool again starts a
-*second* run. Wait, then retry with a `max_age` wide enough to pick up the first
-run's result once it lands.
-
 ## Troubleshooting
 
-- **`Unauthorized`** — the API key is wrong, disabled, or lacks scope. Recreate it
-  under Settings → Developers and ensure it has `workflows:read` / `workflows:execute`.
-- **`Cannot reach …`** — check `--url` and that the target is up. For
-  self-signed HTTPS, see the local-CA note above.
-- **No tools listed** — you have no saved workflows yet, or the key can't read them.
-  Save one in the Writ app; the static `writ_*` tools still appear regardless.
+| Symptom | Cause and fix |
+|---|---|
+| `Unauthorized: … rejected the API key` | The key is wrong, disabled, or lacks scope. Recreate it under **Settings → Developers** with `workflows:read` / `workflows:execute`. |
+| `Cannot reach …` | Wrong `--url`, or the target is down. For a self-signed cert see the local-CA note above. |
+| `… redirected (HTTP 301)` | Your reverse proxy redirects (usually `http` → `https`). Point `--url` at the final URL. |
+| `The API key contains characters that cannot be sent in an HTTP header` | A newline or control character got into the key — usually a copy-paste artifact. Re-copy it. |
+| **No tools listed** | You have no saved workflows yet, or the key can't read them. The static `writ_*` tools appear regardless. |
+| **Client won't connect, no error** | Read the connector's stderr — your client logs it. Claude Code: `~/Library/Caches/claude-cli-nodejs/<project>/mcp-logs-<name>/`. |
+
+## Status
+
+| | |
+|---|---|
+| **Self-hosted coordinator** | Supported and verified end to end. |
+| **Published `/mcp/<slug>` endpoints** | Supported. |
+| **Writ Cloud** (`https://api.usewrit.app`, the no-`--url` default) | **Not live yet.** The hosted service has not launched; the hostname does not resolve. Pass `--url` until it does. |
 
 ## Development
 
@@ -205,17 +255,26 @@ run's result once it lands.
 npm test
 ```
 
-The suite has **no dev dependencies** — it uses `node:test` and drives the real
-`index.js` as a subprocess against a mock MCP server, so it exercises the same
-stdio path an MCP client uses. `npm publish` runs it automatically via
-`prepublishOnly`.
+No dev dependencies — the suite uses Node's built-in `node:test` and drives the
+real `index.js` as a subprocess against a mock MCP server, exercising the same
+stdio path an MCP client uses. It runs in about six seconds. `npm publish` runs it
+automatically via `prepublishOnly`.
+
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) — note the two hard rules: **zero
+dependencies, permanently**, and **no tool logic here**.
+
+## The rest of Writ
+
+| | |
+|---|---|
+| [**usewrit/writ**](https://github.com/usewrit/writ) | The self-host coordinator — web UI, API, your data. Start here. |
+| [**usewrit/writ-agent**](https://github.com/usewrit/writ-agent) | The Rust fleet worker that does the actual browsing. |
+| **writ-mcp** (this repo) | The MCP connector. |
 
 ## License
 
-**MIT** — see [`LICENSE`](./LICENSE) in this directory. The connector is
-deliberately zero-dependency (Node core `http`/`https` only).
+**MIT** — see [`LICENSE`](./LICENSE).
 
-This one directory is intentionally permissive: it runs *inside your MCP client*,
-not inside the coordinator, so it must be embeddable anywhere. The coordinator
-that ships alongside it is **AGPL-3.0-only** (see the repository's top-level
-`LICENSE`) — the two licenses are not interchangeable.
+This package is deliberately permissive because it runs *inside your MCP client*,
+not inside the coordinator, so it has to be embeddable anywhere. The coordinator
+it talks to is **AGPL-3.0-only**; the two licenses are not interchangeable.

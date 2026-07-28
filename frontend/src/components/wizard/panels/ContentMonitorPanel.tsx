@@ -123,7 +123,9 @@ export const ContentMonitorPanel: React.FC = () => {
   // Visual zone — screenshot comparison. Each zone needs a UNIQUE sentinel selector
   // ("viewport-zone-XXXX") so multiple zones on the same page don't collide on the
   // per-target duplicate-selector check.
-  const handleZoneDrawn = (region: { x: number; y: number; width: number; height: number; scroll_x?: number; scroll_y?: number }) => {
+  // Typed off WizardSelector so the zone's provenance (scroll + capture viewport)
+  // can't be dropped here by an inline type that forgot to list a field.
+  const handleZoneDrawn = (region: NonNullable<WizardSelector['region']>) => {
     const zoneSel: WizardSelector = {
       id: newSelectorId(),
       name: t('Zone {{n}}', { n: selectors.filter(s => s.checkType === 'visual').length + 1 }),

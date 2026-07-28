@@ -5,7 +5,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const { startServer, runConnector, INIT, okResult } = require('./helpers');
 
-const KEY = { WRIT_API_KEY: 'wk_test_key' };
+const KEY = { WRIT_API_KEY: 'wt_test_key' };
 
 test('relays initialize and tools/list, and sends a Bearer header to /mcp', async () => {
   const srv = await startServer((msg) => {
@@ -29,7 +29,7 @@ test('relays initialize and tools/list, and sends a Bearer header to /mcp', asyn
   assert.equal(r.lines[1].result.tools[0].name, 'writ_list_workflows');
 
   assert.equal(srv.requests[0].url, '/mcp');
-  assert.equal(srv.requests[0].headers.authorization, 'Bearer wk_test_key');
+  assert.equal(srv.requests[0].headers.authorization, 'Bearer wt_test_key');
   assert.match(srv.requests[0].headers.accept, /application\/json/);
   assert.match(srv.requests[0].headers.accept, /text\/event-stream/);
 });
@@ -268,4 +268,74 @@ test('in-flight requests drain before exit when stdin closes', async () => {
 
   assert.equal(r.lines.length, 1, 'the slow reply must still arrive');
   assert.equal(r.lines[0].result.slow, true);
+});
+
+// REGRESSION: the connector used to relay whatever the server sent and stop
+// there. A response that does not address an id we sent — a gateway serving a
+// cached body, a proxy that rewrites the payload, a server answering a batch
+// with one object — left the client blocked on that id forever. On `initialize`
+// that means the MCP server never finishes starting and the client just reports
+// "failed to connect" with nothing to go on.
+test('an id the server never answers is backfilled, not left hanging', async () => {
+  const srv = await startServer(() => ({
+    // Well-formed JSON-RPC, wrong id.
+    body: { jsonrpc: '2.0', id: 999, result: { ok: true } },
+  }));
+
+  const r = await runConnector({
+    args: ['--url', srv.url], env: KEY, expect: 2,
+    send: [INIT],
+  });
+  await srv.close();
+
+  const forOne = r.lines.find((l) => l.id === 1);
+  assert.ok(forOne, 'id 1 must be answered even though the server addressed id 999');
+  assert.equal(forOne.error.code, -32603);
+  assert.match(forOne.error.message, /no response for request id 1/);
+  // The server's own message is still relayed — a POST response may legitimately
+  // carry server-initiated traffic, so we add, never filter.
+  assert.ok(r.lines.some((l) => l.id === 999), 'the server payload is still relayed');
+});
+
+test('a batch where the server answers only some ids backfills the rest', async () => {
+  const srv = await startServer((msg) => ({
+    body: [okResult(msg[0].id, { echo: 1 })],  // second id silently dropped
+  }));
+
+  const r = await runConnector({
+    args: ['--url', srv.url], env: KEY, expect: 2,
+    send: [[
+      { jsonrpc: '2.0', id: 11, method: 'tools/list', params: {} },
+      { jsonrpc: '2.0', id: 12, method: 'ping', params: {} },
+    ]],
+  });
+  await srv.close();
+
+  assert.ok(r.lines.find((l) => l.id === 11 && l.result), 'id 11 answered normally');
+  const missing = r.lines.find((l) => l.id === 12);
+  assert.ok(missing, 'id 12 must not hang');
+  assert.match(missing.error.message, /no response for request id 12/);
+});
+
+// A 301/302 is what a reverse proxy doing http -> https returns. Node does not
+// follow redirects (correctly — replaying the Authorization header to a new
+// origin would hand the API key to a host the user never chose), so the body is
+// empty and this used to surface as the useless "Empty response from ...".
+test('a redirect is named and explained rather than reported as an empty response', async () => {
+  const srv = await startServer(() => ({
+    status: 301,
+    headers: { Location: 'https://writ.example.com/mcp' },
+    body: null,
+  }));
+
+  const r = await runConnector({
+    args: ['--url', srv.url], env: KEY, expect: 1,
+    send: [{ jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }],
+  });
+  await srv.close();
+
+  assert.equal(r.lines[0].id, 3);
+  assert.match(r.lines[0].error.message, /redirected \(HTTP 301\)/);
+  assert.match(r.lines[0].error.message, /https:\/\/writ\.example\.com\/mcp/);
+  assert.match(r.lines[0].error.message, /would leak it/);
 });

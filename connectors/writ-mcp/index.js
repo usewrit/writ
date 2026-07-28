@@ -13,12 +13,12 @@
  *
  * Targets (pick one):
  *   Writ Cloud (default — no --url needed):
- *     claude mcp add writ-cloud -- npx -y writ-mcp --api-key wk_...
+ *     claude mcp add writ-cloud -- npx -y writ-mcp --api-key wt_...
  *   Self-hosted coordinator:
- *     claude mcp add writ-selfhost -- npx -y writ-mcp --url https://writ.example.com --api-key wk_...
+ *     claude mcp add writ-selfhost -- npx -y writ-mcp --url https://writ.example.com --api-key wt_...
  *   A published per-workflow MCP endpoint (an "Expose as MCP" slug URL) is used
  *   verbatim:
- *     claude mcp add my-tools -- npx -y writ-mcp --url https://mcp.usewrit.app/mcp/my-tools --api-key wk_...
+ *     claude mcp add my-tools -- npx -y writ-mcp --url https://mcp.usewrit.app/mcp/my-tools --api-key wt_...
  *
  * Config (flags take precedence over env):
  *   --url <URL>        WRIT_COORDINATOR_URL | WRIT_URL   (default: Writ Cloud)
@@ -133,10 +133,15 @@ const RAW_URL =
   process.env.WRIT_COORDINATOR_URL ||
   process.env.WRIT_URL ||
   CLOUD_BASE;
-const API_KEY =
-  args.apiKey ||
-  process.env.WRIT_API_KEY ||
-  '';
+// Trimmed, because the overwhelmingly common way to supply a key is a paste from
+// the app's UI or `WRIT_API_KEY=$(cat key.txt)` — both of which bring surrounding
+// whitespace, and a newline in a header value is rejected by Node deep inside the
+// transport, surfacing as a per-request "Cannot reach <target>" that blames the
+// network for a typo. `Bearer ` is stripped too so either form normalizes.
+const API_KEY = String(args.apiKey || process.env.WRIT_API_KEY || '')
+  .trim()
+  .replace(/^bearer\s+/i, '')
+  .trim();
 const INSECURE =
   args.insecure ||
   ['1', 'true', 'yes'].includes(String(process.env.WRIT_INSECURE_TLS || '').toLowerCase());
@@ -159,6 +164,21 @@ if (!API_KEY) {
   );
 }
 
+// Reject a key that cannot legally go in an HTTP header, HERE, where we can name
+// the cause. Otherwise Node throws ERR_INVALID_CHAR inside every request and the
+// user sees "Cannot reach <target> (Invalid character in header content)" — a
+// message that points at the network for what is really a malformed credential.
+// Writ keys are `wt_` + URL-safe base64, so printable-non-space is the right set.
+if (!/^[\x21-\x7e]+$/.test(API_KEY)) {
+  die(
+    'The API key contains characters that cannot be sent in an HTTP header ' +
+    '(whitespace, a newline, or a control character). Surrounding whitespace is ' +
+    'already trimmed, so this is something inside the key itself — re-copy it from ' +
+    'Settings -> Developers -> API keys. A Writ key looks like wt_ followed by ' +
+    'letters, digits, - and _.'
+  );
+}
+
 // Build the MCP endpoint URL. A base URL gets '/mcp' appended; a URL whose path
 // already IS an MCP endpoint — '/mcp' exact (any server's native endpoint) or
 // '/mcp/<slug>' (a published per-workflow endpoint) — is used verbatim, so
@@ -177,7 +197,29 @@ try {
 }
 const TRANSPORT = ENDPOINT.protocol === 'https:' ? https : http;
 const AGENT = new TRANSPORT.Agent({ keepAlive: true, maxSockets: 8 });
-const AUTH = API_KEY.toLowerCase().startsWith('bearer ') ? API_KEY : 'Bearer ' + API_KEY;
+const AUTH = 'Bearer ' + API_KEY;
+
+// The URL as it is safe to PRINT. `https://user:pass@host/…` is a legal URL, and
+// every diagnostic below interpolates the endpoint — but MCP clients persist a
+// server's stderr to a log file on disk (Claude Code writes `mcp-logs-<name>/*.jsonl`),
+// so echoing the href verbatim would write that password to disk in plaintext.
+// The request itself never carries the userinfo: opts below are built from
+// hostname/port/path only, so it is dropped either way. Say so rather than
+// letting it look like it was applied.
+const SAFE_HREF = (() => {
+  const u = new URL(ENDPOINT.href);
+  if (!u.username && !u.password) return u.href;
+  u.username = '';
+  u.password = '';
+  return u.href;
+})();
+if (ENDPOINT.username || ENDPOINT.password) {
+  warn(
+    'NOTE: credentials embedded in the URL are ignored — Writ authenticates with ' +
+    'the API key in the Authorization header. Remove them from --url; they are not ' +
+    'sent, and a password in a URL tends to end up in logs and shell history.'
+  );
+}
 
 // Which kind of target we resolved — used in messages so errors point users at
 // the right place for keys/URLs.
@@ -221,7 +263,7 @@ if (args.keyOnArgv) {
 }
 
 warn(
-  'target: ' + TARGET + ' — proxying stdio -> ' + ENDPOINT.href +
+  'target: ' + TARGET + ' — proxying stdio -> ' + SAFE_HREF +
   (INSECURE ? ' (insecure TLS)' : '')
 );
 
@@ -429,6 +471,26 @@ function expectedIds(msg) {
   return [];  // notification, or something we can't address a reply to
 }
 
+// Every id the server actually ANSWERED in this response.
+//
+// A response may legitimately carry more than the answers we asked for — the
+// Streamable HTTP spec lets a server put its own requests and notifications in
+// the body of a POST response — so we relay everything and only use this to find
+// what is MISSING. An id we sent that comes back unaddressed (a gateway serving a
+// cached body, a server that answers a batch with one object, a proxy that
+// rewrites the payload) leaves the client blocked on it forever, which is exactly
+// the failure the batch handling above exists to prevent.
+function answeredIds(decoded) {
+  const list = Array.isArray(decoded) ? decoded : [decoded];
+  const out = new Set();
+  for (const m of list) {
+    if (m && typeof m === 'object' && m.id !== undefined && ('result' in m || 'error' in m)) {
+      out.add(m.id);
+    }
+  }
+  return out;
+}
+
 async function forward(msg) {
   const ids = expectedIds(msg);
 
@@ -459,6 +521,20 @@ async function forward(msg) {
       return;
     }
 
+    // A redirect is NOT followed, deliberately: replaying the Authorization
+    // header to whatever origin the Location names would hand the API key to a
+    // host the user never chose. Node doesn't follow them either, so without
+    // this the user gets "Empty response" — a 301 from a reverse proxy doing
+    // http -> https is a routine setup, and that message explains none of it.
+    if (resp.status >= 300 && resp.status < 400) {
+      const loc = resp.headers && resp.headers.location;
+      await failAll(-32002,
+        TARGET + ' redirected (HTTP ' + resp.status + ')' + (loc ? ' to ' + loc : '') +
+        '. Redirects are not followed, because resending your API key to another ' +
+        'origin would leak it. Point --url at the final URL instead.');
+      return;
+    }
+
     if (!resp.text) {
       await failAll(-32603, 'Empty response from ' + TARGET + '.');
       return;
@@ -485,6 +561,18 @@ async function forward(msg) {
 
     captureSession(msg, resp, decoded);
     await relay(decoded);
+
+    // Backfill anything the server left unaddressed. Relaying first keeps us
+    // spec-compliant (server-initiated messages pass through untouched); this
+    // only guarantees the client is never left waiting on an id we sent.
+    const answered = answeredIds(decoded);
+    for (const id of ids) {
+      if (!answered.has(id)) {
+        await send(rpcError(id, -32603,
+          TARGET + ' returned HTTP ' + resp.status + ' but no response for request id ' +
+          JSON.stringify(id) + '.'));
+      }
+    }
   } catch (err) {
     if (err && err.timedOut) {
       await failAll(-32002, 'Request to ' + TARGET + ' timed out after ' + TIMEOUT_MS + 'ms.');
@@ -492,7 +580,7 @@ async function forward(msg) {
       await failAll(-32002, TARGET + ' returned a response larger than ' +
         Math.round(MAX_RESPONSE_BYTES / 1024 / 1024) + 'MB — refused.');
     } else {
-      await failAll(-32002, 'Cannot reach ' + TARGET + ' at ' + ENDPOINT.href +
+      await failAll(-32002, 'Cannot reach ' + TARGET + ' at ' + SAFE_HREF +
         ' (' + (err && err.message) + ').');
     }
   }

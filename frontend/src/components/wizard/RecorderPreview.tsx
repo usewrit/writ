@@ -51,7 +51,13 @@ interface RecorderPreviewProps {
   /** Called when user clicks an element — returns selector + element info */
   onElementClick?: (info: ElementInfo) => void;
   /** Called when user draws a zone (mousedown→drag→mouseup) in zone mode */
-  onZoneDrawn?: (region: { x: number; y: number; width: number; height: number; scroll_x?: number; scroll_y?: number }) => void;
+  onZoneDrawn?: (region: {
+    x: number; y: number; width: number; height: number;
+    scroll_x?: number; scroll_y?: number;
+    // The frame size the coords were measured in — the monitor check opens its
+    // browser context at this size, so a zone without it clips the wrong pixels.
+    viewport?: { width: number; height: number };
+  }) => void;
   /** Called in area mode with every element found inside the dragged rect */
   onElementsFound?: (infos: ElementInfo[]) => void;
   /** Selection mode: 'click' selects elements, 'zone' draws regions, 'area' multi-selects */
@@ -59,7 +65,15 @@ interface RecorderPreviewProps {
   /** Whether to auto-connect on mount when URL exists */
   autoConnect?: boolean;
   /** Already-defined visual zones to draw persistently over the live frame. */
-  zones?: Array<{ id: string; region: { x: number; y: number; width: number; height: number; scroll_x?: number; scroll_y?: number } }>;
+  zones?: Array<{
+    id: string;
+    region: {
+      x: number; y: number; width: number; height: number;
+      scroll_x?: number; scroll_y?: number;
+      /** Frame size the zone was drawn against; the overlay maps out of it. */
+      viewport?: { width: number; height: number };
+    };
+  }>;
   /** Zone id to emphasize (e.g. hovered in the sidebar). */
   highlightZoneId?: string | null;
 }
@@ -537,28 +551,36 @@ export const RecorderPreview = forwardRef<RecorderPreviewHandle, RecorderPreview
     const vh = Math.round(drawing.h / box.scale);
     const { w: fw, h: fh } = frameSizeRef.current;
     const clamp = (v: number, max: number) => Math.max(0, Math.min(max, v));
-    const region = {
+    const rect = {
       x: clamp(vx, fw),
       y: clamp(vy, fh),
       width: clamp(vw, fw - clamp(vx, fw)),
       height: clamp(vh, fh - clamp(vy, fh)),
-      // Stamp the scroll the page is at right now so the monitor re-scrolls here.
-      scroll_x: scrollRef.current.x,
-      scroll_y: scrollRef.current.y,
     };
 
     if (mode === 'area') {
       // Ask the live page for every element inside the rect — the reply
-      // arrives as an `elements_in_region` frame → onElementsFound.
+      // arrives as an `elements_in_region` frame → onElementsFound. Answered
+      // against the LIVE frame, so it needs the rect only.
       if (wsRef.current && state === 'connected') {
         wsRef.current.send(JSON.stringify({
           type: 'action',
           action: 'get_elements_in_region',
-          ...region,
+          ...rect,
         }));
       }
     } else {
-      onZoneDrawnRef.current?.(region);
+      // A zone outlives this session — stamp WHERE it was drawn (the scroll the page
+      // is at right now, so the monitor re-scrolls here) and AT WHAT SIZE (the live
+      // frame, which is the agent's real viewport: 1920x1080 on the Rust recorder,
+      // 1280x800 on the Python one). Without the size the check can't reproduce the
+      // layout and clips the wrong pixels.
+      onZoneDrawnRef.current?.({
+        ...rect,
+        scroll_x: scrollRef.current.x,
+        scroll_y: scrollRef.current.y,
+        viewport: { width: fw, height: fh },
+      });
     }
     setDrawing(null);
   }, [drawing, mode, state, contentBox]);
@@ -579,12 +601,25 @@ export const RecorderPreview = forwardRef<RecorderPreviewHandle, RecorderPreview
       {/* Persistent visual zones already added — drawn over the live frame so
           the user sees what's watched; the hovered one is emphasized. */}
       {state === 'connected' && zones.map((z) => {
+        // A zone may have been drawn against a differently-sized frame (recorded on
+        // the 1920x1080 Rust agent, reopened over a 1280x800 stream), so map it out of
+        // its own capture viewport onto the live one first. No viewport (a legacy row,
+        // or a zone drawn this session) → factor 1, i.e. unchanged.
+        const { w: fw, h: fh } = frameSizeRef.current;
+        const zvp = z.region.viewport;
+        const rx = zvp && zvp.width > 0 ? fw / zvp.width : 1;
+        const ry = zvp && zvp.height > 0 ? fh / zvp.height : 1;
         // A zone stored at scroll (z.scroll) sits at a different viewport spot
         // once the live page scrolls — shift it by (stored − current) scroll so
         // the overlay tracks the content it watches.
-        const dx = (z.region.scroll_x ?? 0) - scroll.x;
-        const dy = (z.region.scroll_y ?? 0) - scroll.y;
-        const d = toDisplayRect({ x: z.region.x + dx, y: z.region.y + dy, w: z.region.width, h: z.region.height });
+        const dx = (z.region.scroll_x ?? 0) * rx - scroll.x;
+        const dy = (z.region.scroll_y ?? 0) * ry - scroll.y;
+        const d = toDisplayRect({
+          x: z.region.x * rx + dx,
+          y: z.region.y * ry + dy,
+          w: z.region.width * rx,
+          h: z.region.height * ry,
+        });
         if (!d) return null;
         const hot = z.id === highlightZoneId;
         return (

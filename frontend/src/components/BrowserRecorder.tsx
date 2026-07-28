@@ -878,6 +878,12 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   const [showExtractPopover, setShowExtractPopover] = useState(false);
   const [extractOutputName, setExtractOutputName] = useState('');
   const [extractType, setExtractType] = useState('text');
+  // Which attribute an extract_type='attribute' step reads. Blank = let the agent
+  // pick the one that carries the value for the element's tag.
+  const [extractAttribute, setExtractAttribute] = useState('');
+  // JS for an extract_type='computed' step. The agent refuses a computed extract
+  // with no script rather than let replay quietly fall back to a text extract.
+  const [extractScript, setExtractScript] = useState('');
 
   // Streaming mode state
   const [streamingHandlers, setStreamingHandlers] = useState<StreamingHandler[]>([]);
@@ -1732,6 +1738,29 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
             // Extraction mode: hover highlight
             setExtractHighlight(data.rect ? data : null);
             break;
+
+          case 'extract_test_result': {
+            // "Test this extraction" ran the step against the LIVE page. Show what
+            // it actually yielded — a selector that matches nothing is the whole
+            // reason to test, so an empty result is reported as plainly as a value.
+            if (!data.success) {
+              toast.error(t('Extraction failed: {{error}}', { error: data.error || t('unknown error') }));
+              break;
+            }
+            let preview: string;
+            try {
+              preview = typeof data.value === 'string' ? data.value : JSON.stringify(data.value);
+            } catch {
+              preview = String(data.value);
+            }
+            if (preview === undefined || preview === null || preview === '' || preview === 'null') {
+              toast(t('{{name}}: no match', { name: data.output_name || 'extract' }), { icon: '∅' });
+            } else {
+              if (preview.length > 120) preview = preview.slice(0, 120) + '…';
+              toast.success(t('{{name}} = {{value}}', { name: data.output_name || 'extract', value: preview }), { duration: 5000 });
+            }
+            break;
+          }
         }
       };
 
@@ -1993,14 +2022,22 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
       selector: extractElementInfo.selector,
       output_name: extractOutputName || 'extracted_data',
       extract_type: extractType,
+      // Only meaningful for extract_type 'attribute'. Left blank, the agent picks
+      // the attribute that carries the value for this tag (href on a link, src on
+      // an image, …) — which is why the tag rides along.
+      attribute: extractType === 'attribute' ? extractAttribute.trim() : '',
+      script: extractType === 'computed' ? extractScript.trim() : '',
+      tag: extractElementInfo.tag || '',
       description: `Extract ${extractType} from ${extractElementInfo.selector.substring(0, 40)}`,
     }));
 
     setShowExtractPopover(false);
     setExtractElementInfo(null);
     setExtractOutputName('');
+    setExtractAttribute('');
+    setExtractScript('');
     toast.success(t('Extraction step added'));
-  }, [extractElementInfo, extractOutputName, extractType]);
+  }, [extractElementInfo, extractOutputName, extractType, extractAttribute, extractScript]);
 
   // Handle keyboard input
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -3811,8 +3848,12 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                         {isExtracting && extractHighlight && canvasRef.current && (() => {
                           const canvas = canvasRef.current!;
                           const cRect = canvas.getBoundingClientRect();
-                          const sx = cRect.width / 1280;
-                          const sy = cRect.height / 800;
+                          // The rect arrives in the agent's CSS-viewport pixels, which is
+                          // the frame's pixel space — scale by the LIVE frame size, never
+                          // a hardcoded 1280x800, or the box sits away from the element it
+                          // is meant to outline on any other viewport.
+                          const sx = cRect.width / frameSizeRef.current.w;
+                          const sy = cRect.height / frameSizeRef.current.h;
                           const r = extractHighlight.rect;
                           return (
                             <div
@@ -3877,6 +3918,30 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                   />
                                 </div>
                               </div>
+                              {extractType === 'attribute' && (
+                                <div>
+                                  <label className="text-secondary">{t('Attribute:')}</label>
+                                  <input
+                                    value={extractAttribute}
+                                    onChange={(e) => setExtractAttribute(e.target.value)}
+                                    className="mt-1 w-full px-2 py-1.5 bg-canvas border border-border rounded text-ink text-xs"
+                                    placeholder={t('blank = auto (href, src, value…)')}
+                                  />
+                                </div>
+                              )}
+                              {extractType === 'computed' && (
+                                <div>
+                                  <label className="text-secondary">{t('Script:')}</label>
+                                  <textarea
+                                    value={extractScript}
+                                    onChange={(e) => setExtractScript(e.target.value)}
+                                    rows={3}
+                                    spellCheck={false}
+                                    className="mt-1 w-full px-2 py-1.5 bg-canvas border border-border rounded text-ink text-[11px] font-mono"
+                                    placeholder={t('() => document.title')}
+                                  />
+                                </div>
+                              )}
                             </div>
                             <div className="flex gap-2 mt-3">
                               <button
@@ -4711,6 +4776,11 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                             selector: rawStep?.selector || '',
                                             extract_type: rawStep?.options?.extract_type || 'text',
                                             output_name: rawStep?.options?.output_name || 'test',
+                                            // Test the step AS RECORDED — without these the
+                                            // attribute/script variants would be tested as a
+                                            // plain text extract and report the wrong value.
+                                            attribute: rawStep?.options?.attribute || '',
+                                            script: rawStep?.options?.script || rawStep?.config?.script || '',
                                           }));
                                           toast(t('Testing extraction...'), { duration: 1500 });
                                         }}

@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./assets/banner.svg" alt="writ — self-hosted browser automation you own" width="100%">
+  <img src="./assets/banner.svg" alt="writ — record a web task once, replay it forever, on hardware you own" width="100%">
 
   <br/>
 
@@ -13,13 +13,14 @@
     <img src="https://img.shields.io/badge/PRs-welcome-16a34a?style=flat-square" alt="PRs welcome">
   </p>
 
-  <h3 align="center">Turn any website into a workflow, a REST API, or an MCP tool — on infrastructure you own.</h3>
+  <h3 align="center">Record a web task once. Replay it forever — free every run, on hardware you own.</h3>
+  <p align="center">Turn any website into a workflow, a REST API, or an MCP tool.</p>
 
   <p align="center">
     <a href="#quickstart"><b>Quickstart</b></a> ·
     <a href="#what-you-can-do"><b>Features</b></a> ·
     <a href="#connect-your-ai-assistant-mcp"><b>Connect your AI</b></a> ·
-    <a href="#connect-a-fleet-agent"><b>Fleet</b></a> ·
+    <a href="#agents-in-more-detail"><b>Agents</b></a> ·
     <a href="./docs/DEPLOYMENT.md"><b>Deploy</b></a> ·
     <a href="./SECURITY.md"><b>Security</b></a>
   </p>
@@ -43,6 +44,85 @@ PDFs and scanned pages, and dispatches all browser work to a fleet of lightweigh
   <br/>
   <sub><b>Record once.</b> Drive a real browser and every action lands as an editable step — then replay it forever at zero AI-token cost.</sub>
 </div>
+
+## Quickstart
+
+You need Docker. Nothing else.
+
+```bash
+git clone https://github.com/usewrit/writ.git && cd writ
+./scripts/gen-env.sh
+docker compose up -d --build
+```
+
+Open **http://localhost:8000** and create your account. That is the whole install.
+
+> First build takes a few minutes — the OCR runtime and its model weights are
+> baked in so document extraction works offline.
+
+### Then connect one agent
+
+The coordinator runs no browsers itself, so **nothing will execute until one
+agent is connected**. In the app open **Fleet → Connect a new agent**: it prints
+a command with your token, the coordinator URL, and the document-extractor
+settings already filled in. Run it on any machine — the same one is fine:
+
+```bash
+WRIT_SERVICE_TOKEN=<from the app> writ-agent-fleet
+```
+
+The agent dials out over WebSocket, so it needs no inbound ports and can sit
+behind NAT. It appears in **Fleet** within seconds, and you can record and run.
+
+Get the binary from [`writ-agent`](https://github.com/usewrit/writ-agent) —
+[Releases](https://github.com/usewrit/writ-agent/releases), the
+`ghcr.io/usewrit/writ-agent:latest` image, or build from source.
+[docs/CONNECT_AGENT.md](docs/CONNECT_AGENT.md) has the full walkthrough.
+
+### Day-to-day
+
+```bash
+docker compose logs -f    # follow logs
+docker compose restart    # restart
+docker compose down       # stop, keep your data
+docker compose down -v    # stop and delete everything
+```
+
+Run these from the repository root — the root `compose.yaml` wires in
+`docker/docker-compose.yml` and loads your `.env` automatically.
+
+<details>
+<summary><b>Generate the secrets</b></summary>
+
+<br/>
+
+`./scripts/gen-env.sh` fills all of these in for you. To do it manually,
+fill these into `.env`. Never commit the filled-in `.env`.
+
+| Variable | How to generate |
+| --- | --- |
+| `WRIT_JWT_SECRET` | `openssl rand -hex 32` |
+| `API_SECRET_KEY` | `openssl rand -hex 32` |
+| `HMAC_SECRET_KEY` | `openssl rand -hex 32` |
+| `RECORDER_AUTH_SECRET` | `openssl rand -hex 32` |
+| `INTERNAL_API_SECRET` | `openssl rand -hex 32` |
+| `GATEWAY_SECRET` | `openssl rand -hex 32` |
+| `DOC_EXTRACT_SECRET` | `openssl rand -hex 32` |
+| `SECRET_ENCRYPTION_KEY` | `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+
+> Every one of these is **required** — with the default `ENVIRONMENT=production`
+> the coordinator refuses to boot if any is missing, blank, or shorter than 32
+> characters. That is deliberate: HS256 signs happily with an empty key, so a
+> half-filled template would otherwise leave the signing secret publicly known.
+
+> **Back up `SECRET_ENCRYPTION_KEY` separately from your data volume.** It
+> encrypts your stored secrets and credentials at rest. If you lose it, those
+> values become unrecoverable — see [SECURITY.md](./SECURITY.md).
+
+`WRIT_JWT_SECRET` is the operator-facing name; the compose file maps it onto the
+`JWT_SECRET_KEY` the app reads. Set one, not both.
+
+</details>
 
 ## Why self-host
 
@@ -152,72 +232,6 @@ Note the arrows: agents call doc-extract directly with bytes they already
 fetched — the coordinator never touches it. The coordinator does hand each agent
 that address when it connects, so you never configure it yourself.
 
-## Quickstart
-
-From the repository root:
-
-```bash
-# Fast path: generate .env with fresh secrets, then build + start.
-./scripts/gen-env.sh
-docker compose -f docker/docker-compose.yml --env-file .env up -d --build
-
-# Open the app.
-open http://localhost:8000        # or just visit it in a browser
-```
-
-The first build takes a few minutes — the document/OCR extractor carries the
-OCR runtime and its model weights, which is the price of it working offline.
-
-Prefer doing it by hand? `cp .env.example .env` and fill in the secrets
-yourself (generator commands are in the comments); the compose command is the
-same. The app listens on loopback (`127.0.0.1:8000`) by default — see
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) to put it behind TLS for network
-access.
-
-On first visit, complete the in-app setup to create your admin account (or set
-`WRIT_ADMIN_EMAIL` / `WRIT_ADMIN_PASSWORD` in `.env` beforehand to auto-provision
-it on boot). Then go to **Fleet → Connect a new agent** to wire up your first
-fleet agent.
-
-```bash
-docker compose -f docker/docker-compose.yml logs -f      # follow logs
-docker compose -f docker/docker-compose.yml down          # stop (keeps the volume)
-docker compose -f docker/docker-compose.yml down -v       # stop + delete data
-```
-
-<details>
-<summary><b>Generate the secrets</b></summary>
-
-<br/>
-
-`./scripts/gen-env.sh` fills all of these in for you. To do it manually,
-fill these into `.env`. Never commit the filled-in `.env`.
-
-| Variable | How to generate |
-| --- | --- |
-| `WRIT_JWT_SECRET` | `openssl rand -hex 32` |
-| `API_SECRET_KEY` | `openssl rand -hex 32` |
-| `HMAC_SECRET_KEY` | `openssl rand -hex 32` |
-| `RECORDER_AUTH_SECRET` | `openssl rand -hex 32` |
-| `INTERNAL_API_SECRET` | `openssl rand -hex 32` |
-| `GATEWAY_SECRET` | `openssl rand -hex 32` |
-| `DOC_EXTRACT_SECRET` | `openssl rand -hex 32` |
-| `SECRET_ENCRYPTION_KEY` | `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
-
-> Every one of these is **required** — with the default `ENVIRONMENT=production`
-> the coordinator refuses to boot if any is missing, blank, or shorter than 32
-> characters. That is deliberate: HS256 signs happily with an empty key, so a
-> half-filled template would otherwise leave the signing secret publicly known.
-
-> **Back up `SECRET_ENCRYPTION_KEY` separately from your data volume.** It
-> encrypts your stored secrets and credentials at rest. If you lose it, those
-> values become unrecoverable — see [SECURITY.md](./SECURITY.md).
-
-`WRIT_JWT_SECRET` is the operator-facing name; the compose file maps it onto the
-`JWT_SECRET_KEY` the app reads. Set one, not both.
-
-</details>
-
 ## Connect your AI assistant (MCP)
 
 Your coordinator speaks the **Model Context Protocol**. Attach an AI client and your saved
@@ -291,36 +305,24 @@ you for clarifications directly in the chat.
 > the assistant to have alongside it (`workflows:read`, `workflows:execute`,
 > `runs:read`, `datasets:read` is a sensible starting set).
 
-## Connect a fleet agent
+## Agents, in more detail
 
-The fleet worker binary is **`writ-agent-fleet`** from
-[`writ-agent`](https://github.com/usewrit/writ-agent) — grab it from that repo's
-[Releases](https://github.com/usewrit/writ-agent/releases), run the
-`ghcr.io/usewrit/writ-agent:latest` Docker image, or build it from source
-(`cargo build --release --no-default-features --features local,fleet,openai --bin writ-agent-fleet`).
+The quickstart above covers the common case. A few things worth knowing once you
+have more than one agent:
 
-1. In the UI open **Fleet → Connect a new agent** and mint a fleet-connect
-   token (needs `RECORDER_AUTH_SECRET` set).
-2. Start the agent pointed at your coordinator:
+- **Run as many as you like.** Each dials out over WebSocket — no inbound ports,
+  NAT is fine — and the coordinator spreads work across whichever have capacity.
+- **Sitting at the coordinator's own machine?** **Fleet → run an agent on this
+  host** does the download, configure and launch for you.
+- **Agents on other machines** cannot reach the document extractor's default
+  loopback address. Set `DOC_EXTRACT_URL` in `.env` to something routable and
+  every generated connect command picks it up — see
+  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+- **Building from source:**
+  `cargo build --release --no-default-features --features local,fleet,openai --bin writ-agent-fleet`
 
-   ```bash
-   WRIT_SERVICE_TOKEN=<token> WRIT_COORDINATOR_URL=https://your-coordinator writ-agent-fleet
-   ```
-
-   The agent dials in over WebSocket and appears in your fleet, ready to run
-   workflows, monitors, crawls, and record sessions. See
-   [docs/CONNECT_AGENT.md](docs/CONNECT_AGENT.md) for the full walkthrough
-   (install paths, env reference, healthchecks, troubleshooting).
-
-**The command the UI shows you already carries everything the agent needs**,
-including the address and secret for the document/OCR extractor. Copy it, run
-it, done — PDFs and scanned pages work from the first crawl, with nothing else
-to configure. (If your agent runs on a *different* machine from the coordinator,
-that address defaults to a loopback one it cannot reach — set `DOC_EXTRACT_URL`
-in `.env` to something routable and the generated command picks it up.)
-
-If you are sitting at the machine the coordinator runs on, **Fleet → run an
-agent on this host** does the whole thing for you: download, configure, launch.
+[docs/CONNECT_AGENT.md](docs/CONNECT_AGENT.md) is the full reference — install
+paths, every environment variable, healthchecks and troubleshooting.
 
 <details>
 <summary><b>Production notes</b></summary>

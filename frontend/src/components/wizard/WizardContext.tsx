@@ -73,8 +73,15 @@ export interface WizardSelector {
   enabled: boolean;
   // x/y are viewport-relative; scroll_x/scroll_y record the page scroll when the
   // zone was drawn so the monitor can re-scroll there before clipping (else a
-  // below-the-fold zone watches the wrong pixels).
-  region?: { x: number; y: number; width: number; height: number; scroll_x?: number; scroll_y?: number };
+  // below-the-fold zone watches the wrong pixels). `viewport` is the frame size
+  // those coords were measured in — the check opens its browser context at that
+  // size, so dropping it makes the zone clip the wrong pixels (see
+  // `SelectionRegion` in useRecorderSelection.ts).
+  region?: {
+    x: number; y: number; width: number; height: number;
+    scroll_x?: number; scroll_y?: number;
+    viewport?: { width: number; height: number };
+  };
   /** Optional extractors to create alongside this selector (e.g. a numeric price). */
   extractors?: SelectorExtractorSeed[];
 }

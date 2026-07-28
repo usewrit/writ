@@ -1,0 +1,11 @@
+# The package has zero dependencies — node_modules should never exist here, and
+# if it does it is a mistake worth not committing.
+node_modules/
+
+# `npm pack` output.
+*.tgz
+
+# Logs and OS junk.
+*.log
+npm-debug.log*
+.DS_Store

@@ -1,0 +1,20 @@
+# Root entry point, so every command is just `docker compose ...` from here.
+#
+# The real definitions live in docker/docker-compose.yml. This file exists so
+# you never have to type `-f docker/docker-compose.yml --env-file .env`, and so
+# that a `docker compose` command copied from the README, an issue, or any
+# tutorial works from the repository root the way people expect.
+#
+# Running compose from the root also means Docker finds `./.env` by itself,
+# which is exactly where scripts/gen-env.sh writes your secrets.
+#
+#   ./scripts/gen-env.sh
+#   docker compose up -d --build
+#   docker compose logs -f
+#   docker compose down
+#
+# `include` needs Compose v2.20+ (Docker Desktop 4.22 / Docker Engine 25 and
+# later). On anything older the long form still works:
+#   docker compose -f docker/docker-compose.yml up -d --build
+include:
+  - docker/docker-compose.yml

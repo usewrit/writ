@@ -1,0 +1,22 @@
+# The package itself is dependency-free by design, so the npm ecosystem here has
+# nothing to update — it is registered anyway so that the day someone adds a
+# dependency, it is watched from the first commit rather than from whenever
+# somebody remembers.
+#
+# The GitHub Actions used by CI and the publish workflow are the real supply
+# chain of this repository: they run with `id-token: write` on release.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    labels: [dependencies, javascript]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies, ci]

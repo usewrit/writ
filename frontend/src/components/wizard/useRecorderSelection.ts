@@ -38,6 +38,13 @@ export interface SelectionRegion {
   // monitor re-scroll to the same spot before clipping a below-the-fold zone.
   scroll_x?: number;
   scroll_y?: number;
+  // The frame size x/y/width/height were measured in — i.e. the agent's real
+  // viewport at drop time, read from the live stream (see `frameSizeRef`), NOT a
+  // constant. Viewport-relative coords are meaningless without it: the monitor
+  // check used to pin 1280x800 while this preview streams the Rust recorder's
+  // 1920x1080, so every zone clipped ~1.5x off and at the wrong aspect ratio. The
+  // check now opens its context at this size. Must be persisted with the zone.
+  viewport?: { width: number; height: number };
 }
 
 export type SelectionMode = 'click' | 'zone' | 'area';
@@ -171,14 +178,23 @@ export function useRecorderSelection(args: UseRecorderSelectionArgs): UseRecorde
       const box = contentBox();
       const cont = containerRef.current?.getBoundingClientRect();
       if (!box || !cont) return null;
+      // A SAVED zone may have been drawn against a differently-sized frame (a monitor
+      // recorded on the 1920x1080 Rust agent, reopened over a 1280x800 stream), so map
+      // it out of its own capture viewport first. Live measurements — the click-pick
+      // flash rect, and zones drawn in this session — carry no viewport and are already
+      // in frame coordinates, so they scale by exactly 1.
+      const { w: fw, h: fh } = frameSizeRef.current;
+      const vp = region.viewport;
+      const rx = vp && vp.width > 0 ? fw / vp.width : 1;
+      const ry = vp && vp.height > 0 ? fh / vp.height : 1;
       return {
-        left: box.left - cont.left + region.x * box.scale,
-        top: box.top - cont.top + region.y * box.scale,
-        width: region.width * box.scale,
-        height: region.height * box.scale,
+        left: box.left - cont.left + region.x * rx * box.scale,
+        top: box.top - cont.top + region.y * ry * box.scale,
+        width: region.width * rx * box.scale,
+        height: region.height * ry * box.scale,
       };
     },
-    [contentBox, containerRef],
+    [contentBox, containerRef, frameSizeRef],
   );
 
   const flashRect = useCallback(
@@ -253,24 +269,31 @@ export function useRecorderSelection(args: UseRecorderSelectionArgs): UseRecorde
       const vh = Math.round(cur.h / box.scale);
       const { w: fw, h: fh } = frameSizeRef.current;
       const clamp = (v: number, max: number) => Math.max(0, Math.min(max, v));
-      const region: SelectionRegion = {
+      const rect = {
         x: clamp(vx, fw),
         y: clamp(vy, fh),
         width: clamp(vw, fw - clamp(vx, fw)),
         height: clamp(vh, fh - clamp(vy, fh)),
-        scroll_x: scrollRef.current.x,
-        scroll_y: scrollRef.current.y,
       };
       if (modeRef.current === 'area') {
+        // Area picking is answered in-page against the LIVE frame, so it needs the
+        // rect only — no scroll/viewport provenance to carry.
         if (wsRef.current && connectedRef.current) {
           try {
-            wsRef.current.send(JSON.stringify({ type: 'action', action: 'get_elements_in_region', ...region }));
+            wsRef.current.send(JSON.stringify({ type: 'action', action: 'get_elements_in_region', ...rect }));
           } catch {
             /* socket closed */
           }
         }
       } else {
-        onZoneDrawnRef.current?.(region);
+        // A zone outlives this session — stamp WHERE it was drawn (scroll) and AT WHAT
+        // SIZE (the live frame), so the monitor check can reproduce both.
+        onZoneDrawnRef.current?.({
+          ...rect,
+          scroll_x: scrollRef.current.x,
+          scroll_y: scrollRef.current.y,
+          viewport: { width: fw, height: fh },
+        });
       }
       return null;
     });

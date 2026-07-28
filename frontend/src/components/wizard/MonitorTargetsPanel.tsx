@@ -130,16 +130,19 @@ export const MonitorTargetsPanel: React.FC<MonitorTargetsPanelProps> = ({
                 </button>
               </div>
 
-              {/* Mini map of the region within the 1280x800 viewport */}
+              {/* Mini map of the region within its OWN capture frame. The zone carries
+                  the viewport it was drawn in (1920x1080 from the Rust recorder, 1280x800
+                  from the older Python one); dividing by a fixed 1280x800 drew the marker
+                  in the wrong place, and off the map entirely for a zone near the edge. */}
               <div className="flex items-center gap-2">
                 <div className="relative w-16 h-10 bg-canvas border border-border rounded shrink-0 overflow-hidden">
                   <div
                     className="absolute bg-ink/15 border border-ink rounded-[2px]"
                     style={{
-                      left: `${(sel.region.x / 1280) * 100}%`,
-                      top: `${(sel.region.y / 800) * 100}%`,
-                      width: `${Math.max(4, (sel.region.width / 1280) * 100)}%`,
-                      height: `${Math.max(6, (sel.region.height / 800) * 100)}%`,
+                      left: `${(sel.region.x / (sel.region.viewport?.width || 1280)) * 100}%`,
+                      top: `${(sel.region.y / (sel.region.viewport?.height || 800)) * 100}%`,
+                      width: `${Math.max(4, (sel.region.width / (sel.region.viewport?.width || 1280)) * 100)}%`,
+                      height: `${Math.max(6, (sel.region.height / (sel.region.viewport?.height || 800)) * 100)}%`,
                     }}
                   />
                 </div>

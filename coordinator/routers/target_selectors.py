@@ -39,6 +39,12 @@ async def _verify_target(target_id: int, db: AsyncSession = Depends(get_db), api
 
 # ============== Pydantic Models ==============
 
+class RegionViewport(BaseModel):
+    """The frame size a visual region's coordinates were measured in."""
+    width: int = Field(..., gt=0, description="Capture-frame width in CSS pixels")
+    height: int = Field(..., gt=0, description="Capture-frame height in CSS pixels")
+
+
 class VisualRegion(BaseModel):
     """Visual region coordinates for screenshot comparison.
 
@@ -46,6 +52,14 @@ class VisualRegion(BaseModel):
     scrolled when the zone was drawn so the agent can restore that scroll before
     clipping (else a below-the-fold zone watches the wrong pixels). Default 0 =
     top-of-page (back-compat for rows saved before scroll was captured).
+
+    `viewport` is the frame SIZE those coordinates were measured at, and it is what
+    makes x/y mean anything: the recorder preview runs at 1920x1080 while checks used
+    to pin 1280x800, so a zone stored without it clipped ~1.5x off and at the wrong
+    aspect ratio. The agent now opens its check context at this size (and rescales
+    onto it if it can't) — see `monitor/visual_region.rs`. Absent → the agent assumes
+    1280x800, the size checks have always used, so pre-existing rows keep clipping
+    what their baseline hash was computed from. Producers MUST send it.
     """
     x: int = Field(..., ge=0, description="X coordinate of the region (viewport-relative)")
     y: int = Field(..., ge=0, description="Y coordinate of the region (viewport-relative)")
@@ -53,6 +67,9 @@ class VisualRegion(BaseModel):
     height: int = Field(..., gt=0, description="Height of the region")
     scroll_x: int = Field(0, ge=0, description="Page scrollX when the zone was drawn")
     scroll_y: int = Field(0, ge=0, description="Page scrollY when the zone was drawn")
+    viewport: Optional[RegionViewport] = Field(
+        None, description="Frame size the coordinates were captured at (default 1280x800)"
+    )
 
 
 class SelectorCreate(BaseModel):

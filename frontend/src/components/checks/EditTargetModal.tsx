@@ -49,6 +49,21 @@ function toWizardSelector(s: any): WizardSelector {
         height: Number(s.visual_region.height) || 0,
         scroll_x: Number(s.visual_region.scroll_x) || 0,
         scroll_y: Number(s.visual_region.scroll_y) || 0,
+        // Carry the capture viewport through the edit round-trip. Rebuilding the
+        // region field-by-field without it would silently strip the provenance the
+        // monitor check needs to clip the right pixels, re-breaking a zone the user
+        // only opened to rename. Left undefined for pre-viewport rows so the agent
+        // keeps applying its 1280x800 default instead of us inventing one.
+        ...(s.visual_region.viewport &&
+            Number(s.visual_region.viewport.width) > 0 &&
+            Number(s.visual_region.viewport.height) > 0
+          ? {
+              viewport: {
+                width: Number(s.visual_region.viewport.width),
+                height: Number(s.visual_region.viewport.height),
+              },
+            }
+          : {}),
       }
     : undefined;
   const checkType = (['text', 'html', 'visual'].includes(s.content_type) ? s.content_type : 'text') as WizardSelector['checkType'];
@@ -83,6 +98,12 @@ function toSelectorPayload(s: WizardSelector) {
       scroll_x: Math.round(s.region.scroll_x ?? 0),
       scroll_y: Math.round(s.region.scroll_y ?? 0),
     };
+    if (s.region.viewport && s.region.viewport.width > 0 && s.region.viewport.height > 0) {
+      payload.visual_region.viewport = {
+        width: Math.round(s.region.viewport.width),
+        height: Math.round(s.region.viewport.height),
+      };
+    }
   }
   return payload;
 }

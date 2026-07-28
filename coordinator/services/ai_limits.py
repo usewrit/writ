@@ -102,3 +102,63 @@ async def resolve_max_tokens(db: AsyncSession, bucket: str, default: int) -> int
     if cap and cap > 0:
         return min(default, cap)
     return default
+
+
+# ---------------------------------------------------------------------------
+# INPUT-side budget: how much replayed transcript the agent loop may carry.
+# ---------------------------------------------------------------------------
+# The output caps above bound what the model WRITES. Nothing bounded what it
+# READS, so a multi-iteration agent loop grew its prompt until the provider
+# rejected it ("prompt is too long" / "maximum context length"). This resolves a
+# character budget for agent_brain's replayed transcript from the CONFIGURED
+# provider, since a hosted frontier model and a local 8k-context model cannot
+# carry remotely the same thread.
+#
+# Characters, not tokens: the brain is pure/stdlib and has no tokenizer. ~4
+# chars/token is the standard English approximation and we stay well under the
+# window regardless, because the transcript is only one part of the prompt (the
+# system prompt, steps, observation and captured API calls sit outside it).
+
+# Provider kind → transcript budget in characters.
+#   local  = Ollama / llama.cpp on the operator's own box. Default context there
+#            is commonly 4k–8k tokens, so the thread gets ~6k tokens and the rest
+#            of the prompt still has room.
+#   others = hosted models with ≥128k windows.
+_THREAD_BUDGET_BY_PROVIDER: Dict[str, int] = {
+    "local": 24_000,
+    "anthropic": 120_000,
+    "openai": 120_000,
+    "openai_responses": 120_000,
+    "openrouter": 120_000,
+}
+_THREAD_BUDGET_FALLBACK = 60_000
+
+# Operator override, e.g. a local server started with a large `num_ctx`.
+_THREAD_BUDGET_ENV = "AI_THREAD_CHAR_BUDGET"
+_MIN_THREAD_BUDGET = 4_000
+_MAX_THREAD_BUDGET = 600_000
+
+
+async def resolve_thread_char_budget() -> int:
+    """Character budget for the agent loop's replayed transcript.
+
+    ``AI_THREAD_CHAR_BUDGET`` wins when set; otherwise it follows the active
+    provider. Never raises — an unreadable provider row falls back to the
+    conservative default rather than failing the turn.
+    """
+    import os
+
+    raw = (os.getenv(_THREAD_BUDGET_ENV) or "").strip()
+    if raw:
+        try:
+            return max(_MIN_THREAD_BUDGET, min(_MAX_THREAD_BUDGET, int(raw)))
+        except ValueError:
+            pass
+
+    try:
+        from services.local_ai import _active_provider
+        provider = await _active_provider()
+    except Exception:
+        provider = None
+    kind = getattr(provider, "provider", None)
+    return _THREAD_BUDGET_BY_PROVIDER.get(kind or "", _THREAD_BUDGET_FALLBACK)

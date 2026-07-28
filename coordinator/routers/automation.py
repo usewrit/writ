@@ -3218,7 +3218,7 @@ async def _pick_recorder(
             logger.info("[_pick_recorder] local → no user-hosted capacity")
             return None  # Caller will queue
 
-        # SCHEDULED: prefer HTTP pool, fall back to direct WS
+        # SCHEDULED: prefer HTTP pool, then the direct fleet, then user-hosted.
         if is_scheduled:
             # Try HTTP pool first (no need for persistent connection)
             http_pick = (await _pick_http_pool_recorder(db, preferred_agent_id, trusted_only, traffic_type=traffic_type, fast_eligible=fast_eligible)) if http_allowed else None
@@ -3230,6 +3230,22 @@ async def _pick_recorder(
             if pick:
                 logger.info(f"[_pick_recorder] scheduled → direct WS fallback: {pick['agent_id']}")
                 return _ws_to_result(pick)
+            # SELF-HOST: the owner's own writ-agent IS the fleet. It connects as
+            # role='user-hosted', so both pools above are permanently EMPTY here —
+            # and without this fallback every scheduled task returned None forever:
+            # Dragnet crawl shards (minted queue_traffic_type='scheduled') and
+            # scheduled workflows both sat queued until their 2h expiry, which is
+            # the "crawl never launches" symptom.
+            #
+            # Cloud deliberately keeps scheduled work OFF end-user machines because
+            # it has an infra fleet to run it on. A single-owner coordinator has no
+            # such separation to protect: there is exactly one operator, the agent
+            # is theirs, and it is already where every other run executes.
+            pick = _best_from_ws(ws_user_hosted)
+            if pick:
+                logger.info(f"[_pick_recorder] scheduled → user-hosted WS: {pick['agent_id']}")
+                return _ws_to_result(pick)
+            logger.info("[_pick_recorder] scheduled → no capacity in any pool")
             return None
 
         # CLOUD: direct WS → HTTP pool

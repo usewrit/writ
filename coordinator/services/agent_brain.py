@@ -80,11 +80,47 @@ async def call_ai(
             result.get("model"),
         )
     except AIGatewayError as e:
+        if is_context_overflow(e):
+            logger.warning("[Agent Brain] provider rejected the prompt as too long: %s", str(e)[:400])
+            raise HTTPException(
+                status_code=400,
+                detail=("This conversation has grown past what the configured AI model can read in "
+                        "one request. Start a new chat to reset the thread, or set a model with a "
+                        "larger context window in Settings → AI."),
+            )
         from services.error_reporting import internal_http_error
         raise internal_http_error(e, "AI request failed. Please try again.", status_code=502, action="agent_brain.gateway")
     except Exception as e:
         from services.error_reporting import internal_http_error
         raise internal_http_error(e, "AI request failed. Please try again.", action="agent_brain.call")
+
+
+# ---------------------------------------------------------------------------
+# Context-overflow detection
+# ---------------------------------------------------------------------------
+# Provider phrasings for "this prompt does not fit in the context window". Both the
+# self-host in-process path and the managed gateway put the provider's response body
+# into the AIGatewayError message, so matching here covers every provider.
+#
+# This is the ONE AI transport failure the user can actually act on (start a new
+# chat / pick a bigger model), so it is deliberately NOT flattened into the generic
+# "AI request failed (ref: …)" — see services.error_reporting for the policy and its
+# user-actionable carve-outs.
+_CONTEXT_OVERFLOW_MARKERS = (
+    "prompt is too long",
+    "context length",
+    "context_length_exceeded",
+    "maximum context",
+    "too many tokens",
+    "reduce the length of the messages",
+    "exceed context limit",
+)
+
+
+def is_context_overflow(err: BaseException) -> bool:
+    """Whether a provider error means the prompt exceeded the model's context window."""
+    text = str(err).lower()
+    return any(m in text for m in _CONTEXT_OVERFLOW_MARKERS)
 
 
 # ---------------------------------------------------------------------------
@@ -342,18 +378,32 @@ def summarize_scraper_history(history: list, max_turns: int = 10, char_budget: i
     overall char_budget keeps the most recent turns when the history gets very big."""
     if not history:
         return "  (no actions run yet — this is the first turn)"
-    lines = []
+    # Rendered per TURN so the budget can be applied on a turn boundary below. A flat
+    # character tail-cut used to slice mid-JSON, so the oldest thing the model read was
+    # a fragment of a serialized blob.
+    per_turn: List[str] = []
     for turn in history[-max_turns:]:
         if not isinstance(turn, dict):
             continue
+        lines = []
         thought = str(turn.get("thought", ""))[:1000]
         lines.append(f"- thought: {thought}")
         for a in (turn.get("actions") or [])[:12]:
             lines.append(f"    ran: {json.dumps(a)[:6000]}")
         for r in (turn.get("results") or [])[:12]:
             lines.append(f"    result: {json.dumps(r)[:12000]}")
-    out = "\n".join(lines)
-    return out[-char_budget:]
+        per_turn.append("\n".join(lines))
+
+    # Drop WHOLE turns from the oldest end — never a partial one — so the earliest
+    # thing the model reads is a complete decision, not a fragment.
+    total = sum(len(t) + 1 for t in per_turn)
+    dropped = 0
+    while total > char_budget and len(per_turn) > 1:
+        total -= len(per_turn.pop(0)) + 1
+        dropped += 1
+    if dropped:
+        per_turn.insert(0, f"- ({dropped} earlier turn(s) omitted to fit the context budget)")
+    return "\n".join(per_turn)
 
 
 # ---------------------------------------------------------------------------
@@ -587,6 +637,300 @@ def _observation_text(observation: Optional[dict]) -> str:
         return str(obs)
 
 
+# ---------------------------------------------------------------------------
+# Multi-turn transcript assembly
+# ---------------------------------------------------------------------------
+#
+# The agent loop used to flatten EVERYTHING (task, chat, prior decisions, action
+# results, observation) into ONE `user` message that was rebuilt from scratch on
+# every iteration. That has three costs: the model never sees its own prior replies
+# as `assistant` turns (so it cannot tell "what I decided" from "what I was told",
+# and the JSON it must self-correct against is not actually in the transcript), the
+# provider can never cache a prefix (every iteration is a cold full-price read), and
+# the only way to bound growth was a raw character slice that cut mid-JSON.
+#
+# We now build a REAL alternating thread:
+#
+#   user       TASK + the chat that led here          ← stable for the whole task
+#   assistant  {"thought":…,"action":"run_actions",…} ← the model's OWN prior reply
+#   user       RESULTS: …                             ← what actually happened
+#   …                                                  (append-only ⇒ cacheable)
+#   user       CURRENT STATE: steps / observation / API calls / iteration
+#
+# Everything that changes per turn lives in the FINAL user turn, so the prefix is
+# append-only and a cache breakpoint on it is stable.
+
+# Character budget for the REPLAYED transcript (the assistant/user pairs between the
+# opening task turn and the final current-state turn) — roughly 30k tokens.
+AGENT_THREAD_CHAR_BUDGET = 120_000
+# The newest N turns keep their full action payloads and results. Older turns are
+# condensed to their decision + per-result outcome BEFORE anything is dropped, and
+# compaction always happens on a whole-turn boundary.
+AGENT_THREAD_VERBATIM_TURNS = 4
+
+
+def _turn_assistant_text(turn: dict) -> str:
+    """The `assistant` message for one prior turn.
+
+    Uses the model's OWN reply verbatim when the caller stored it (``assistant``),
+    otherwise reconstructs the decision from the fields the loop recorded. Replaying
+    the decision as a real assistant turn is what makes this a conversation rather
+    than a prose summary of one, and it reinforces the JSON-only output discipline.
+    """
+    raw = turn.get("assistant")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()[:20000]
+    decision: dict = {"thought": str(turn.get("thought") or "")[:2000]}
+    actions = [a for a in (turn.get("actions") or []) if isinstance(a, dict)]
+    if actions:
+        decision["action"] = "run_actions"
+        decision["actions"] = actions
+    else:
+        decision["action"] = str(turn.get("action") or "run_actions")
+    return json.dumps(decision, default=str)
+
+
+def _turn_results_text(turn: dict, *, body_chars: int = 12000, max_results: int = 12) -> str:
+    """The `user` message carrying what the prior decision actually produced."""
+    results = list(turn.get("results") or [])[:max_results]
+    if not results:
+        return "RESULTS: (the batch produced no results)"
+    lines = ["RESULTS:"]
+    for r in results:
+        lines.append("  " + json.dumps(r, default=str)[:body_chars])
+    return "\n".join(lines)
+
+
+def _condense_turn(turn: dict) -> tuple:
+    """(assistant_text, user_text) for an OLD turn — the decision keeps its thought and
+    the action verbs/targets, each result collapses to its outcome.
+
+    This replaces the old `out[-char_budget:]` character slice, which cut mid-JSON and
+    left the model reading a fragment of a serialized blob as its earliest context."""
+    actions = [a for a in (turn.get("actions") or []) if isinstance(a, dict)]
+    brief = []
+    for a in actions[:12]:
+        verb = str(a.get("action") or "?")
+        target = a.get("selector") or a.get("url") or a.get("key") or ""
+        brief.append(f"{verb} {str(target)[:80]}".strip())
+    assistant = json.dumps({
+        "thought": str(turn.get("thought") or "")[:300],
+        "action": "run_actions" if actions else str(turn.get("action") or "run_actions"),
+        "actions_summary": brief,
+    }, default=str)
+
+    outcomes = []
+    for r in list(turn.get("results") or [])[:12]:
+        if not isinstance(r, dict):
+            outcomes.append(str(r)[:120])
+            continue
+        verb = str(r.get("action") or "?")
+        if r.get("error"):
+            outcomes.append(f"{verb} ✗ {str(r['error'])[:160]}")
+        elif r.get("verification"):
+            outcomes.append(f"{verb} ✗ {str(r['verification'])[:200]}")
+        elif "eval_result" in r:
+            outcomes.append(f"{verb} ✓ returned {str(r.get('eval_result'))[:160]}")
+        else:
+            outcomes.append(f"{verb} ✓")
+    user = "RESULTS (condensed):\n" + "\n".join("  " + o for o in outcomes) if outcomes \
+        else "RESULTS (condensed): (none)"
+    return assistant, user
+
+
+def _render_history_messages(
+    history: list,
+    *,
+    char_budget: int = AGENT_THREAD_CHAR_BUDGET,
+    verbatim_turns: int = AGENT_THREAD_VERBATIM_TURNS,
+) -> List[dict]:
+    """Replay prior agent turns as alternating assistant/user messages, compacted to
+    ``char_budget`` on WHOLE-TURN boundaries (condense oldest-first, drop only as a
+    last resort and say so). Pure."""
+    turns = [h for h in (history or []) if isinstance(h, dict)]
+    if not turns:
+        return []
+
+    n = len(turns)
+    rendered: List[list] = []
+    for i, h in enumerate(turns):
+        if i >= n - verbatim_turns:
+            rendered.append([_turn_assistant_text(h), _turn_results_text(h)])
+        else:
+            rendered.append(list(_condense_turn(h)))
+
+    def _total() -> int:
+        return sum(len(a) + len(u) for a, u in rendered)
+
+    # Pass 1 — condense from the oldest end (already-condensed turns are no-ops).
+    for i in range(n):
+        if _total() <= char_budget:
+            break
+        rendered[i] = list(_condense_turn(turns[i]))
+
+    # Pass 2 — still over budget: drop the oldest turns outright, but TELL the model
+    # they existed so it doesn't mistake the transcript for the whole task.
+    dropped = 0
+    while _total() > char_budget and len(rendered) > 1:
+        rendered.pop(0)
+        dropped += 1
+
+    messages: List[dict] = []
+    if dropped:
+        messages.append({"role": "user", "content": [{
+            "type": "text",
+            "text": f"({dropped} earlier turn(s) of this task were dropped to fit the context "
+                    f"budget — the summarized turns below are what remains.)",
+        }]})
+    for assistant_text, user_text in rendered:
+        messages.append({"role": "assistant", "content": assistant_text})
+        messages.append({"role": "user", "content": [{"type": "text", "text": user_text}]})
+    return messages
+
+
+def _collapse_same_role(messages: List[dict]) -> List[dict]:
+    """Merge consecutive same-role turns so the thread strictly alternates — some
+    providers reject two `user` messages in a row. String and block-list contents are
+    both handled."""
+    def _blocks(content):
+        return content if isinstance(content, list) else [{"type": "text", "text": content or ""}]
+
+    out: List[dict] = []
+    for m in messages:
+        if out and out[-1]["role"] == m["role"]:
+            prev, cur = out[-1], m
+            if isinstance(prev["content"], str) and isinstance(cur["content"], str):
+                prev["content"] = prev["content"] + "\n\n" + cur["content"]
+            else:
+                prev["content"] = _blocks(prev["content"]) + _blocks(cur["content"])
+        else:
+            out.append(dict(m))
+    return out
+
+
+def _mark_cache_breakpoint(messages: List[dict]) -> None:
+    """Tag the last STABLE user block with Anthropic's ``cache_control`` so the whole
+    prefix — system prompt + opening task turn + every replayed turn — is served from
+    cache instead of re-read at full price each iteration.
+
+    Applied to the last user message BEFORE the final current-state turn: everything
+    up to there is append-only, so the cached prefix stays valid across iterations.
+    Anthropic reads it; ``local_ai._to_openai_messages`` rebuilds text blocks and
+    drops it, so OpenAI/OpenRouter/Ollama are unaffected. Below the provider's
+    minimum cacheable length it is simply ignored (not an error)."""
+    for i in range(len(messages) - 2, -1, -1):
+        m = messages[i]
+        if m.get("role") != "user" or not isinstance(m.get("content"), list):
+            continue
+        for block in reversed(m["content"]):
+            if isinstance(block, dict) and block.get("type") == "text":
+                block["cache_control"] = {"type": "ephemeral"}
+                return
+        return
+
+
+def _format_conversation(conversation: list) -> str:
+    """The chat that led to this task, as bounded dialogue lines. Each message is
+    clamped so one pathological entry can't dominate the opening turn (the transport
+    model has no per-message cap)."""
+    def _role(m):
+        return getattr(m, "role", None) if not isinstance(m, dict) else m.get("role")
+
+    def _content(m):
+        return getattr(m, "content", None) if not isinstance(m, dict) else m.get("content")
+
+    lines = [
+        f"  {_role(m)}: {str(_content(m) or '')[:4000]}"
+        for m in (conversation or [])
+    ]
+    return "\n".join(lines) or "  (start of conversation)"
+
+
+def _current_state_text(
+    *,
+    page_url: str,
+    observation: Optional[dict],
+    steps: list,
+    network_calls: list,
+    iteration: int,
+    max_iterations: int,
+    advanced_script: str = "",
+) -> str:
+    """The final user turn: the authoritative state as of RIGHT NOW. Kept byte-for-byte
+    compatible with the sections the one-shot prompt used, so nothing the model was
+    trained-in-context to look for moved or changed name."""
+    obs_text = _observation_text(observation)
+
+    script_section = ""
+    if advanced_script and advanced_script.strip():
+        script_section = f"CURRENT ADVANCED SCRIPT:\n{advanced_script[:12000]}\n\n"
+
+    return (
+        f"CURRENT STATE\n"
+        f"Current URL: {page_url}\n"
+        f"Iteration: {iteration + 1} of {max_iterations}"
+        f"{' — wrap up and finalize if you can.' if iteration >= max_iterations - 3 else ''}\n\n"
+        f"STEPS RECORDED SO FAR:\n{summarize_steps(steps, max_steps=500)}\n\n"
+        f"{script_section}"
+        f"PAGE OBSERVATION:\n{obs_text or '  (none yet — run actions / evaluate_js to inspect the page)'}\n\n"
+        f"CAPTURED API CALLS:\n{summarize_network_calls(network_calls, max_calls=60)}\n\n"
+        "Decide the next step now and reply with the JSON object."
+    )
+
+
+def build_agent_messages(
+    *,
+    instruction: str,
+    conversation: list,
+    page_url: str,
+    observation: Optional[dict],
+    steps: list,
+    history: list,
+    network_calls: list,
+    iteration: int,
+    max_iterations: int,
+    advanced_script: str = "",
+    screenshot_b64: Optional[str] = None,
+    attachments: Optional[list] = None,
+    thread_char_budget: int = AGENT_THREAD_CHAR_BUDGET,
+) -> List[dict]:
+    """Assemble the agent turn as a REAL multi-turn thread (see the module note above).
+
+    Layout: opening task turn (stable) → replayed assistant/user pairs (append-only,
+    compacted on turn boundaries) → final current-state turn (rebuilt each iteration).
+    Pure — no db/auth/network."""
+    opening_text = (
+        f"TASK: {instruction}\n\n"
+        f"CONVERSATION SO FAR:\n{_format_conversation(conversation)}"
+    )
+    opening_content: list = []
+    # User-attached files ride the OPENING turn: they are grounding for the whole
+    # task and never change, so they sit inside the cacheable prefix.
+    for block in (attachments or []):
+        if isinstance(block, dict) and block.get("type") in ("image", "document"):
+            opening_content.append(block)
+    opening_content.append({"type": "text", "text": opening_text})
+
+    messages: List[dict] = [{"role": "user", "content": opening_content}]
+    messages.extend(_render_history_messages(history, char_budget=thread_char_budget))
+
+    # Final turn — everything that changes per iteration.
+    final_content: list = []
+    if screenshot_b64:
+        final_content.append({"type": "image", "source": {
+            "type": "base64", "media_type": "image/jpeg", "data": screenshot_b64}})
+    final_content.append({"type": "text", "text": _current_state_text(
+        page_url=page_url, observation=observation, steps=steps,
+        network_calls=network_calls, iteration=iteration,
+        max_iterations=max_iterations, advanced_script=advanced_script,
+    )})
+    messages.append({"role": "user", "content": final_content})
+
+    messages = _collapse_same_role(messages)
+    _mark_cache_breakpoint(messages)
+    return messages
+
+
 def build_user_message(
     *,
     instruction: str,
@@ -688,6 +1032,11 @@ class AgentTurn:
     variable: str = ""
     iframe: Optional[str] = None
     summary: str = ""
+    # The model's reply VERBATIM. The loop stores it on the history turn so the next
+    # iteration can replay it as a real `assistant` message instead of a lossy
+    # reconstruction (see _turn_assistant_text). Bounded — it is a JSON decision, not
+    # a transcript. Never surfaced to the user.
+    raw_reply: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
     model: Optional[str] = None
@@ -874,19 +1223,23 @@ async def run_agent_turn(
     max_tokens: int = 3000,
     # Explicit model override (an AI session's `ai_model`). None = provider default.
     ai_model: Optional[str] = None,
+    # Character budget for the replayed transcript. Lower it for a small-context
+    # provider (a local model) so compaction kicks in before the provider rejects
+    # the request; see AGENT_THREAD_CHAR_BUDGET.
+    thread_char_budget: int = AGENT_THREAD_CHAR_BUDGET,
 ) -> AgentTurn:
     """Run ONE turn of the shared agent brain.
 
-    1. build_system_prompt; 2. build_user_message; 3. call_ai(max_tokens=3000,
-    purpose="assist", user=conversation_id); 4. loads_lenient with the retry-envelope
-    fallback; 5. coerce_decision.
+    1. build_system_prompt; 2. build_agent_messages (the real multi-turn thread);
+    3. call_ai(max_tokens=3000, purpose="assist", user=conversation_id);
+    4. loads_lenient with the retry-envelope fallback; 5. coerce_decision.
 
     Returns an AgentTurn. NO db / auth side effects — the caller does any
     persistence. call_ai may raise fastapi.HTTPException on gateway/transport error.
     """
     _mode, system_prompt = build_system_prompt(mode, autonomous=autonomous)
 
-    messages = build_user_message(
+    messages = build_agent_messages(
         instruction=instruction,
         conversation=conversation,
         page_url=page_url,
@@ -899,6 +1252,7 @@ async def run_agent_turn(
         advanced_script=advanced_script,
         screenshot_b64=screenshot_b64,
         attachments=attachments,
+        thread_char_budget=thread_char_budget,
     )
 
     ai_text, input_tokens, output_tokens, used_model = await call_ai(
@@ -921,6 +1275,10 @@ async def run_agent_turn(
         turn.input_tokens = input_tokens
         turn.output_tokens = output_tokens
         turn.model = used_model
+        # Deliberately NOT carried: an unparseable reply must not be replayed as an
+        # assistant turn, or the loop teaches the model that malformed output is
+        # part of the conversation. The corrective message is the feedback.
+        turn.raw_reply = ""
         return turn
 
     decision = coerce_decision(parsed)
@@ -928,5 +1286,6 @@ async def run_agent_turn(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         model=used_model,
+        raw_reply=str(ai_text or "")[:20000],
         **decision,
     )

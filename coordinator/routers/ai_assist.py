@@ -626,6 +626,10 @@ class AgentChatResponse(BaseModel):
     iframe: Optional[str] = None
     summary: str = ""
     credits_used: int = 0
+    # The model's reply verbatim. The loop stores it on its history turn so the NEXT
+    # turn replays it as a real `assistant` message (agent_brain._turn_assistant_text)
+    # instead of a reconstruction. Internal to the loop — never rendered in chat.
+    raw_reply: str = ""
 
 
 @router.post("/agent", response_model=AgentChatResponse, dependencies=[Depends(_rate_limit_ai), Depends(require_feature("ai_workflows"))])
@@ -667,6 +671,10 @@ async def ai_agent_turn(
         screenshot_b64=req.screenshot_b64,
         conversation_id=req.conversation_id,
         max_tokens=await ai_limits.resolve_max_tokens(db, "agent", 3000),
+        # Compact the replayed transcript to what the CONFIGURED provider can
+        # actually hold, so a small-context local model gets a shorter thread
+        # instead of a rejected request.
+        thread_char_budget=await ai_limits.resolve_thread_char_budget(),
     )
 
     # Unparseable-reply retry envelope: no credits charged, no DB write (matches the
@@ -703,6 +711,7 @@ async def ai_agent_turn(
         iframe=turn.iframe,
         summary=turn.summary,
         credits_used=credits_used,
+        raw_reply=turn.raw_reply,
     )
 
 

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import html as html_lib
 import io
 import json
 import math
@@ -1693,3 +1694,288 @@ def to_json_records(columns: list[str], rows: list[dict], *, lineage: bool = Fal
             rec["_lineage"] = r["_lineage"]
         out.append(rec)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Markdown / HTML output (`?format=markdown|html`)
+#
+# CONTENT-AWARE: a dataset whose records carry a long-form content column (a
+# Dragnet crawl page has `markdown`) renders as DOCUMENTS — one section per
+# record, heading + source link + the content itself. Anything else (structured
+# scraper output) renders as a TABLE, mirroring the CSV/JSON columns exactly.
+# One rule, so `format=markdown` "does the right thing" for both shapes.
+#
+# SECURITY: `format=html` echoes SCRAPED THIRD-PARTY content back as text/html
+# from our own origin, so it is a stored-XSS surface. Two defenses live here (the
+# routers add the transport ones — nosniff + a `default-src 'none'` CSP):
+#   1. markdown-it runs with html=False → raw HTML in the source markdown is
+#      ESCAPED, never passed through.
+#   2. `_safe_link` allowlists link/image URL schemes (http/https/mailto and
+#      data:image), so `[x](javascript:…)` cannot survive into an href.
+# ---------------------------------------------------------------------------
+
+#: Columns that may hold long-form document content, in preference order.
+_CONTENT_FIELDS = ("markdown", "content", "text", "body")
+#: Columns to title a document with, in preference order.
+_TITLE_FIELDS = ("title", "name", "heading", "url")
+#: Columns naming a document's source, in preference order.
+_URL_FIELDS = ("url", "link", "source_url", "source")
+#: A content column must carry at least this many chars to count as long-form.
+_CONTENT_MIN_CHARS = 200
+#: URL schemes permitted in rendered links/images.
+_SAFE_URL_SCHEMES = ("http://", "https://", "mailto:", "data:image/")
+
+
+def search_results_to_table(payload: dict) -> tuple[list[str], list[dict]]:
+    """Re-shape a ``dataset_search.search_records`` payload into the
+    ``(columns, rows)`` the renderers consume.
+
+    Lives here (not in the router) because BOTH the Datasets API's ``?format=``
+    and the AI concierge's answer-from-datasets fold need it — the concierge
+    renders the matches to Markdown rather than JSON-dumping them, since a crawl
+    page's markdown escaped inside JSON costs far more tokens than the prose.
+    Columns are the union of result field keys, in first-seen order.
+    """
+    columns: list[str] = []
+    rows: list[dict] = []
+    for r in payload.get("results") or []:
+        fields = r.get("fields") or {}
+        for k in fields:
+            if k not in columns:
+                columns.append(k)
+        rows.append({
+            "run_id": r.get("run_id"),
+            "run_at": r.get("run_at"),
+            "status": r.get("status") or "success",
+            "record_index": r.get("record_index"),
+            "fields": fields,
+        })
+    return columns, rows
+
+
+def content_column(columns: list[str], rows: list[dict]) -> Optional[str]:
+    """The column holding long-form content, or None when this dataset is not
+    document-shaped.
+
+    Requires that at least half the rows carry a genuinely long string there, so
+    a short incidental `text`/`content` column on a structured dataset does NOT
+    flip the whole dataset into document mode.
+    """
+    if not rows:
+        return None
+    for cand in _CONTENT_FIELDS:
+        if cand not in columns:
+            continue
+        long_enough = sum(
+            1
+            for r in rows
+            if isinstance(_row_value(r, cand), str)
+            and len(_row_value(r, cand)) >= _CONTENT_MIN_CHARS
+        )
+        if long_enough * 2 >= len(rows):
+            return cand
+    return None
+
+
+def _first_present(row: dict, keys: tuple[str, ...], skip: Optional[str] = None) -> Optional[str]:
+    """The first non-empty scalar value among `keys` on this row."""
+    for k in keys:
+        if k == skip:
+            continue
+        v = _row_value(row, k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
+def _safe_link(url: str) -> Optional[str]:
+    """A link/image URL, or None when its scheme is not allowlisted. Blocks
+    `javascript:` / `vbscript:` / `file:` / bare `data:` payloads."""
+    u = (url or "").strip()
+    if not u:
+        return None
+    low = u.lower()
+    # A scheme-relative or relative URL carries no scheme to abuse.
+    if low.startswith("//") or low.startswith("/") or low.startswith("#"):
+        return u
+    if "://" not in low and ":" not in low.split("/")[0]:
+        return u  # relative path
+    return u if low.startswith(_SAFE_URL_SCHEMES) else None
+
+
+def _md_to_html(text: str) -> str:
+    """Render CommonMark to HTML with raw HTML escaped and unsafe link schemes
+    dropped. Mirrors the daemon's `pulldown-cmark` renderer."""
+    from markdown_it import MarkdownIt
+
+    md = MarkdownIt("commonmark", {"html": False, "linkify": False})
+    # markdown-it already blocks javascript:/vbscript:/file:; tighten to an
+    # explicit allowlist so anything exotic is dropped too.
+    md.validateLink = lambda url: _safe_link(url) is not None  # type: ignore[assignment]
+    return md.render(text or "")
+
+
+def _md_escape_cell(value: Any) -> str:
+    """A table cell that cannot break the Markdown table grid: pipes escaped,
+    newlines collapsed."""
+    return _cell_text(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
+#: A leading YAML front-matter block: `---` on its own first line, then keys, then
+#: a closing `---` line. Anchored to the very start so a mid-document thematic
+#: break is never mistaken for it.
+_FRONT_MATTER_RE = re.compile(r"\A﻿?[ \t]*---[ \t]*\r?\n.*?\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
+
+
+def _strip_front_matter(text: str) -> str:
+    """Drop a leading YAML front-matter block from document content.
+
+    A crawl stores each page's markdown WITH front matter (`title`, `url`,
+    `published`, …). The document renderers already hoist title + url into the
+    heading and source link, so leaving the block in would duplicate them — and in
+    HTML it renders as a stray `<hr>` followed by a junk `title: "…"` heading
+    rather than as metadata. Strip it and let the heading speak.
+    """
+    if not text:
+        return text
+    return _FRONT_MATTER_RE.sub("", text, count=1).lstrip("\r\n")
+
+
+def _doc_parts(row: dict, ccol: str) -> tuple[str, Optional[str], str]:
+    """(title, url, content) for one document-shaped row."""
+    title = _first_present(row, _TITLE_FIELDS, skip=ccol) or f"Record {row.get('record_index', '')}".strip()
+    url = _first_present(row, _URL_FIELDS, skip=ccol)
+    content = _row_value(row, ccol)
+    content = content if isinstance(content, str) else _cell_text(content)
+    return title, url, _strip_front_matter(content)
+
+
+def to_markdown(
+    columns: list[str],
+    rows: list[dict],
+    *,
+    lineage: bool = False,
+    title: Optional[str] = None,
+) -> str:
+    """Serialize rows to Markdown — documents when the dataset is document-shaped
+    (see `content_column`), otherwise a Markdown table."""
+    out: list[str] = []
+    if title:
+        out.append(f"# {title}\n")
+    ccol = content_column(columns, rows)
+
+    if ccol:
+        for r in rows:
+            doc_title, url, content = _doc_parts(r, ccol)
+            out.append(f"## {doc_title}")
+            if url:
+                out.append(f"\n<{url}>")
+            out.append(f"\n{content.strip()}\n")
+            out.append("\n---\n")
+        return "\n".join(out).rstrip("\n-\n ") + "\n"
+
+    # Table shape — same columns as CSV/JSON so the formats stay comparable.
+    header = ["run_id", "run_at", "status"]
+    if lineage:
+        header += _LINEAGE_CSV_COLUMNS
+    header += list(columns)
+    out.append("| " + " | ".join(header) + " |")
+    out.append("| " + " | ".join("---" for _ in header) + " |")
+    for r in rows:
+        line = [
+            _md_escape_cell(r.get("run_id")),
+            _md_escape_cell(r.get("run_at") or ""),
+            _md_escape_cell(r.get("status") or ""),
+        ]
+        if lineage:
+            lin = r.get("_lineage") or {}
+            line += [
+                _md_escape_cell(lin.get("uid") or ""),
+                _md_escape_cell(lin.get("change") or ""),
+                _md_escape_cell(",".join(lin.get("changed_fields") or [])),
+                _md_escape_cell(lin.get("first_seen_at") or ""),
+                _md_escape_cell(lin.get("last_seen_at") or ""),
+                _md_escape_cell(lin.get("versions") if lin.get("versions") is not None else ""),
+            ]
+        line += [_md_escape_cell(_row_value(r, c)) for c in columns]
+        out.append("| " + " | ".join(line) + " |")
+    return "\n".join(out) + "\n"
+
+
+_HTML_CSS = (
+    "body{font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+    "max-width:52rem;margin:2rem auto;padding:0 1rem;color:#18181b}"
+    "table{border-collapse:collapse;width:100%;font-size:13px}"
+    "th,td{border:1px solid #e4e4e7;padding:6px 8px;text-align:left;vertical-align:top}"
+    "th{background:#fafafa}"
+    "article{margin:0 0 2rem;padding:0 0 2rem;border-bottom:1px solid #e4e4e7}"
+    "img{max-width:100%}pre{overflow-x:auto;background:#fafafa;padding:.75rem;border-radius:6px}"
+    "@media(prefers-color-scheme:dark){body{background:#09090b;color:#e4e4e7}"
+    "th,td,article{border-color:#27272a}th,pre{background:#18181b}}"
+)
+
+
+def to_html(
+    columns: list[str],
+    rows: list[dict],
+    *,
+    lineage: bool = False,
+    title: Optional[str] = None,
+) -> str:
+    """Serialize rows to a standalone HTML document — rendered documents when the
+    dataset is document-shaped, otherwise a table. All values are escaped; see the
+    module-section note for the XSS posture."""
+    esc = html_lib.escape
+    doc_title = esc(title or "Dataset")
+    parts: list[str] = [
+        "<!doctype html>",
+        '<html lang="en"><head><meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width,initial-scale=1">',
+        f"<title>{doc_title}</title><style>{_HTML_CSS}</style></head><body>",
+    ]
+    if title:
+        parts.append(f"<h1>{doc_title}</h1>")
+    ccol = content_column(columns, rows)
+
+    if ccol:
+        for r in rows:
+            t, url, content = _doc_parts(r, ccol)
+            parts.append("<article>")
+            parts.append(f"<h2>{esc(t)}</h2>")
+            safe = _safe_link(url) if url else None
+            if safe:
+                parts.append(f'<p><a href="{esc(safe)}" rel="noreferrer nofollow">{esc(url or "")}</a></p>')
+            elif url:
+                parts.append(f"<p>{esc(url)}</p>")
+            parts.append(_md_to_html(content))
+            parts.append("</article>")
+        parts.append("</body></html>")
+        return "\n".join(parts)
+
+    header = ["run_id", "run_at", "status"]
+    if lineage:
+        header += _LINEAGE_CSV_COLUMNS
+    header += list(columns)
+    parts.append("<table><thead><tr>")
+    parts += [f"<th>{esc(h)}</th>" for h in header]
+    parts.append("</tr></thead><tbody>")
+    for r in rows:
+        cells = [
+            _cell_text(r.get("run_id")),
+            _cell_text(r.get("run_at") or ""),
+            _cell_text(r.get("status") or ""),
+        ]
+        if lineage:
+            lin = r.get("_lineage") or {}
+            cells += [
+                _cell_text(lin.get("uid") or ""),
+                _cell_text(lin.get("change") or ""),
+                ",".join(lin.get("changed_fields") or []),
+                _cell_text(lin.get("first_seen_at") or ""),
+                _cell_text(lin.get("last_seen_at") or ""),
+                _cell_text(lin.get("versions") if lin.get("versions") is not None else ""),
+            ]
+        cells += [_cell_text(_row_value(r, c)) for c in columns]
+        parts.append("<tr>" + "".join(f"<td>{esc(c)}</td>" for c in cells) + "</tr>")
+    parts.append("</tbody></table></body></html>")
+    return "\n".join(parts)

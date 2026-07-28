@@ -214,6 +214,12 @@ class RecorderCapacityManager:
         # _pick_recorder's prefer-isolated-fallback-shared behavior.
         has_isolated_pool = tier_total[TIER_ISOLATED] > 0
 
+        # Per-class QUEUED demand. A reservation exists to protect a class under
+        # CONTENTION; without knowing who is actually waiting, the borrow test in
+        # `_admit` treats every other class's full reservation as spoken-for even on
+        # a completely idle fleet, which deadlocks small fleets (see _admit).
+        waiting = await self._count_queued_by_traffic()
+
         return {
             'total_slots': total_slots,
             'used_slots': used_slots,
@@ -235,7 +241,35 @@ class RecorderCapacityManager:
             # agent_id → 'shared'|'isolated', so RUNNING tasks can be bucketed by
             # their executor exactly as CAPACITY was bucketed above.
             'agent_tier': agent_tier,
+            # Per-class queued-task counts — which classes actually have demand.
+            'waiting': waiting,
         }
+
+    async def _count_queued_by_traffic(self) -> dict:
+        """Queued (not yet dispatched) task counts per traffic class.
+
+        One GROUP BY per capacity snapshot — the snapshot is computed once per
+        dispatch cycle, so this is not a per-task cost. A legacy/NULL
+        queue_traffic_type counts as 'direct', matching dequeue_batch.
+        """
+        from models.automation_task import AutomationTask
+
+        out = {'direct': 0, 'called': 0, 'scheduled': 0}
+        try:
+            rows = (await self.db.execute(
+                select(AutomationTask.queue_traffic_type, func.count(AutomationTask.id))
+                .where(AutomationTask.status == "queued")
+                .where(AutomationTask.queue_expires_at > datetime.utcnow())
+                .group_by(AutomationTask.queue_traffic_type)
+            )).all()
+        except Exception as e:  # noqa: BLE001 — admission must never wedge on this
+            logger.warning(f"queued-demand tally failed, assuming no waiters: {e}")
+            return out
+        for traffic, n in rows:
+            key = (traffic or 'direct')
+            if key in out:
+                out[key] += int(n or 0)
+        return out
 
     async def _count_running_tasks_by_traffic(self, traffic_type: str) -> int:
         """Count currently running tasks by traffic type."""
@@ -380,29 +414,53 @@ class RecorderCapacityManager:
         return tally.get('flat') or {}
 
     @staticmethod
-    def _admit(c: str, available: int, reserved: dict, running: dict) -> bool:
+    def _admit(c: str, available: int, reserved: dict, running: dict,
+               waiting: dict = None) -> bool:
         """Reserve-and-borrow admission test for one class within ONE slot budget.
 
         A class may start a run when EITHER:
           - it is still under its own guaranteed reservation
             (running[C] < reserved[C]), OR
           - there is a genuinely idle slot to BORROW — a free slot that is not
-            needed to satisfy any OTHER class's unmet reservation.
+            needed to satisfy any OTHER class's unmet reservation *for work that
+            class actually has waiting*.
 
         This guarantees each class its share under contention while allowing full
         utilization of slots no one else is using.
 
+        ``waiting`` is the per-class count of QUEUED tasks. It is what makes a
+        reservation protect against CONTENTION rather than fence off idle
+        capacity, and without it small fleets deadlock:
+
+            reserved = _class_reservations(2) = {direct:1, called:1, scheduled:0}
+            a crawl shard (scheduled) on a COMPLETELY IDLE 2-slot fleet:
+              rule 1 — running 0 < reserved 0                      → False
+              rule 2 — headroom_others = 1 + 1 = 2, borrowable = 0 → False
+            → denied forever. Any fleet under 6 slots gives `scheduled` a
+            reservation of 0 (the leftover is handed out direct→called→scheduled),
+            so on a typical self-host — one agent, a handful of slots — scheduled
+            work could NEVER dispatch even with nothing running. Dragnet crawl
+            shards are minted as `scheduled`, which is why a crawl would sit
+            queued until it expired: "the crawl never launches".
+
+        With ``waiting``, an idle fleet has no unmet demand to protect, so the
+        idle slot is borrowable and the shard starts. Under real contention the
+        guarantees behave exactly as before.
+
+        ``waiting=None`` preserves the original (contention-blind) behavior for
+        any caller that has no queue snapshot.
+
         Worked examples (reserved={direct:4,called:4,scheduled:2}):
           - direct under guarantee: available=1,running={direct:2,...} → True
-          - scheduled, fleet full of direct: available=2,
-            running={direct:8,called:0,scheduled:0}
-            → others' unmet headroom = called 4 → borrowable=2-4<0 → False
-            (the 2 free slots are reserved for the starved 'called' class)
-          - scheduled, nobody waiting: available=2, running all 0
-            → others' headroom=4+? but borrow only blocked by UNMET reservations
-            of OTHER classes; with running all 0, reserved_headroom_others
-            = direct 4 + called 4 = 8 → borrowable=2-8<0 → False UNLESS scheduled
-            is under its own reservation (it is: 0<2) → admitted by the first rule.
+          - scheduled AT its guarantee, 'called' work QUEUED: available=2,
+            running={direct:8,called:0,scheduled:2}, waiting={called:3}
+            → rule 1: 2<2 false; others' unmet headroom = called 4
+            → borrowable=2-4<0 → False (the 2 free slots are held for 'called')
+          - same, but NOTHING queued for 'called': waiting={direct:0,called:0}
+            → no other class has demand → headroom_others=0 → borrowable=2 → True
+          - scheduled with reservation 0 on an idle 2-slot fleet (the crawl case):
+            rule 1 can never pass, and with no waiters rule 2 now yields
+            borrowable=2 → True
         """
         if available <= 0:
             return False
@@ -410,10 +468,12 @@ class RecorderCapacityManager:
         if running.get(c, 0) < reserved.get(c, 0):
             return True
         # Otherwise only borrow a free slot that no OTHER under-served class needs
-        # to meet its guarantee.
+        # to meet its guarantee — and only count a class as needing one when it
+        # actually has work waiting for it.
         reserved_headroom_others = sum(
             max(0, reserved.get(x, 0) - running.get(x, 0))
-            for x in ('direct', 'called', 'scheduled') if x != c
+            for x in ('direct', 'called', 'scheduled')
+            if x != c and (waiting is None or waiting.get(x, 0) > 0)
         )
         borrowable = max(0, available - reserved_headroom_others)
         return borrowable > 0
@@ -475,7 +535,9 @@ class RecorderCapacityManager:
                 agent_tier = capacity.get('agent_tier') or {}
                 running_by_tier = await self._running_by_class_and_tier(agent_tier)
                 running = running_by_tier.get(want_tier, {})
-            return self._admit(c, available, reserved, running)
+            # Queued demand is fleet-wide (a queued task has no tier yet), so the
+            # same tally gates borrowing in both pools.
+            return self._admit(c, available, reserved, running, capacity.get('waiting'))
 
         # --- Flat path (no isolated pool): identical to pre-tier behavior ------
         # The REGISTRY's free-slot count is the real ceiling — it reflects agents
@@ -494,7 +556,7 @@ class RecorderCapacityManager:
                 'called': await self._count_running_tasks_by_traffic('called'),
                 'scheduled': await self._count_running_tasks_by_traffic('scheduled'),
             }
-        return self._admit(c, available, reserved, running)
+        return self._admit(c, available, reserved, running, capacity.get('waiting'))
 
     async def acquire_slot(
         self,

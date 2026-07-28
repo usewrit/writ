@@ -945,13 +945,26 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   // Autonomy: 'autonomous' runs the whole loop; 'assist' pauses for approval before each browser batch.
   const [agentAutonomy, setAgentAutonomy] = useState<'autonomous' | 'assist'>('autonomous');
   // In assist mode, a batch of proposed actions awaiting the user's Run/Skip.
-  const [pendingAgentActions, setPendingAgentActions] = useState<{ thought: string; actions: any[] } | null>(null);
+  const [pendingAgentActions, setPendingAgentActions] = useState<{ thought: string; actions: any[]; rawReply?: string } | null>(null);
   const chatStopRef = useRef(false);
   // Aborts the in-flight /ai-assist/agent request so Stop interrupts mid-turn
   // instead of only at the next loop iteration.
   const chatAbortRef = useRef<AbortController | null>(null);
-  // Resumable agent-loop context (survives assist-mode pauses across user clicks).
+  // Resumable agent-loop context. Survives assist-mode pauses AND follow-up messages
+  // in the same chat: the model's own decisions and what they produced are what let
+  // "now also grab the prices" continue the task instead of re-exploring the page from
+  // scratch, so `history` is cleared only when the chat itself is.
   const agentCtxRef = useRef<{ instruction: string; history: any[]; observation: any; iteration: number; max: number } | null>(null);
+  // LIVE mirrors of the state the agent loop reads on EVERY iteration. runAgentLoop
+  // runs a multi-iteration `while` without re-rendering, so anything read from the
+  // callback's closure is frozen at loop start — the chat, the recorded steps and the
+  // captured API calls would all be the snapshot from before the user's own message.
+  const aiChatMessagesRef = useRef(aiChatMessages);
+  aiChatMessagesRef.current = aiChatMessages;
+  const stepsRef = useRef(steps);
+  stepsRef.current = steps;
+  const detectedRequestsRef = useRef(detectedRequests);
+  detectedRequestsRef.current = detectedRequests;
   // On-demand screenshot: set when the AI runs get_screenshot; sent as
   // screenshot_b64 on the NEXT turn (we no longer push a screenshot every turn).
   const pendingScreenshotRef = useRef<string | null>(null);
@@ -1208,6 +1221,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
       setAiDockExpanded(false);
       setAiChatMessages([]);
       setAiChatInput('');
+      agentCtxRef.current = null;   // new conversation → drop the carried-over turns
       setAiChatConvId(newChatConvId());  // fresh conversation → fresh streaming tab
       setShowAIExtract(false);
       setAiExtractGoal('');
@@ -2549,12 +2563,15 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
 
   // Execute one batch of ephemeral browser actions and fold the result into the
   // resumable agent context (history + latest observation).
-  const executeAgentActions = useCallback(async (thought: string, actions: any[]) => {
+  const executeAgentActions = useCallback(async (thought: string, actions: any[], rawReply = '') => {
     const ctx = agentCtxRef.current;
     if (!ctx) return;
+    // `assistant` is the model's reply VERBATIM. The backend replays it as a real
+    // assistant turn next iteration, so the thread shows what the model actually
+    // decided rather than a reconstruction of it.
     if (actions.length === 0) {
       try { const r = await wsAgentAction([], 30000); ctx.observation = r.observation; } catch { /* keep prior */ }
-      ctx.history.push({ thought, actions: [], results: [] });
+      ctx.history.push({ thought, assistant: rawReply, actions: [], results: [] });
       return;
     }
     setAiChatMessages(prev => [...prev, { role: 'assistant', content: actions.map((a: any) => a.action + (a.selector ? ` ${a.selector}` : a.url ? ` ${a.url}` : '')).join(', ').slice(0, 160), kind: 'run' }]);
@@ -2572,9 +2589,9 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
         }
         return out;
       });
-      ctx.history.push({ thought, actions, results: sampled });
+      ctx.history.push({ thought, assistant: rawReply, actions, results: sampled });
     } catch (err: any) {
-      ctx.history.push({ thought, actions, results: [{ error: String(err?.message || err).slice(0, 300) }] });
+      ctx.history.push({ thought, assistant: rawReply, actions, results: [{ error: String(err?.message || err).slice(0, 300) }] });
       setAiChatMessages(prev => [...prev, { role: 'assistant', content: String(err?.message || err).slice(0, 200), kind: 'result' }]);
     }
   }, [wsAgentAction, sampleForModel]);
@@ -2602,12 +2619,18 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
         const resp = await client.post('/ai-assist/agent', {
           instruction: ctx.instruction,
           mode: recorderMode,
-          conversation: aiChatMessages.slice(-10).map(m => ({ role: m.role, content: m.content })),
+          // Real dialogue only. The transcript also holds UI status lines ('Verifying…',
+          // run/result previews) that are noise to the model, and this task's own turns
+          // now travel as a real assistant/user thread in `history` rather than as prose.
+          conversation: aiChatMessagesRef.current.filter(m => !m.kind).slice(-10).map(m => ({ role: m.role, content: m.content })),
           page_url: currentUrl,
           screenshot_b64: screenshotB64 || undefined,
           observation: ctx.observation,
-          steps,
-          network_calls: detectedRequests,
+          // Read LIVE (not from the frozen closure) and clamped to the endpoint's
+          // declared list limits: both grow for the life of the recording session, and
+          // overflowing either one rejects the turn with a 422 before it reaches the model.
+          steps: stepsRef.current.slice(-500),
+          network_calls: detectedRequestsRef.current.slice(-60),
           // Streaming mode: let the agent SEE the current advanced script so it can
           // edit it (script_mode:"replace") instead of only appending.
           advanced_script: streamingAdvancedScript,
@@ -2646,6 +2669,8 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
         // ctx.max) — instead of dead-ending or dumping the raw blob in chat.
         ctx.history.push({
           thought: '(your previous reply was rejected)',
+          // No `assistant`: unparseable output must not be replayed as a model turn,
+          // or the loop teaches the model that malformed replies belong in the thread.
           actions: [],
           results: [{ success: false, system: 'json_parse_error', error: data.message || 'Your previous reply was not valid JSON. Reply with ONLY a valid JSON object.' }],
         });
@@ -2679,14 +2704,14 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
         const ranSomething = ctx.history.some((h: any) => Array.isArray(h?.actions) && h.actions.some((a: any) => a?.action && a.action !== 'verify'));
         const alreadyNudged = ctx.history.some((h: any) => Array.isArray(h?.actions) && h.actions.some((a: any) => a?.purpose === 'premature done'));
         if (!ranSomething && !alreadyNudged && (extractionStep || (recorderMode === 'streaming' && data.script))) {
-          ctx.history.push({ thought: data.thought || '', actions: [{ action: 'verify', purpose: 'premature done' }],
+          ctx.history.push({ thought: data.thought || '', assistant: data.raw_reply || '', actions: [{ action: 'verify', purpose: 'premature done' }],
             results: [{ success: false, verification: 'REJECTED: you returned "done" without running ANY actions to inspect or test the page — you have not actually verified anything yet. Use run_actions with evaluate_js to confirm your extraction returns real data (and check for pagination / dynamic loading) BEFORE returning done.' }] });
           setAiChatMessages(prev => [...prev, { role: 'assistant', content: t('The AI tried to finish without testing the page — asking it to verify first.'), kind: 'result' }]);
           continue;
         }
 
         if (extractionStep && !verifyScript) {
-          ctx.history.push({ thought: data.thought || '', actions: [{ action: 'verify', purpose: 'validate done' }],
+          ctx.history.push({ thought: data.thought || '', assistant: data.raw_reply || '', actions: [{ action: 'verify', purpose: 'validate done' }],
             results: [{ success: false, verification: 'REJECTED: your extraction step has no runnable config.script. Provide the script and verify it returns data with evaluate_js before returning done.' }] });
           setAiChatMessages(prev => [...prev, { role: 'assistant', content: t('That step has no runnable script — asking the AI to provide and verify one.'), kind: 'result' }]);
           continue;
@@ -2732,7 +2757,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
             // data. The verify may read the site's API (allow_network), so the
             // result can hold sensitive content; the model must fix the script
             // from the failure signal alone, not by seeing the data.
-            ctx.history.push({ thought: data.thought || '', actions: [{ action: 'evaluate_js', purpose: 'verify done script' }],
+            ctx.history.push({ thought: data.thought || '', assistant: data.raw_reply || '', actions: [{ action: 'evaluate_js', purpose: 'verify done script' }],
               results: [{ action: 'evaluate_js', success: false, error: evalErr || undefined,
                 verification: `REJECTED: your "done" extraction ${why}. (The result data is withheld for privacy — fix from selectors/page structure, not by inspecting the data.) Do NOT return done until evaluate_js confirms it returns real data.` }] });
             setAiChatMessages(prev => [...prev, { role: 'assistant', content: t('Extraction {{why}} — asking the AI to fix it before finalizing.', { why: whyUser }), kind: 'result' }]);
@@ -2782,11 +2807,11 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
       const READONLY_ACTIONS = new Set(['evaluate_js', 'read_text', 'get_text', 'inspect_field', 'wait']);
       const changesPage = actions.some((a: any) => !READONLY_ACTIONS.has(a.action));
       if (agentAutonomy === 'assist' && actions.length > 0 && changesPage) {
-        setPendingAgentActions({ thought: data.thought || '', actions });
+        setPendingAgentActions({ thought: data.thought || '', actions, rawReply: data.raw_reply || '' });
         setAiChatLoading(false);
         return; // resumed by approveAgentActions / skipAgentActions
       }
-      await executeAgentActions(data.thought, actions);
+      await executeAgentActions(data.thought, actions, data.raw_reply || '');
       if (chatStopRef.current) { setAiChatMessages(prev => [...prev, { role: 'assistant', content: t('Stopped.') }]); break; }
     }
 
@@ -2794,7 +2819,10 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
       setAiChatMessages(prev => [...prev, { role: 'assistant', content: t('Reached the step limit — ask me to continue if needed.') }]);
     }
     setAiChatLoading(false);
-  }, [recorderMode, currentUrl, aiChatMessages, aiChatConvId, steps, detectedRequests, streamingAdvancedScript, streamingAdvancedEnabled, agentAutonomy, executeAgentActions]);
+    // aiChatMessages / steps / detectedRequests are deliberately NOT deps — the loop
+    // reads them through refs so each iteration sees the current value instead of a
+    // snapshot frozen when the callback was created.
+  }, [recorderMode, currentUrl, aiChatConvId, streamingAdvancedScript, streamingAdvancedEnabled, agentAutonomy, executeAgentActions]);
 
   // Unified agent chat entry: the model decides per message whether to answer,
   // drive the live browser (ephemerally — no recorded steps), or finalize an
@@ -2817,7 +2845,17 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
     setPendingChatSteps(null);
     setPendingChatTest(null);
     chatStopRef.current = false;
-    agentCtxRef.current = { instruction, history: [], observation: null, iteration: 0, max: 12 };
+    // Carry the prior turns forward: wiping them made every follow-up start blind —
+    // the model had no record of the selectors it had already probed or the scripts it
+    // had already tested, so it re-explored the page and burned the iteration budget.
+    const prevCtx = agentCtxRef.current;
+    agentCtxRef.current = {
+      instruction,
+      history: prevCtx ? prevCtx.history : [],
+      observation: prevCtx ? prevCtx.observation : null,
+      iteration: 0,
+      max: 12,
+    };
     runAgentLoop();
   }, [aiChatInput, aiChatLoading, pendingAgentActions, runAgentLoop, monitorMode, onMonitorAiFind]);
 
@@ -2826,7 +2864,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
     const p = pendingAgentActions;
     if (!p) return;
     setPendingAgentActions(null);
-    await executeAgentActions(p.thought, p.actions);
+    await executeAgentActions(p.thought, p.actions, p.rawReply || '');
     await runAgentLoop();
   }, [pendingAgentActions, executeAgentActions, runAgentLoop]);
 
@@ -2835,7 +2873,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
     const p = pendingAgentActions;
     if (!p) return;
     setPendingAgentActions(null);
-    agentCtxRef.current?.history.push({ thought: p.thought, actions: p.actions, results: [{ skipped: true, note: 'user skipped these actions' }] });
+    agentCtxRef.current?.history.push({ thought: p.thought, assistant: p.rawReply || '', actions: p.actions, results: [{ skipped: true, note: 'user skipped these actions' }] });
     await runAgentLoop();
   }, [pendingAgentActions, runAgentLoop]);
 

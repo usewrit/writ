@@ -6,28 +6,15 @@ import i18n from '../i18n';
 // it must be re-minted from the httpOnly refresh cookie. The axios interceptor
 // handles this for client requests, but direct getAccessToken() consumers (e.g.
 // the recorder's raw-fetch WS-ticket mint) need the token to already be present.
-// Fire once at module load if a prior session exists. Best-effort, non-blocking.
-void primeAccessToken();
-
-const client: AxiosInstance = axios.create({
-  baseURL: '/api',
-  timeout: 30000,
-  headers: {
-    'Content-Type': 'application/json',
-  },
-});
-
-// Request interceptor: attach JWT access token from memory
-client.interceptors.request.use(
-  (config: InternalAxiosRequestConfig) => {
-    const token = getAccessToken();
-    if (token && config.headers) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-  },
-  (error) => Promise.reject(error)
-);
+// Fire once at module load if a prior session exists.
+//
+// The PROMISE is kept (it used to be `void`-ed). Priming is async, so every query
+// the first render fires went out before it resolved — with no Authorization header
+// at all. They each 401'd, each fell into the refresh interceptor below, and each
+// was retried: the app worked, but a reload printed a wall of red 401s in the
+// console and every boot request was sent twice. Awaiting the in-flight prime in
+// the request interceptor makes the first burst carry the token instead.
+const bootPrime: Promise<string | null> = primeAccessToken();
 
 // Unauthenticated auth-flow endpoints: a 401 here means "bad credentials /
 // bad code", not "session expired". They must NOT trigger the token-refresh +
@@ -41,6 +28,39 @@ const AUTH_FLOW_PATHS = [
 ];
 const isAuthFlowRequest = (url?: string) =>
   !!url && AUTH_FLOW_PATHS.some((p) => url.startsWith(p));
+
+const client: AxiosInstance = axios.create({
+  baseURL: '/api',
+  timeout: 30000,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
+
+// Request interceptor: attach the JWT access token from memory.
+//
+// Async on purpose. When the token is not in memory yet we wait for the boot prime
+// (a single-flight refresh shared with everything else, so this adds no extra
+// round-trip) rather than sending an anonymous request that is guaranteed to 401.
+// Once primed, `getAccessToken()` is a hit and the await resolves immediately — an
+// already-settled promise, so steady-state requests are not delayed.
+//
+// Auth-flow endpoints are skipped: /auth/login and friends are how a session is
+// ESTABLISHED, so blocking them on "do we have a session?" would be circular, and
+// /auth/refresh in particular must never wait on a refresh.
+client.interceptors.request.use(
+  async (config: InternalAxiosRequestConfig) => {
+    let token = getAccessToken();
+    if (!token && !isAuthFlowRequest(config.url)) {
+      token = await bootPrime.catch(() => null);
+    }
+    if (token && config.headers) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
 
 // Response interceptor: handle 401 with token refresh
 client.interceptors.response.use(

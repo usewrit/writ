@@ -9,6 +9,26 @@ import client from './client';
  *   GET /automation/workflows/{id}/data/records/{uid}/history (per-record change-points)
  */
 
+/**
+ * Output formats the dataset routes serve (`?format=`). Mirrors
+ * services/dataset_formats.py::DATASET_FORMATS — the backend 400s on anything
+ * else, so widen this only when that tuple widens.
+ *
+ * csv/json are flat serializations of the same rows. markdown and html are
+ * CONTENT-AWARE: a dataset whose records carry long-form content (a crawl page's
+ * `markdown` column) renders as documents — heading, source link, prose — while
+ * structured scraper output renders as a table.
+ */
+export type ExportFormat = 'csv' | 'json' | 'markdown' | 'html';
+
+/** File extension each format downloads as. */
+export const EXPORT_FORMAT_EXT: Record<ExportFormat, string> = {
+  csv: 'csv',
+  json: 'json',
+  markdown: 'md',
+  html: 'html',
+};
+
 export type LineageChange = 'new' | 'changed' | 'same' | 'missing';
 
 /**
@@ -346,11 +366,13 @@ export const workflowDataApi = {
     return response.data || { deleted: 0 };
   },
 
-  /** Download the full (search/sort applied) table as a CSV or JSON blob.
-   * view=latest/run exports carry lineage columns (`_lineage` in JSON rows). */
+  /** Download the full (search/sort applied) table as a blob in any of the
+   * backend's dataset formats. view=latest/run exports carry lineage columns
+   * (`_lineage` in JSON rows). markdown/html are content-aware: a document-shaped
+   * dataset (a crawl's pages) renders as documents, structured data as a table. */
   exportData: async (
     workflowId: number,
-    format: 'csv' | 'json',
+    format: ExportFormat,
     params: WorkflowDataParams = {},
   ): Promise<Blob> => {
     const sp = toParams({

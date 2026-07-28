@@ -51,3 +51,9 @@ cachetools>=5.3  # in-process TTL caches (replaces some Redis usages in the self
 # Visual monitoring: MinIO object storage + Pillow for region screenshot diffs
 minio>=7.2
 Pillow>=10.0
+
+# CommonMark -> HTML for the dataset export's `format=html` (services/dataset_formats.py
+# -> extracted_data_table.to_html). Pure-python, no C deps. SAME pin as the cloud
+# backend: both import the byte-identical twin renderer, so a version skew would make
+# `format=html` render differently on self-host than on cloud.
+markdown-it-py>=3.0,<4

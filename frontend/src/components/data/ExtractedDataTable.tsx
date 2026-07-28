@@ -37,7 +37,9 @@ import { automationApi } from '../../api/endpoints';
 import type { AutomationWorkflow } from '../../types/api';
 import {
   workflowDataApi,
+  EXPORT_FORMAT_EXT,
   type DataRow,
+  type ExportFormat,
   type WorkflowDataParams,
   type FilterClause,
   type ColumnFacet,
@@ -1324,14 +1326,19 @@ export const ExtractedDataTable: React.FC<Props> = ({ workflowId, isCrawl = fals
   // Whole-dataset export. Records scope downloads the full set from the server
   // (exportScope 'lens' reproduces the active lens; 'all' is always the flat
   // grid); a nested scope exports the in-scope items we hold client-side.
-  const doExport = async (format: 'csv' | 'json', exportScope: 'lens' | 'all' = 'lens') => {
+  const doExport = async (format: ExportFormat, exportScope: 'lens' | 'all' = 'lens') => {
+    const ext = EXPORT_FORMAT_EXT[format];
     if (isNested) {
+      // A nested scope exports the in-scope items we already hold, client-side.
+      // Only csv/json are produced here — the document-aware markdown/html
+      // renderers are server-side, which is why the toolbar hides them in a
+      // nested scope rather than silently downgrading the download.
       const objs = allInScope.map((v) => v.fields);
       const cols = unionColumns(objs, viewColumns);
       const text = format === 'csv' ? recordsToCsv(objs, cols) : recordsToJson(objs);
       const blob = new Blob([text], { type: format === 'csv' ? 'text/csv;charset=utf-8' : 'application/json' });
       const safe = scope.replace(/[^A-Za-z0-9._-]+/g, '-');
-      downloadBlob(blob, `${baseName}-${safe}.${format}`);
+      downloadBlob(blob, `${baseName}-${safe}.${format === 'csv' ? 'csv' : 'json'}`);
       return;
     }
     const lensExport = exportScope === 'lens' && lensIsLineage;
@@ -1350,7 +1357,7 @@ export const ExtractedDataTable: React.FC<Props> = ({ workflowId, isCrawl = fals
           : {}),
       });
       const suffix = !lensExport ? 'data' : effLens === 'latest' ? 'current' : `run${selectedRunId}`;
-      downloadBlob(blob, `${baseName}-${suffix}.${format}`);
+      downloadBlob(blob, `${baseName}-${suffix}.${ext}`);
     } catch {
       toast.error(t('Export failed'));
     } finally {
@@ -1488,14 +1495,18 @@ export const ExtractedDataTable: React.FC<Props> = ({ workflowId, isCrawl = fals
     setExpanded(null);
   }, []);
 
-  // The public REST surface for this dataset. The dashboard host serves it under
-  // `/api/v1`; a dataset id == its workflow id, so every capability below is
-  // reachable with a `workflows:read` API key.
-  const apiBase = `${typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com'}/api/v1`;
+  // The public REST surface for this dataset. The coordinator mounts the
+  // automation router under `/api` (routers/automation.py: APIRouter(prefix=
+  // "/automation")), so the dataset routes live at `/api/automation/workflows/
+  // {id}/data…`. This used to say `/api/v1`, which is the CLOUD's Datasets API
+  // and is mounted NOWHERE here — the generated curl 404'd on every self-host
+  // instance. Same drift already corrected in ConnectTab.tsx for `/api/v1/…/run`.
+  // A dataset id == its workflow id, and the route takes a `workflows:read` key.
+  const apiBase = `${typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com'}/api/automation`;
   const keyPlaceholder = 'wt_YOUR_KEY';
 
-  // A copy-paste-ready curl for GET /api/v1/workflows/{id}/data that reproduces
-  // the current view (search + smart filters + sort).
+  // A copy-paste-ready curl for GET /api/automation/workflows/{id}/data that
+  // reproduces the current view (search + smart filters + sort).
   const apiSnippet = useMemo(() => {
     const parts: [string, string][] = [];
     // In a nested scope, reproduce it with ?collection=<path> + the client search/sort.
@@ -2026,11 +2037,15 @@ export const ExtractedDataTable: React.FC<Props> = ({ workflowId, isCrawl = fals
                 </div>
                 <MenuItem onClick={() => { doExport('csv'); close(); }}>{t('Download CSV')}</MenuItem>
                 <MenuItem onClick={() => { doExport('json'); close(); }}>{t('Download JSON')}</MenuItem>
+                <MenuItem onClick={() => { doExport('markdown'); close(); }}>{t('Download Markdown')}</MenuItem>
+                <MenuItem onClick={() => { doExport('html'); close(); }}>{t('Download HTML')}</MenuItem>
                 <div className="px-2 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-tertiary">
                   {rowsTotal != null ? t('All rows ({{count}} rows)', { count: rowsTotal }) : t('All rows')}
                 </div>
                 <MenuItem onClick={() => { doExport('csv', 'all'); close(); }}>{t('Download CSV')}</MenuItem>
                 <MenuItem onClick={() => { doExport('json', 'all'); close(); }}>{t('Download JSON')}</MenuItem>
+                <MenuItem onClick={() => { doExport('markdown', 'all'); close(); }}>{t('Download Markdown')}</MenuItem>
+                <MenuItem onClick={() => { doExport('html', 'all'); close(); }}>{t('Download HTML')}</MenuItem>
               </div>
             )}
           </Popover>
@@ -2051,6 +2066,30 @@ export const ExtractedDataTable: React.FC<Props> = ({ workflowId, isCrawl = fals
             >
               {t('JSON')}
             </button>
+            {/* The rendered formats live behind the chevron: keeping CSV and JSON
+                one click preserves the common path, and a four-button segmented
+                control would crowd the toolbar. Hidden in a nested scope, whose
+                export is a client-side slice with no server render behind it. */}
+            {!isNested && (
+            <Popover
+              width={200}
+              trigger={
+                <span
+                  aria-label={t('More export formats')}
+                  className="inline-flex items-center border-l border-border px-1.5 py-1.5 text-secondary transition-colors hover:bg-hover hover:text-ink"
+                >
+                  <ChevronDownIcon className="h-3 w-3" />
+                </span>
+              }
+            >
+              {(close) => (
+                <div className="space-y-0.5">
+                  <MenuItem onClick={() => { doExport('markdown'); close(); }}>{t('Download Markdown')}</MenuItem>
+                  <MenuItem onClick={() => { doExport('html'); close(); }}>{t('Download HTML')}</MenuItem>
+                </div>
+              )}
+            </Popover>
+            )}
           </div>
         )}
       </div>

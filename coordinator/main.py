@@ -468,11 +468,21 @@ async def security_headers_middleware(request: Request, call_next):
     #   - frame-ancestors lives HERE only. Per CSP3 a browser IGNORES
     #     frame-ancestors delivered in a <meta> element, so the header is the one
     #     that actually denies framing ('none', matching X-Frame-Options: DENY).
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; "
-        "frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'"
-    )
+    #
+    # A route that sets its OWN CSP wins — this default never overwrites it. That
+    # matters for the dataset renders (`?format=html`), which echo SCRAPED
+    # third-party content back from this origin and so must be served under
+    # `default-src 'none'` (services/dataset_formats.py stamps it). The SPA-serving
+    # policy below allows `script-src 'self'`, which would NOT block execution on
+    # such a response; clobbering the route's stricter header would silently
+    # downgrade it. The cloud backend can afford a blanket `default-src 'none'`
+    # because it does not serve the SPA from the API origin — self-host does.
+    if "Content-Security-Policy" not in response.headers:
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; "
+            "frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'"
+        )
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
     return response

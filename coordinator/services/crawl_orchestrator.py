@@ -1073,16 +1073,41 @@ async def on_shard_complete(task: AutomationTask, result_data: Optional[dict]) -
             blocked = rd.get("blocked") or []
             if blocked and crawl.status not in ("stopping", "cancelled") and not crawl.is_terminal:
                 _blocked_agent = getattr(task, "executor_agent_id", None)
+                # The retry budget is the COORDINATOR's bookkeeping — it lives on the
+                # shard entry we minted, NOT on the agent's `blocked` report, which
+                # does not echo it back. Reading it off the agent pinned `attempts` at
+                # 0 forever, so the give-up test below never fired: a host that 403s
+                # every URL had the SAME urls requeued by every shard, the frontier
+                # never drained, convergence (frontier_len == 0) never ran, and the
+                # crawl sat in "crawling" for good while the host-cooldown held
+                # dispatch at zero. An untrusted agent must never be the source of
+                # truth for a retry counter — omitting it loops us indefinitely.
+                _attempts_by_url = {
+                    b["url"]: int(b.get("block_attempts", 0) or 0)
+                    for b in shard if isinstance(b, dict) and b.get("url")
+                }
+                _depth_by_url = {
+                    b["url"]: int(b.get("depth", 0) or 0)
+                    for b in shard if isinstance(b, dict) and b.get("url")
+                }
                 requeued = 0
+                exhausted = 0
                 for b in blocked:
                     bu = (b.get("url") if isinstance(b, dict) else b)
                     if not bu:
                         continue
-                    attempts = int((b.get("block_attempts", 0) if isinstance(b, dict) else 0) or 0)
+                    # Trust whichever count is HIGHER so a stale/echoing agent can
+                    # only ever shorten the retry budget, never extend it.
+                    attempts = max(
+                        _attempts_by_url.get(bu, 0),
+                        int((b.get("block_attempts", 0) if isinstance(b, dict) else 0) or 0),
+                    )
                     if attempts >= _MAX_BLOCK_RETRIES:
+                        exhausted += 1
                         continue  # give up — the site keeps refusing this URL
                     entry = {"url": bu,
-                             "depth": int((b.get("depth", 0) if isinstance(b, dict) else 0) or 0),
+                             "depth": int((b.get("depth") if isinstance(b, dict) else None)
+                                          or _depth_by_url.get(bu, 0) or 0),
                              "block_attempts": attempts + 1}
                     if _blocked_agent:
                         entry["avoid_agent"] = str(_blocked_agent)
@@ -1093,9 +1118,11 @@ async def on_shard_complete(task: AutomationTask, result_data: Optional[dict]) -
                         pass
                 if requeued:
                     await r.expire(_k_frontier(crawl_id), _KEY_TTL)
+                if requeued or exhausted:
                     logger.info(
                         f"[{DRAGNET_NAME}] crawl {crawl_id}: {requeued} blocked URL(s) "
-                        f"requeued for redispatch (avoid={_blocked_agent})")
+                        f"requeued for redispatch, {exhausted} gave up after "
+                        f"{_MAX_BLOCK_RETRIES} attempts (avoid={_blocked_agent})")
 
                 # ADAPTIVE BACK-OFF: the host is refusing us. Ease off atomically —
                 # longer per-page politeness delay + fewer parallel shards — so the

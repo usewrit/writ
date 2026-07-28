@@ -32,6 +32,7 @@ from security.feature_gate import require_feature
 from security.infra_redaction import redact_infra, redact_result_data
 from config import settings
 from utils.recorder_auth import generate_push_jwt
+from services import dataset_formats
 
 logger = logging.getLogger(__name__)
 
@@ -1440,7 +1441,20 @@ async def get_workflow(
             detail=f"Workflow {workflow_id} not found"
         )
 
-    return workflow_to_response(workflow)
+    # The latest run, so `last_run_status` is populated here exactly as it is by the
+    # LIST endpoint. Omitting it left the field permanently None on the detail
+    # payload, and the detail page derives "is this workflow running?" from it to
+    # decide whether to poll — so the page never polled, and a run in flight stayed
+    # pinned at "running" until a manual reload.
+    last_task_result = await db.execute(
+        select(AutomationTask)
+        .where(AutomationTask.workflow_id == workflow_id)
+        .order_by(AutomationTask.created_at.desc(), AutomationTask.id.desc())
+        .limit(1)
+    )
+    last_task = last_task_result.scalar_one_or_none()
+
+    return workflow_to_response(workflow, last_task=last_task)
 
 
 @router.get("/workflows/{workflow_id}/deps")
@@ -4784,6 +4798,7 @@ async def get_workflow_data(
     filters: Optional[str] = Query(None, description="Structured smart filters: JSON array of clauses"),
     sort_by: Optional[str] = Query(None, description="A data column or run_at/status/duration_ms (lenses also: first_seen_at/last_seen_at/versions)"),
     sort_dir: str = Query("desc", description="asc or desc"),
+    format: Optional[str] = Query(None, description=dataset_formats.format_help("json")),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     include_inputs: bool = Query(False, description="Also surface run input values as input.<name> columns"),
@@ -4815,10 +4830,16 @@ async def get_workflow_data(
     accept ``source`` to filter to one list key before search/filters/pagination.
     ``collection`` composes only with ``view=all`` — change tracking operates on
     top-level records.
+
+    ``format`` (``json`` default, or ``csv``/``markdown``/``html``) serves this
+    same page as that format instead of the JSON envelope. markdown/html are
+    content-aware: a document-shaped dataset (crawl pages) renders as documents,
+    structured data as a table.
     """
     from services import extracted_data_table as edt
     if isinstance(_api_key, dict):
         check_api_key_scope(_api_key, "workflows", "read", workflow_id)
+    fmt = dataset_formats.norm_format(format, default="json")
     view = _validate_data_lens_params(view, run_id, collection)
     wf = await _load_workflow_for_data(db, workflow_id, _api_key)
     tasks, truncated = await _scan_workflow_data_tasks(db, workflow_id)
@@ -4858,6 +4879,19 @@ async def get_workflow_data(
             )
         except edt.LineageRunNotFound:
             raise HTTPException(status_code=404, detail="Run not found in this workflow's data history")
+    # `?format=` renders THIS page of the table directly instead of the JSON
+    # envelope — same rows, same order, so a caller can page through csv/markdown/
+    # html exactly as it pages through json. The envelope-only fields (pagination,
+    # counts, identity) have no place in a flat render, which is why the render is
+    # a replacement rather than an extra key.
+    if fmt != "json":
+        return dataset_formats.render_dataset(
+            fmt,
+            table["columns"],
+            table["rows"],
+            title=wf.name or f"Workflow {wf.id}",
+            lineage=view != "all",
+        )
     return {
         "workflow_id": wf.id,
         "workflow_name": wf.name,
@@ -4872,7 +4906,7 @@ async def get_workflow_data(
 @router.get("/workflows/{workflow_id}/data/export")
 async def export_workflow_data(
     workflow_id: int,
-    format: str = Query("csv", description="csv or json"),
+    format: str = Query("csv", description=dataset_formats.format_help("csv")),
     q: Optional[str] = Query(None),
     filter: Optional[List[str]] = Query(None, description="Per-column filter as 'column:substring' (repeatable, legacy)"),
     filters: Optional[str] = Query(None, description="Structured smart filters: JSON array of clauses"),
@@ -4888,12 +4922,14 @@ async def export_workflow_data(
     _api_key: dict = Depends(get_current_api_key),
 ):
     """Download the full (search/sort/filter applied, un-paginated) extracted-data
-    table as CSV or JSON. Bounded by the scan cap. Pass
-    ``collection`` to export a nested array (e.g. ``posts.items``) instead.
-    ``view=latest``/``view=run`` exports carry lineage columns (CSV: appended
-    after the run-meta columns; JSON: a ``_lineage`` key per row)."""
-    from fastapi.responses import Response
+    table as ``csv`` (default), ``json``, ``markdown`` or ``html``. Bounded by the
+    scan cap. Pass ``collection`` to export a nested array (e.g. ``posts.items``)
+    instead. ``view=latest``/``view=run`` exports carry lineage columns (CSV:
+    appended after the run-meta columns; JSON: a ``_lineage`` key per row).
+    markdown/html are content-aware — a document-shaped dataset (crawl pages)
+    renders as documents rather than a table."""
     from services import extracted_data_table as edt
+    fmt = dataset_formats.norm_format(format, default="csv")
     if isinstance(_api_key, dict):
         check_api_key_scope(_api_key, "workflows", "read", workflow_id)
     view = _validate_data_lens_params(view, run_id, collection)
@@ -4936,20 +4972,13 @@ async def export_workflow_data(
             raise HTTPException(status_code=404, detail="Run not found in this workflow's data history")
     lineage = view != "all"
     fname = _safe_export_filename(wf.name or f"workflow-{wf.id}")
-    if (format or "csv").lower() == "json":
-        body = json.dumps(
-            edt.to_json_records(table["columns"], table["rows"], lineage=lineage),
-            ensure_ascii=False, default=str, indent=2,
-        )
-        return Response(
-            content=body,
-            media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="{fname}-data.json"'},
-        )
-    return Response(
-        content=edt.to_csv(table["columns"], table["rows"], lineage=lineage),
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{fname}-data.csv"'},
+    return dataset_formats.render_dataset(
+        fmt,
+        table["columns"],
+        table["rows"],
+        title=wf.name or f"Workflow {wf.id}",
+        lineage=lineage,
+        filename=f"{fname}-data",
     )
 
 

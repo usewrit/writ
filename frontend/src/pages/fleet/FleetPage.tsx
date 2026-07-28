@@ -15,6 +15,7 @@ import {
   KeyIcon,
   ComputerDesktopIcon,
   CommandLineIcon,
+  SparklesIcon,
   ArrowPathIcon,
 } from '@heroicons/react/24/outline';
 import { useRequireAuth } from '../../hooks/useAuth';
@@ -36,6 +37,7 @@ import {
   type FleetTokenMeta,
   type MintedFleetToken,
   type LocalAgentStatus,
+  type PairCode,
 } from '../../api/fleet';
 
 function relTime(iso: string | null | undefined): string {
@@ -302,7 +304,15 @@ export const FleetPage: React.FC = () => {
   // Most first installs are the operator sitting AT the coordinator's machine, so
   // running one right here is offered beside the copy-paste path rather than
   // behind it — but only when preflight says this host can actually host one.
-  const [connectMode, setConnectMode] = useState<'local' | 'command' | null>(null);
+  const [connectMode, setConnectMode] = useState<'local' | 'oneline' | 'command' | null>(null);
+  // The one-liner path mints a PAIRING CODE, never a long-lived token. Minting both
+  // would enrol the same machine twice — two agent identities for one connection —
+  // and race two writers into the token registry (on a fresh install that fails
+  // outright with "UNIQUE constraint failed: config.key"). So this is its own door,
+  // not an extra panel bolted onto the minted-token result.
+  const [pairCode, setPairCode] = useState<PairCode | null>(null);
+  const [pairBusy, setPairBusy] = useState(false);
+  const [pairError, setPairError] = useState<string | null>(null);
   const [localBusy, setLocalBusy] = useState(false);
   const [localResult, setLocalResult] = useState<LocalAgentStatus | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -414,6 +424,24 @@ export const FleetPage: React.FC = () => {
     setConnectMode(null);
     setLocalResult(null);
     setLocalError(null);
+    // A pairing code is single-use and short-lived; never let a stale one from a
+    // previous open be presented as if it were still good.
+    setPairCode(null);
+    setPairError(null);
+  };
+
+  /// Mint the single-use pairing code behind the one-liner. Separate from
+  /// `handleMint` on purpose — see the note on `pairCode`.
+  const handleMintPair = async () => {
+    setPairBusy(true);
+    setPairError(null);
+    try {
+      setPairCode(await fleetApi.mintPairCode());
+    } catch (err) {
+      setPairError(apiErrorMessage(err, t('Could not prepare a connect code.')));
+    } finally {
+      setPairBusy(false);
+    }
   };
 
   // ── Destructive actions (all routed through the ConfirmDialog) ──
@@ -726,6 +754,26 @@ export const FleetPage: React.FC = () => {
                 </span>
               </button>
 
+              {/* The one-liner. It is the path onboarding leads with and the one that
+                  actually works for a machine that has NOTHING installed yet — the
+                  token doors below both assume a ./writ-agent the reader must first
+                  fetch. It was reachable only during first-run setup, so anyone adding
+                  a second machine later was sent down the long path. */}
+              <button
+                onClick={() => { setConnectMode('oneline'); void handleMintPair(); }}
+                className="group flex items-start gap-3 rounded-xl border border-border bg-surface p-3.5 text-left transition-colors hover:border-ink/30 hover:bg-hover/40"
+              >
+                <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-chrome">
+                  <SparklesIcon className="h-4 w-4 text-ink" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[13.5px] font-semibold text-ink">{t('One line, any machine')}</span>
+                  <span className="mt-0.5 block text-[12px] leading-relaxed text-tertiary">
+                    {t('Paste a single command over there — it downloads the agent, connects it, and expires after one use. Nothing to install first.')}
+                  </span>
+                </span>
+              </button>
+
               <button
                 onClick={() => setConnectMode('command')}
                 className="group flex items-start gap-3 rounded-xl border border-border bg-surface p-3.5 text-left transition-colors hover:border-ink/30 hover:bg-hover/40"
@@ -753,6 +801,39 @@ export const FleetPage: React.FC = () => {
             )}
             <div className="flex justify-end pt-1">
               <Button variant="secondary" onClick={closeMint}>{t('Cancel')}</Button>
+            </div>
+          </div>
+        ) : connectMode === 'oneline' ? (
+          /* ── One line: a single-use pairing code, same as first-run onboarding. ── */
+          <div className="space-y-4">
+            {pairError ? (
+              <div className="rounded-lg border border-border bg-canvas px-3 py-2.5 text-[13px] text-secondary">{pairError}</div>
+            ) : pairBusy || !pairCode ? (
+              <div className="flex items-center gap-2 py-2 text-sm text-secondary">
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-800" />
+                {t('Preparing a connect code…')}
+              </div>
+            ) : (
+              <>
+                <p className="text-[12px] leading-relaxed text-secondary">
+                  {t('Run this on the machine that should do the browsing. It installs the agent and connects it. The code works once and expires.')}
+                </p>
+                <div className="relative">
+                  <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded-lg bg-ink p-3 font-mono text-[11px] leading-relaxed text-white/90">{pairCode.install_command}</pre>
+                  <div className="absolute right-2 top-2">
+                    <CopyButton value={pairCode.install_command} />
+                  </div>
+                </div>
+                {/* The agent list polls on its own, so an agent that dials in shows up
+                    above without the operator re-opening anything. */}
+                <p className="text-[11.5px] text-tertiary">
+                  {t('The agent appears in the fleet above as soon as it connects.')}
+                </p>
+              </>
+            )}
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="secondary" onClick={() => { setConnectMode(null); setPairCode(null); setPairError(null); }}>{t('Back')}</Button>
+              <Button onClick={closeMint}>{t('Done')}</Button>
             </div>
           </div>
         ) : connectMode === 'local' ? (

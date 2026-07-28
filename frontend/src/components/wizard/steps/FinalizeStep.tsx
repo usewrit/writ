@@ -131,7 +131,34 @@ export const FinalizeStep: React.FC = () => {
   const targetId = state.createdIds.targetId;
   const aiSessionId = state.createdIds.aiSessionId;
   const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
-  const scopedUrl = workflowId ? `${baseUrl}/api/v1/workflows/${workflowId}/runs` : null;
+  // The coordinator mounts the automation router under /api (routers/automation.py:
+  // APIRouter(prefix="/automation")). This panel used to advertise the CLOUD path
+  // /api/v1/workflows/{id}/runs, which is mounted nowhere here — only files and
+  // local-workflows live under /api/v1 — so every copied call 404'd. Same route the
+  // workflow's Connect tab shows.
+  const scopedUrl = workflowId ? `${baseUrl}/api/automation/workflows/${workflowId}/run` : null;
+
+  // A runnable call, not a URL the reader has to reconstruct a request around.
+  // `form_data` mirrors the fields this workflow actually recorded (values are
+  // placeholders — the recorded ones can be credentials), and the freshly minted
+  // key is substituted in the moment it exists, so the block runs exactly as
+  // shown instead of needing a hand-edit after pasting.
+  const exampleBody = (() => {
+    const keys = Object.keys(state.config.formData || {});
+    if (keys.length === 0) return '{}';
+    const sample: Record<string, string> = {};
+    keys.forEach((k) => { sample[k] = '...'; });
+    return JSON.stringify({ form_data: sample });
+  })();
+  const curlExample = scopedUrl
+    ? `curl -X POST "${scopedUrl}?wait=true&timeout=120" \\
+  -H "Authorization: Bearer ${state.createdIds.apiKeyValue || 'YOUR_API_KEY'}" \\
+  -H "Content-Type: application/json" \\
+  -d '${exampleBody}'
+# → 200 {"task_id": 123, "status": "success", "data": {...}}
+#   Drop ?wait=true for {"task_id": ...} right away, then GET
+#   ${baseUrl}/api/automation/tasks/{task_id}/results.`
+    : null;
 
   // ── Execution tier (auto-derived; shown, not chosen) ───────────────────────
   const sensitive =
@@ -143,14 +170,16 @@ export const FinalizeStep: React.FC = () => {
     ? null
     : deriveProspectiveTier({ sensitive, venueHint: execTarget === 'cloud' ? 'cloud' : 'auto' });
 
-  const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
+  // Keyed by the copied VALUE, not a boolean — the panel has more than one copy
+  // target (bare endpoint, full curl) and each needs its own check-mark state.
+  const [copiedText, setCopiedText] = useState<string | null>(null);
   const [sendAgentOpen, setSendAgentOpen] = useState(false);
 
-  const copyUrl = (text: string) => {
+  const copyText = (text: string) => {
     navigator.clipboard.writeText(text);
-    setCopiedUrl(text);
+    setCopiedText(text);
     toast.success(t('Copied'));
-    setTimeout(() => setCopiedUrl(null), 2000);
+    setTimeout(() => setCopiedText(null), 2000);
   };
 
   // Automations are built in the flow builder, not inline here. This routes to it
@@ -419,10 +448,27 @@ export const FinalizeStep: React.FC = () => {
                         <code className="flex-1 text-[11px] font-mono text-secondary bg-canvas border border-border rounded px-3 py-1.5 truncate">
                           POST {scopedUrl}
                         </code>
-                        <button onClick={() => copyUrl(scopedUrl)} className="p-1.5 text-tertiary hover:text-ink rounded-lg hover:bg-hover">
-                          {copiedUrl === scopedUrl ? <CheckIcon className="w-3.5 h-3.5 text-ink" /> : <ClipboardDocumentIcon className="w-3.5 h-3.5" />}
+                        <button onClick={() => copyText(scopedUrl)} className="p-1.5 text-tertiary hover:text-ink rounded-lg hover:bg-hover">
+                          {copiedText === scopedUrl ? <CheckIcon className="w-3.5 h-3.5 text-ink" /> : <ClipboardDocumentIcon className="w-3.5 h-3.5" />}
                         </button>
                       </div>
+
+                      {/* The request itself — headers, body shape and delivery in one
+                          copyable block, so "it's callable" is provable by pasting. */}
+                      {curlExample && (
+                        <div className="relative mt-2">
+                          <pre className="text-[11px] font-mono text-secondary bg-canvas border border-border rounded px-3 py-2 pr-10 overflow-x-auto leading-relaxed">
+                            {curlExample}
+                          </pre>
+                          <button
+                            onClick={() => copyText(curlExample)}
+                            aria-label={t('Copy request')}
+                            className="absolute top-1.5 right-1.5 p-1.5 text-tertiary hover:text-ink rounded-lg bg-canvas hover:bg-hover"
+                          >
+                            {copiedText === curlExample ? <CheckIcon className="w-3.5 h-3.5 text-ink" /> : <ClipboardDocumentIcon className="w-3.5 h-3.5" />}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
 

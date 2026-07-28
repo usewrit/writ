@@ -35,6 +35,8 @@ import { FlowBlock } from '../types';
 import { NOTIFICATION_CHANNELS } from '../blockCatalog';
 import { APP_PLATFORM } from '../../../api/aiAssist';
 import { webhookTriggersApi, selectorsApi } from '../../../api/endpoints';
+import { getNotificationPreferences, type NotificationPreferences } from '../../../api/notifications';
+import { useQuery } from '../../../hooks/useQuery';
 import { BlockPlaceholderHints } from './BlockPlaceholders';
 import { saveFlowDraft } from '../flowDraft';
 import type { WizardState } from '../../wizard/WizardContext';
@@ -1351,6 +1353,30 @@ function NotificationConfig({ block, blocks, recipients, updateBlockConfig, expa
     webhook: t('Webhook'), desktop: t('Desktop notification'), in_app: t('In-app alert'),
     email: t('Email'), pushover: 'Pushover', twilio: t('SMS'), whatsapp: 'WhatsApp', signal: 'Signal',
   };
+  // Which channels this deployment can ACTUALLY deliver on right now. A channel
+  // whose provider was never set up drops the notification silently at send
+  // time, so offering it here as a working choice builds an automation that
+  // quietly does nothing. Read-only + silent: a failed probe must never block
+  // editing the block, it just leaves every channel ungated (see below).
+  const { data: notifPrefs } = useQuery<NotificationPreferences>(
+    'notifications:preferences',
+    () => getNotificationPreferences(),
+    { silent: true, staleTime: 60_000 },
+  );
+  // Delivered by the coordinator itself — nothing to configure, never gated.
+  const SELF_DELIVERED = new Set(['webhook', 'desktop', 'in_app']);
+  // The block's channel id vs the notification catalog's. `twilio` and `sms` are
+  // the same Twilio credentials under two names; every other id matches.
+  const AVAILABILITY_KEY: Record<string, string> = { twilio: 'sms' };
+  const availability = notifPrefs?.channel_availability;
+  const isConfigured = (key: string): boolean => {
+    if (SELF_DELIVERED.has(key)) return true;
+    // Unknown (still loading, or the probe failed): do NOT gate. Showing every
+    // channel disabled for a moment on open reads as "notifications are broken".
+    if (!availability) return true;
+    return !!availability[AVAILABILITY_KEY[key] ?? key];
+  };
+
   // Drive the channel list from the catalog capability profile: local-capable
   // channels (webhook/desktop/in_app) are always enabled; cloud channels render
   // disabled on desktop with a "cloud" badge + link, enabled on the cloud app.
@@ -1359,11 +1385,20 @@ function NotificationConfig({ block, blocks, recipients, updateBlockConfig, expa
     label: CHANNEL_LABELS[c.value] || c.value,
     icon: CHANNEL_ICONS[c.value] || BellIcon,
     enabled: c.platforms.includes(APP_PLATFORM),
+    configured: isConfigured(c.value),
     cloudOnlyReason: c.cloudOnlyReason,
   }));
 
   const selectedChannels = (block.config.channels || []) as string[];
   const selectedRecipients = (block.config.recipients || []) as string[];
+
+  // Which unconfigured channel the user just clicked — the chip is inert, so the
+  // click's whole job is to explain WHY, and where to fix it.
+  const [hintChannel, setHintChannel] = React.useState<string | null>(null);
+  // Already-saved channels whose provider has since gone away (or was never set
+  // up). Unlike the click-hint this is shown unprompted: the automation is
+  // currently configured to deliver somewhere that cannot receive.
+  const brokenSelected = selectedChannels.filter((c) => !isConfigured(c));
 
   return (
     <div className="space-y-3">
@@ -1435,6 +1470,32 @@ function NotificationConfig({ block, blocks, recipients, updateBlockConfig, expa
                 </span>
               );
             }
+            // Provider never configured: the chip stays visible (so the channel
+            // is discoverable) but cannot be picked. Clicking it is the ONLY
+            // affordance, and it explains where to set the provider up. An
+            // ALREADY-SELECTED channel stays interactive even when unconfigured,
+            // or the user could never remove it.
+            if (!channel.configured && !isSelected) {
+              return (
+                <button
+                  key={channel.key}
+                  type="button"
+                  aria-disabled
+                  onClick={() => setHintChannel(h => (h === channel.key ? null : channel.key))}
+                  title={t('Not configured — click to see how to enable it')}
+                  className={clsx(
+                    'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-dashed text-xs font-medium transition',
+                    hintChannel === channel.key
+                      ? 'border-secondary text-secondary bg-hover'
+                      : 'border-border bg-canvas text-tertiary opacity-70 hover:opacity-100',
+                  )}
+                >
+                  <channel.icon className="h-3.5 w-3.5 shrink-0" />
+                  <span>{t(channel.label)}</span>
+                  <Cog6ToothIcon className="h-3 w-3 shrink-0" />
+                </button>
+              );
+            }
             return (
               <button
                 key={channel.key}
@@ -1447,18 +1508,55 @@ function NotificationConfig({ block, blocks, recipients, updateBlockConfig, expa
                 }}
                 className={clsx(
                   'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition text-xs font-medium',
-                  isSelected
-                    ? 'border-ink/20 bg-ink/5 text-ink'
-                    : 'border-border bg-canvas text-tertiary hover:border-secondary hover:text-secondary'
+                  isSelected && !channel.configured
+                    ? 'border-amber-500/40 bg-amber-500/10 text-ink'
+                    : isSelected
+                      ? 'border-ink/20 bg-ink/5 text-ink'
+                      : 'border-border bg-canvas text-tertiary hover:border-secondary hover:text-secondary'
                 )}
               >
                 <channel.icon className="h-3.5 w-3.5 shrink-0" />
                 <span>{t(channel.label)}</span>
-                {isSelected && <CheckIcon className="h-3 w-3" />}
+                {isSelected && !channel.configured
+                  ? <ExclamationTriangleIcon className="h-3 w-3 text-amber-600" />
+                  : isSelected && <CheckIcon className="h-3 w-3" />}
               </button>
             );
           })}
         </div>
+
+        {/* The click-hint for an unconfigured channel. */}
+        {hintChannel && (
+          <p className="mt-2 text-[11px] text-tertiary leading-relaxed">
+            {t('{{channel}} has no provider set up yet, so it can’t deliver.', {
+              channel: CHANNEL_LABELS[hintChannel] || hintChannel,
+            })}{' '}
+            <Link
+              to="/settings?tab=notifications"
+              className="text-ink underline decoration-border hover:decoration-secondary"
+            >
+              {t('Configure it in Settings → Notifications')}
+            </Link>
+          </p>
+        )}
+
+        {/* Saved-but-undeliverable channels, surfaced without needing a click. */}
+        {brokenSelected.length > 0 && (
+          <p className="mt-2 flex items-start gap-1.5 text-[11px] text-amber-600 leading-relaxed">
+            <ExclamationTriangleIcon className="h-3.5 w-3.5 shrink-0 mt-px" />
+            <span>
+              {t('{{channels}} is selected but has no provider set up — this notification won’t be delivered there.', {
+                channels: brokenSelected.map((c) => CHANNEL_LABELS[c] || c).join(', '),
+              })}{' '}
+              <Link
+                to="/settings?tab=notifications"
+                className="underline decoration-amber-600/40 hover:decoration-amber-600"
+              >
+                {t('Configure it in Settings → Notifications')}
+              </Link>
+            </span>
+          </p>
+        )}
       </div>
 
       {selectedChannels.includes('webhook') && (

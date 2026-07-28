@@ -1,14 +1,14 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { useTranslation, Trans } from 'react-i18next';
+import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 import { ClipboardDocumentIcon } from '@heroicons/react/24/outline';
 import { Modal } from '../ui/Modal';
 import { docsUrl, DOCS_LINK_PROPS } from '../../utils/docs';
 
 /**
- * "Get via API" — a dataset's whole REST surface in one modal: search, records,
- * schema, export (+ the change-tracking routes when the backend has them).
+ * "Get via API" — a dataset's whole REST surface in one modal: records, schema,
+ * export (+ the change-tracking routes when the backend has them).
  *
  * Extracted from the Data explorer's grid so every "Get via API" affordance opens
  * the SAME modal instead of some of them redirecting elsewhere: the grid renders
@@ -17,6 +17,12 @@ import { docsUrl, DOCS_LINK_PROPS } from '../../utils/docs';
  * and it simply leads with a plain read of the dataset.
  *
  * A dataset id IS its workflow id, so `datasetId` is all either caller needs.
+ *
+ * EVERY path here must be one the COORDINATOR actually mounts. This modal is a
+ * descendant of the cloud's, whose surface is the `/api/v1/datasets/…` tree; that
+ * tree does not exist in the self-host carve, so the paths below are the
+ * coordinator's own `/api/automation/workflows/{id}/data…` routes. Copy a row
+ * into a terminal before changing one — a row that 404s is worse than no row.
  */
 export interface DatasetApiModalProps {
   isOpen: boolean;
@@ -44,33 +50,34 @@ export const DatasetApiModal: React.FC<DatasetApiModalProps> = ({
 }) => {
   const { t } = useTranslation();
 
-  // The public REST surface for this dataset. The dashboard host serves it under
-  // `/api/v1`; a dataset id == its workflow id, so every capability below is
-  // reachable with a `workflows:read` API key.
-  const apiBase = `${typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com'}/api/v1`;
+  // The public REST surface for this dataset. The coordinator mounts the
+  // automation router under `/api` (routers/automation.py: APIRouter(prefix=
+  // "/automation")), so a dataset's routes live at `/api/automation/workflows/
+  // {id}/data…`. This modal used to advertise the CLOUD's `/api/v1/datasets/…`
+  // tree — search, records, schema, the datasets index — none of which is
+  // mounted here, so every row it listed 404'd on a self-host instance. Same
+  // class of drift already corrected in ConnectTab.tsx for `/api/v1/.../run`.
+  // A dataset id == its workflow id, and every route below is reachable with a
+  // `workflows:read` API key.
+  const apiBase = `${typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com'}/api/automation`;
   const keyPlaceholder = 'wt_YOUR_KEY';
-
-  // A stand-alone full-text search example — backed by the dataset FTS index
-  // (not a bounded scan).
-  const searchSnippet =
-    `curl -G "${apiBase}/datasets/${datasetId}/search" \\\n` +
-    `  -H "Authorization: Bearer ${keyPlaceholder}" \\\n` +
-    `  --data-urlencode 'q=your search terms'`;
 
   // When there's no on-screen view to reproduce, lead with a plain read so the
   // modal still opens on something copy-pasteable.
   const leadSnippet =
     viewSnippet ??
-    `curl -G "${apiBase}/datasets/${datasetId}/records" \\\n` +
+    `curl -G "${apiBase}/workflows/${datasetId}/data" \\\n` +
       `  -H "Authorization: Bearer ${keyPlaceholder}" \\\n` +
       `  --data-urlencode 'limit=50'`;
 
-  // The rest of the dataset surface, one compact copyable row each.
+  // The rest of the dataset surface, one compact copyable row each. Search is
+  // absent on purpose: the FTS index behind the cloud's /datasets/{id}/search is
+  // not part of the self-host carve, and listing it would be another 404 row.
+  // `q` on the read below is the substring filter over the bounded scan.
   const apiEndpoints: { method: string; label: string; path: string; hint?: string }[] = [
-    { method: 'GET', label: t('List records'), path: `/datasets/${datasetId}/records`, hint: '?q=&sort_by=&limit=50' },
-    { method: 'GET', label: t('Schema & facets'), path: `/datasets/${datasetId}` },
-    { method: 'GET', label: t('Export'), path: `/datasets/${datasetId}/export`, hint: '?format=csv|markdown|html' },
-    { method: 'GET', label: t('All datasets'), path: '/datasets' },
+    { method: 'GET', label: t('List records'), path: `/workflows/${datasetId}/data`, hint: '?q=&sort_by=&limit=50' },
+    { method: 'GET', label: t('Schema & facets'), path: `/workflows/${datasetId}/data/facets` },
+    { method: 'GET', label: t('Export'), path: `/workflows/${datasetId}/data/export`, hint: '?format=csv|json|markdown|html' },
     ...(lineageSupported === true
       ? [
           { method: 'GET', label: t('Snapshots'), path: `/workflows/${datasetId}/data/runs` },
@@ -117,31 +124,7 @@ export const DatasetApiModal: React.FC<DatasetApiModalProps> = ({
           )}
         </div>
 
-        {/* 2 — full-text search */}
-        <div>
-          <div className="mb-1.5 flex items-center justify-between">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-tertiary">{t('Full-text search')}</span>
-            <button
-              onClick={() => copyText(searchSnippet)}
-              className="inline-flex items-center gap-1 text-[11px] font-medium text-tertiary transition-colors hover:text-ink"
-            >
-              <ClipboardDocumentIcon className="h-3.5 w-3.5" />
-              {t('Copy')}
-            </button>
-          </div>
-          <pre className="overflow-x-auto rounded-lg bg-ink px-4 py-3 font-mono text-[11px] leading-relaxed text-green-400">
-            {searchSnippet}
-          </pre>
-          <p className="mt-1 text-[11px] text-tertiary">
-            <Trans i18nKey="Fast indexed find over every record. Drop the id — <1>/datasets/search</1> — to search all your datasets at once.">
-              Fast indexed find over every record. Drop the id —{' '}
-              <code className="font-mono text-[10px] text-secondary">/datasets/search</code> — to search all your
-              datasets at once.
-            </Trans>
-          </p>
-        </div>
-
-        {/* 3 — the rest of the surface, one compact copyable row each */}
+        {/* 2 — the rest of the surface, one compact copyable row each */}
         <div>
           <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-tertiary">{t('Everything else')}</span>
           <div className="divide-y divide-border overflow-hidden rounded-lg border border-border">
@@ -165,7 +148,7 @@ export const DatasetApiModal: React.FC<DatasetApiModalProps> = ({
           </div>
         </div>
 
-        {/* 4 — auth + shared-params footer */}
+        {/* 3 — auth + shared-params footer */}
         <div className="space-y-1.5 border-t border-border pt-3 text-[12px] leading-relaxed text-secondary">
           <p>
             {t('Authenticate with an API key that has the')}{' '}

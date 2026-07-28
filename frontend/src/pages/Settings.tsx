@@ -4,9 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 import clsx from 'clsx';
 import {
   UserCircleIcon,
-  KeyIcon,
   SparklesIcon,
-  CpuChipIcon,
   BellIcon,
   CircleStackIcon,
   GlobeAltIcon,
@@ -25,31 +23,31 @@ import { DataRetentionSection } from '../components/settings/DataRetentionSectio
 import { NetworkSection } from '../components/settings/NetworkSection';
 import { SecuritySection } from '../components/settings/SecuritySection';
 import { GeneralSection } from '../components/settings/GeneralSection';
-import { PointerSection } from '../components/settings/PointerSection';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Settings (self-host coordinator) — the desktop-modeled 10-section surface,
-// adapted to the single-owner build. API Keys and Agents/Fleet are shallow
-// pointers (their full UI lives on /developers and /fleet respectively); the
-// rest are edited in-place against the coordinator's /api/settings/* + auth +
-// notifications endpoints.
+// Settings (self-host coordinator) — the desktop-modeled section surface,
+// adapted to the single-owner build. Every tab here EDITS something in place,
+// against the coordinator's /api/settings/* + auth + notifications endpoints.
+//
+// API Keys and Agents & Fleet used to sit here as PointerSection tabs: a title,
+// a blurb and a link out to /developers and /fleet, where the real UI lives.
+// They cost a tab slot each to tell you the thing you clicked for is somewhere
+// else, so they are gone — the sidebar already routes to both. Do NOT reintroduce
+// a tab that only links away; give it a real editor or leave it out.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type TabId =
   | 'account'
-  | 'api-keys'
   | 'ai'
   | 'runtime'
   | 'notifications'
   | 'data'
   | 'network'
   | 'security'
-  | 'general'
-  | 'agents';
+  | 'general';
 
 const TABS: { id: TabId; label: string; icon: typeof UserCircleIcon }[] = [
   { id: 'account', label: 'Account', icon: UserCircleIcon },
-  { id: 'api-keys', label: 'API Keys', icon: KeyIcon },
   { id: 'ai', label: 'AI Providers', icon: SparklesIcon },
   { id: 'runtime', label: 'Runtime', icon: AdjustmentsHorizontalIcon },
   { id: 'notifications', label: 'Notifications', icon: BellIcon },
@@ -57,7 +55,6 @@ const TABS: { id: TabId; label: string; icon: typeof UserCircleIcon }[] = [
   { id: 'network', label: 'Network', icon: GlobeAltIcon },
   { id: 'security', label: 'Security', icon: ShieldCheckIcon },
   { id: 'general', label: 'General', icon: Cog6ToothIcon },
-  { id: 'agents', label: 'Agents & Fleet', icon: CpuChipIcon },
 ];
 
 const ALL_IDS = TABS.map((t) => t.id);
@@ -110,19 +107,6 @@ export const Settings: React.FC = () => {
       <ScrollArea className="flex-1 min-h-0">
         <div key={activeTab} className="px-5 py-7 sm:px-8 max-w-3xl mx-auto animate-content-in">
           {activeTab === 'account' && <AccountSection />}
-          {activeTab === 'api-keys' && (
-            <PointerSection
-              title={t('API Keys')}
-              description={t('Scoped keys you mint to call your own automations over REST, MCP and the OpenAI-compatible API.')}
-              linkTo="/developers?tab=keys"
-              linkLabel={t('Manage API keys')}
-              bullets={[
-                t('Per-resource scope matrix (read / write / delete) with an optional id allowlist.'),
-                t('The raw key is shown once at creation and stored only as a hash.'),
-                t('Track created / last-used and revoke any key.'),
-              ]}
-            />
-          )}
           {activeTab === 'ai' && <AIProvidersSection />}
           {activeTab === 'runtime' && <RuntimeSection />}
           {activeTab === 'notifications' && <NotificationsSection />}
@@ -130,19 +114,6 @@ export const Settings: React.FC = () => {
           {activeTab === 'network' && <NetworkSection />}
           {activeTab === 'security' && <SecuritySection />}
           {activeTab === 'general' && <GeneralSection />}
-          {activeTab === 'agents' && (
-            <PointerSection
-              title={t('Agents & Fleet')}
-              description={t('Connect and manage the writ-agent-fleet workers that run your workflows and monitor checks.')}
-              linkTo="/fleet"
-              linkLabel={t('Open Fleet')}
-              bullets={[
-                t('Mint long-lived connect tokens and see the ready-to-run agent command.'),
-                t('View connected agents with platform, status, capacity and last-seen.'),
-                t('Revoke a token to disconnect its bound agent.'),
-              ]}
-            />
-          )}
         </div>
       </ScrollArea>
     </div>

@@ -54,6 +54,15 @@ async def _fresh_schema():
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
 
+    # The in-process Redis is a MODULE-GLOBAL that outlives each test, while
+    # dropping the schema restarts crawl ids at 1. Without this flush a later
+    # crawl inherits the previous test's frontier / visited set / in-flight count
+    # / host cooldown under the very same keys — so assertions read another
+    # test's leftovers and pass or fail depending on file order. Reset both
+    # halves of the world together, not just the SQL half.
+    from utils.redis_client import get_redis
+    await get_redis().flushall()
+
 
 def _stub_network(monkeypatch, sitemap_urls):
     """Neutralise every egress seam the crawl loop touches."""
@@ -311,6 +320,148 @@ def test_blocked_urls_requeue_backoff_and_host_cooldown(loop, monkeypatch):
     # 250 * 1.5 + 250 = 625, clamped under _MAX_BACKOFF_DELAY_MS, stored as an int.
     assert row.delay_ms == 625 and isinstance(row.delay_ms, int)
     assert row.max_concurrent_shards == 5
+
+
+def test_block_retry_budget_survives_agent_not_echoing_attempts(loop, monkeypatch):
+    """The retry budget must come from the SHARD we minted, not the agent's report.
+
+    A REAL agent's `blocked[]` entry is `{url, depth, status, block_kind,
+    retry_after}` — it does NOT echo `block_attempts`. Reading the count off that
+    payload pinned `attempts` at 0 on every pass, so a host that 403s everything
+    had the same URLs requeued forever: the frontier never drained, the
+    `frontier_len == 0` convergence never fired, and the crawl sat in "crawling"
+    while the host-cooldown held dispatch at 0 — a permanently frozen crawl.
+
+    (The sibling test above passes `block_attempts` INSIDE the agent report, which
+    a real agent never does — that is what made this bug look covered.)
+    """
+    from services import crawl_orchestrator as co
+    from database import AsyncSessionLocal
+    from utils.redis_client import get_redis
+
+    _stub_network(monkeypatch, [])
+    _freeze_pump(monkeypatch)
+
+    async def main():
+        await _fresh_schema()
+        async with AsyncSessionLocal() as db:
+            crawl = await co.start_crawl(
+                db, seed_url="https://forbidden.example", page_budget=100,
+                delay_ms=250, max_concurrent_shards=6,
+            )
+            cid = crawl.id
+            # The coordinator's own bookkeeping rides on the shard batch.
+            task = await co._mint_shard_task(db, crawl, [
+                {"url": "https://forbidden.example/a", "depth": 1, "block_attempts": 0},
+                {"url": "https://forbidden.example/b", "depth": 1,
+                 "block_attempts": co._MAX_BLOCK_RETRIES},
+            ])
+            tid = task.id
+            task.status = "running"
+            await db.commit()
+
+        # Exactly what the fleet agent really sends for a 403 wall — no attempts field.
+        result_data = {
+            "engine": "http",
+            "pages": [],
+            "failed": [
+                {"url": "https://forbidden.example/a", "reason": "blocked (forbidden)",
+                 "blocked": True, "block_kind": "forbidden"},
+                {"url": "https://forbidden.example/b", "reason": "blocked (forbidden)",
+                 "blocked": True, "block_kind": "forbidden"},
+            ],
+            "blocked": [
+                {"url": "https://forbidden.example/a", "depth": 1, "status": 403,
+                 "block_kind": "forbidden", "retry_after": None},
+                {"url": "https://forbidden.example/b", "depth": 1, "status": 403,
+                 "block_kind": "forbidden", "retry_after": None},
+            ],
+            "agent_blocked": True,
+            "retry_after": 0,
+            "discovered_links": [],
+            "extracted_data": [],
+        }
+        await co.complete_shard_task(tid, cid, success=True, result_data=result_data,
+                                     reporter_agent="agent-9")
+
+        r = get_redis()
+        members = await r.zrange(co._k_frontier(cid), 0, -1)
+        return [json.loads(m) for m in members]
+
+    requeued = loop.run_until_complete(main())
+    urls = {e["url"] for e in requeued}
+
+    assert "https://forbidden.example/b" not in urls, (
+        "a URL already at _MAX_BLOCK_RETRIES must be dropped even though the agent "
+        "did not echo block_attempts — otherwise the frontier never drains and the "
+        "crawl can never converge"
+    )
+    entry = next(e for e in requeued if e["url"].endswith("/a"))
+    assert entry["block_attempts"] == 1, "the count must advance, not reset to 1 forever"
+    assert entry["depth"] == 1, "depth must survive the requeue"
+    assert entry["avoid_agent"] == "agent-9"
+
+
+def test_block_retry_budget_terminates_after_max_attempts(loop, monkeypatch):
+    """End-to-end: a host that refuses EVERYTHING drains the frontier instead of
+    looping. Re-dispatching the same URL with a non-echoing agent must exhaust the
+    budget in _MAX_BLOCK_RETRIES rounds and leave the frontier empty."""
+    from services import crawl_orchestrator as co
+    from database import AsyncSessionLocal
+    from utils.redis_client import get_redis
+
+    _stub_network(monkeypatch, [])
+    _freeze_pump(monkeypatch)
+
+    def _agent_report(batch):
+        return {
+            "engine": "http", "pages": [], "failed": [],
+            "blocked": [{"url": b["url"], "depth": b.get("depth", 0), "status": 403,
+                         "block_kind": "forbidden", "retry_after": None} for b in batch],
+            "agent_blocked": True, "retry_after": 0,
+            "discovered_links": [], "extracted_data": [],
+        }
+
+    async def main():
+        await _fresh_schema()
+        async with AsyncSessionLocal() as db:
+            crawl = await co.start_crawl(
+                db, seed_url="https://wall.example", page_budget=100,
+                delay_ms=250, max_concurrent_shards=6,
+            )
+            cid = crawl.id
+
+        batch = [{"url": "https://wall.example/a", "depth": 1}]
+        rounds = 0
+        r = get_redis()
+        # Bound the loop well above the budget so a regression fails fast instead
+        # of hanging the suite.
+        while batch and rounds < co._MAX_BLOCK_RETRIES + 5:
+            rounds += 1
+            async with AsyncSessionLocal() as db:
+                from models.crawl_job import CrawlJob
+                cj = await db.get(CrawlJob, cid)
+                task = await co._mint_shard_task(db, cj, batch)
+                tid = task.id
+                task.status = "running"
+                await db.commit()
+            await co.complete_shard_task(tid, cid, success=True,
+                                         result_data=_agent_report(batch),
+                                         reporter_agent="agent-9")
+            members = await r.zrange(co._k_frontier(cid), 0, -1)
+            # Drain what the requeue put back; that is the next round's shard.
+            batch = [json.loads(m) for m in members]
+            if batch:
+                await r.zremrangebyrank(co._k_frontier(cid), 0, -1)
+        return rounds, batch
+
+    rounds, leftover = loop.run_until_complete(main())
+    assert not leftover, "the frontier must drain — a refused URL cannot requeue forever"
+    # The first dispatch is the original attempt; _MAX_BLOCK_RETRIES retries follow,
+    # and the round after the last one drops the URL.
+    assert rounds == co._MAX_BLOCK_RETRIES + 1, (
+        f"expected the budget to be spent in {co._MAX_BLOCK_RETRIES + 1} rounds, took {rounds}"
+    )
 
 
 def test_pump_respects_host_cooldown(loop, monkeypatch):

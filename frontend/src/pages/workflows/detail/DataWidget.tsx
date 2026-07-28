@@ -2,6 +2,9 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowRightIcon, TableCellsIcon } from '@heroicons/react/24/outline';
 import { formatRelativeTime } from '../../../utils/format';
+import { useQuery } from '../../../hooks/useQuery';
+import { Q } from '../../../stores/queryKeys';
+import { workflowDataApi } from '../../../api/workflowData';
 import { Section } from './Section';
 
 /**
@@ -9,6 +12,13 @@ import { Section } from './Section';
  * extracted output, with a one-click jump to the full Data tab (sortable /
  * filterable / exportable table across every run). Surfaces the result without
  * making the user leave the Detail page first.
+ *
+ * The newest row comes from the same extracted-data endpoint the Data tab uses
+ * (limit 1) rather than the workflow row's `last_run_extracted_data`. That field
+ * only ever describes the SINGLE most recent run, so a failed (or still-running)
+ * newest run made this widget claim "No output yet" while the Data tab happily
+ * listed every earlier run's records. The workflow field stays as a fallback for
+ * a payload that carries it but has no data rows yet. Matches the desktop app.
  */
 export const DataWidget: React.FC<{
   workflow: any;
@@ -16,8 +26,15 @@ export const DataWidget: React.FC<{
   onOpenData: () => void;
 }> = ({ workflow, onOpenData }) => {
   const { t } = useTranslation();
-  const last = workflow.last_run_extracted_data;
+  const { data: table, loading } = useQuery(
+    Q.workflowData(workflow.id, 'widget'),
+    () => workflowDataApi.getTable(workflow.id, { limit: 1 }),
+    { enabled: !!workflow?.id, silent: true, staleTime: 15000 },
+  );
+  const latestRow = table?.rows?.[0];
+  const last = latestRow?.fields ?? (workflow.last_run_extracted_data as Record<string, unknown> | undefined);
   const entries = last && typeof last === 'object' ? Object.entries(last) : [];
+  const lastAt = latestRow?.run_at ?? workflow.last_run_at;
 
   return (
     <Section
@@ -36,15 +53,17 @@ export const DataWidget: React.FC<{
           className="w-full flex items-center gap-3 px-4 py-3 bg-surface border border-ink/20 shadow-sm rounded-xl hover:bg-chrome transition-colors text-left"
         >
           <TableCellsIcon className="w-4 h-4 text-tertiary shrink-0" />
-          <span className="text-[13px] text-tertiary flex-1">{t('No output yet — run this workflow to extract data.')}</span>
+          <span className="text-[13px] text-tertiary flex-1">
+            {loading && !table ? t('Loading latest output…') : t('No output yet — run this workflow to extract data.')}
+          </span>
           <ArrowRightIcon className="w-3.5 h-3.5 text-tertiary shrink-0" />
         </button>
       ) : (
         <div className="bg-surface border border-ink/20 shadow-sm rounded-xl overflow-hidden">
           <div className="flex items-center justify-between px-4 py-2 border-b border-border">
             <span className="text-[11px] font-medium text-secondary">{t('Latest output')}</span>
-            {workflow.last_run_at && (
-              <span className="text-[10px] text-tertiary">{formatRelativeTime(workflow.last_run_at)}</span>
+            {lastAt && (
+              <span className="text-[10px] text-tertiary">{formatRelativeTime(lastAt)}</span>
             )}
           </div>
           <div className="p-3 space-y-2 max-h-56 overflow-y-auto">

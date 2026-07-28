@@ -179,10 +179,10 @@ export const MonitorTargetsPanel: React.FC<MonitorTargetsPanelProps> = ({
 
               {sel.preview && <p className="text-[11px] text-tertiary truncate">{sel.preview}</p>}
 
-              <div className="flex gap-0.5 bg-hover/50 rounded-lg p-0.5">
+              <div className="flex gap-0.5 bg-hover/50 rounded-full p-0.5">
                 {CHECK_TYPES.map(ct => (
                   <button key={ct.id} onClick={() => onUpdateSelector(sel.id, { checkType: ct.id as any })} className={clsx(
-                    'flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all flex-1 justify-center',
+                    'flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-medium transition-all flex-1 justify-center',
                     sel.checkType === ct.id ? 'bg-ink text-white shadow-sm' : 'text-tertiary hover:text-secondary',
                   )}>
                     <ct.icon className="w-3 h-3" /> {t(ct.label)}

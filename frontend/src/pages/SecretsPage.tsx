@@ -541,11 +541,11 @@ const SecretFormModal: React.FC<{ isOpen: boolean; onClose: () => void; onSave: 
       <div className="space-y-4">
         <div>
           <span className="text-xs font-medium text-secondary block mb-1" id={`${fieldId}-type`}>{t('Type')}</span>
-          <div className="flex items-center gap-1 bg-active rounded-lg p-0.5 text-xs" role="group" aria-labelledby={`${fieldId}-type`}>
+          <div className="flex items-center gap-1 bg-active rounded-full p-0.5 text-xs" role="group" aria-labelledby={`${fieldId}-type`}>
             {([['credential', t('Login credential')], ['value', t('API key / token')]] as [Kind, string][]).map(([k, label]) => (
               <button key={k} type="button" onClick={() => !editSecret && setKind(k)}
                 disabled={!!editSecret && editSecret.is_credential !== (k === 'credential')}
-                className={clsx('flex-1 px-2.5 py-1.5 rounded-md font-medium transition-colors',
+                className={clsx('flex-1 px-2.5 py-1.5 rounded-full font-medium transition-colors',
                   kind === k ? 'bg-surface text-ink shadow-sm' : 'text-tertiary hover:text-secondary',
                   !!editSecret && 'disabled:opacity-40 disabled:cursor-not-allowed')}>
                 {label}

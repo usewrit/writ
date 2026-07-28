@@ -13,7 +13,7 @@ import client, { apiErrorMessage } from '../api/client';
 import { WritWordmark } from '../components/brand/WritMark';
 import { createAIProvider } from '../api/settings';
 import { updateEmailConfig, updatePushoverConfig, updateTwilioConfig, addTwilioRecipient } from '../api/notifications';
-import { fleetApi, type MintedFleetToken } from '../api/fleet';
+import { fleetApi, type MintedFleetToken, type PairCode } from '../api/fleet';
 
 /**
  * First-run onboarding — a fast, inline, self-contained setup flow.
@@ -344,7 +344,11 @@ const NotifyStep: React.FC<{ onNext: () => void; onBack: () => void; onSkipAll: 
 const AgentStep: React.FC<{ onNext: () => void; onBack: () => void; onSkipAll: () => void; onConnected: () => void }> = ({ onNext, onBack, onSkipAll, onConnected }) => {
   const { t } = useTranslation();
   const [minted, setMinted] = useState<MintedFleetToken | null>(null);
-  const [tab, setTab] = useState<'binary' | 'docker'>('binary');
+  const [pair, setPair] = useState<PairCode | null>(null);
+  // The one-liner is the default. `manual` exposes the raw token forms for
+  // air-gapped hosts and for anyone scripting enrolment, where a single-use
+  // interactive code is the wrong shape.
+  const [tab, setTab] = useState<'quick' | 'binary' | 'docker'>('quick');
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const notified = useRef(false);
@@ -352,7 +356,15 @@ const AgentStep: React.FC<{ onNext: () => void; onBack: () => void; onSkipAll: (
   useEffect(() => {
     let alive = true;
     (async () => {
-      try { const token = await fleetApi.mintToken('onboarding-agent'); if (alive) setMinted(token); }
+      try {
+        // Both up front: the pairing code drives the default tab, the token
+        // drives the manual ones, and neither should cost a click to appear.
+        const [code, token] = await Promise.all([
+          fleetApi.mintPairCode(),
+          fleetApi.mintToken('onboarding-agent'),
+        ]);
+        if (alive) { setPair(code); setMinted(token); }
+      }
       catch (err) { if (alive) setError(apiErrorMessage(err, t('Could not prepare an agent token.'))); }
     })();
     return () => { alive = false; };
@@ -378,7 +390,9 @@ const AgentStep: React.FC<{ onNext: () => void; onBack: () => void; onSkipAll: (
     return () => { alive = false; clearInterval(h); };
   }, [connected, minted, onConnected]);
 
-  const command = minted ? (tab === 'binary' ? minted.connect_command : minted.docker_command) : '';
+  const command = tab === 'quick'
+    ? (pair?.install_command ?? '')
+    : minted ? (tab === 'binary' ? minted.connect_command : minted.docker_command) : '';
   const copy = async () => { try { await navigator.clipboard.writeText(command); toast.success(t('Command copied')); } catch { /* http */ } };
 
   return (
@@ -397,13 +411,18 @@ const AgentStep: React.FC<{ onNext: () => void; onBack: () => void; onSkipAll: (
       ) : (
         <div className="space-y-3">
           <div className="flex gap-1">
-            {(['binary', 'docker'] as const).map((k) => (
+            {(['quick', 'binary', 'docker'] as const).map((k) => (
               <button key={k} type="button" onClick={() => setTab(k)}
                 className={clsx('px-3 py-1 text-[12px] font-medium rounded-md transition-colors', tab === k ? 'bg-ink text-white' : 'bg-hover text-secondary hover:text-ink')}>
-                {k === 'binary' ? t('Binary') : t('Docker')}
+                {k === 'quick' ? t('One line') : k === 'binary' ? t('Binary') : t('Docker')}
               </button>
             ))}
           </div>
+          {tab === 'quick' && (
+            <p className="text-[12px] text-secondary">
+              {t('Run this on any machine that should do the browsing — your laptop is fine. It installs the agent and connects it. The code works once and expires.')}
+            </p>
+          )}
           <div className="relative">
             <pre className="text-[11px] leading-relaxed font-mono bg-ink text-white/90 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap break-all">{command}</pre>
             <button type="button" onClick={copy} className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium bg-white/15 text-white rounded hover:bg-white/25 transition-colors">

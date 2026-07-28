@@ -86,7 +86,7 @@ export const ExecutionTargetPicker: React.FC<ExecutionTargetPickerProps> = ({
   if (compact) {
     return (
       <div className="space-y-2">
-        <div className="flex items-center gap-1 bg-zinc-100 rounded-lg p-0.5">
+        <div className="flex items-center gap-1 bg-zinc-100 rounded-full p-0.5">
           {OPTIONS.map((opt) => {
             const Icon = opt.icon;
             const disabled = opt.value === 'local' && !hasAgent;
@@ -97,7 +97,7 @@ export const ExecutionTargetPicker: React.FC<ExecutionTargetPickerProps> = ({
                 disabled={disabled}
                 title={disabled ? t('No agent connected') : t(opt.description)}
                 className={clsx(
-                  'flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md transition-all',
+                  'flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-full transition-all',
                   value === opt.value
                     ? 'bg-white text-ink shadow-sm'
                     : disabled

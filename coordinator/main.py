@@ -741,8 +741,154 @@ _UI_INDEX = _UI_DIR / "index.html"
 _UI_RESERVED_PREFIXES = ("/api/", "/ws/", "/.well-known/")
 _UI_RESERVED_EXACT = {
     "/api", "/ws", "/docs", "/redoc", "/openapi.json",
-    "/health", "/logs", "/metrics",
+    "/health", "/logs", "/metrics", "/agent.sh",
 }
+
+
+
+# The installer served at /agent.sh. POSIX sh (not bash) so it runs under dash
+# on Debian/Ubuntu images. @@BASE@@ / @@REPO@@ are substituted per request.
+_AGENT_BOOTSTRAP = r"""#!/bin/sh
+# Writ agent installer.
+#   curl -fsSL @@BASE@@/agent.sh | sh -s -- WRIT-XXXX-XXX
+#
+# Installs the writ-agent binary for this platform, exchanges your pairing code
+# for its credentials, and starts it. Nothing else to configure — the code is
+# single-use and expires, and every setting comes from the coordinator.
+set -eu
+
+COORDINATOR="@@BASE@@"
+REPO="@@REPO@@"
+CODE="${1:-}"
+
+die() { printf '\033[1;31merror\033[0m %s\n' "$*" >&2; exit 1; }
+say() { printf '\033[1;34m::\033[0m %s\n' "$*"; }
+
+[ -n "$CODE" ] || die "Usage: curl -fsSL $COORDINATOR/agent.sh | sh -s -- <pairing-code>"
+command -v curl >/dev/null 2>&1 || die "curl is required."
+
+# --- 1. Redeem the pairing code ---------------------------------------------
+# Done FIRST: a bad or expired code should fail in a second, before downloading
+# tens of megabytes.
+say "Redeeming pairing code..."
+RESP="$(curl -fsS -X POST "$COORDINATOR/api/fleet/pair-code/exchange" \
+  -H 'Content-Type: application/json' \
+  -d "{\"code\":\"$CODE\"}" 2>/dev/null)" \
+  || die "That pairing code is invalid, already used, or expired. Generate a new one in Fleet."
+
+# Extract one JSON string field without needing jq (which is not everywhere).
+jsonstr() {
+  printf '%s' "$RESP" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+}
+TOKEN="$(jsonstr token)"
+[ -n "$TOKEN" ] || die "The coordinator did not return a token. Check its logs."
+DOC_URL="$(jsonstr DOC_EXTRACT_URL)"
+DOC_SECRET="$(jsonstr DOC_EXTRACT_SECRET)"
+
+# --- 2. Resolve this platform's release asset -------------------------------
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64)        TARGET=aarch64-apple-darwin ;;
+  Darwin-x86_64)       TARGET=x86_64-apple-darwin ;;
+  Linux-x86_64)        TARGET=x86_64-unknown-linux-gnu ;;
+  Linux-aarch64|Linux-arm64) TARGET=aarch64-unknown-linux-gnu ;;
+  *) die "No prebuilt agent for $(uname -sm). Build from source: https://github.com/$REPO" ;;
+esac
+
+WRIT_DIR="${WRIT_HOME:-$HOME/.writ}"
+mkdir -p "$WRIT_DIR"
+BIN="$WRIT_DIR/writ-agent-fleet"
+
+if [ -x "$BIN" ] && [ "${WRIT_FORCE_DOWNLOAD:-0}" != "1" ]; then
+  say "Using the agent already at $BIN"
+else
+  say "Finding the $TARGET build..."
+  ASSET="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+    | grep -o "\"browser_download_url\"[[:space:]]*:[[:space:]]*\"[^\"]*${TARGET}[^\"]*\"" \
+    | head -1 | cut -d'"' -f4)"
+  [ -n "$ASSET" ] || die "No published release asset for $TARGET yet. Build from source: https://github.com/$REPO"
+
+  say "Downloading $(basename "$ASSET")..."
+  TMP="$(mktemp -d)"
+  trap 'rm -rf "$TMP"' EXIT
+  curl -fL# "$ASSET" -o "$TMP/asset" || die "Download failed."
+
+  # Releases ship archives (the binary needs its Playwright driver alongside it),
+  # but tolerate a bare binary so an older or hand-cut release still installs.
+  case "$ASSET" in
+    *.tar.gz|*.tgz) tar -xzf "$TMP/asset" -C "$TMP" ;;
+    *.zip)          command -v unzip >/dev/null 2>&1 || die "unzip is required for this asset."
+                    unzip -q "$TMP/asset" -d "$TMP" ;;
+    *)              mv "$TMP/asset" "$TMP/writ-agent-fleet" ;;
+  esac
+
+  FOUND="$(find "$TMP" -type f -name 'writ-agent-fleet*' ! -name '*.d' | head -1)"
+  [ -n "$FOUND" ] || die "The release archive contained no writ-agent-fleet binary."
+  # Copy the whole payload directory: the Playwright driver ships beside the
+  # binary and the agent cannot launch a browser without it.
+  PAYLOAD="$(dirname "$FOUND")"
+  [ "$PAYLOAD" = "$TMP" ] || cp -R "$PAYLOAD"/. "$WRIT_DIR"/
+  [ -f "$BIN" ] || cp "$FOUND" "$BIN"
+  chmod +x "$BIN"
+fi
+
+# --- 3. Start it -------------------------------------------------------------
+# writ-agent-fleet is configured ENTIRELY BY ENVIRONMENT — it has no `config`
+# subcommand (that belongs to the desktop `writ-agent` binary). So the
+# coordinator URL travels as WRIT_COORDINATOR_URL; there is no config file to
+# write and nothing to go stale.
+say "Starting the agent..."
+ALLOW_INSECURE=""
+case "$COORDINATOR" in
+  https://*) ;;
+  http://localhost*|http://127.0.0.1*|"http://[::1]"*) ;;
+  # The agent refuses to send its bearer over plaintext to a non-loopback host
+  # unless this is set. Only reached when the operator chose a plaintext URL.
+  http://*) ALLOW_INSECURE=1 ;;
+esac
+
+WRIT_SERVICE_TOKEN="$TOKEN" \
+WRIT_COORDINATOR_URL="$COORDINATOR" \
+WRIT_FLEET_ALLOW_INSECURE="$ALLOW_INSECURE" \
+DOC_EXTRACT_URL="$DOC_URL" \
+DOC_EXTRACT_SECRET="$DOC_SECRET" \
+WRIT_HOME="$WRIT_DIR" \
+nohup "$BIN" >"$WRIT_DIR/agent.log" 2>&1 &
+
+sleep 3
+if kill -0 $! 2>/dev/null; then
+  printf '\033[1;32mok\033[0m  Agent running (pid %s). Logs: %s\n' "$!" "$WRIT_DIR/agent.log"
+  printf '    It should appear in Fleet at %s within a few seconds.\n' "$COORDINATOR"
+else
+  die "The agent exited immediately. Last lines of $WRIT_DIR/agent.log:
+$(tail -20 "$WRIT_DIR/agent.log" 2>/dev/null)"
+fi
+"""
+
+# ── One-line agent enrolment ────────────────────────────────────────────────
+# Registered HERE, above the SPA history fallback, or `/{full_path:path}` would
+# swallow it and serve the HTML shell to curl — which then pipes a web page into
+# sh. Declaring it first is what makes the route real.
+#
+# PUBLIC AND SECRET-FREE by design. The machine running this has no credential
+# yet, so the script cannot be authenticated; it therefore contains nothing
+# worth protecting. Every deployment-specific value — token, coordinator URL,
+# document-extractor address and secret — is fetched at run time by exchanging
+# the single-use pairing code the operator passes as $1.
+@app.get("/agent.sh", include_in_schema=False)
+async def agent_bootstrap_script(request: Request):
+    """The installer behind `curl -fsSL <coordinator>/agent.sh | sh -s -- CODE`."""
+    from fastapi.responses import PlainTextResponse
+
+    base = (settings.writ_public_url or "").strip().rstrip("/") or str(request.base_url).rstrip("/")
+    repo = (os.getenv("WRIT_AGENT_REPO") or "usewrit/writ-agent").strip().strip("/")
+    script = _AGENT_BOOTSTRAP.replace("@@BASE@@", base).replace("@@REPO@@", repo)
+    return PlainTextResponse(
+        script,
+        media_type="text/x-shellscript",
+        # An installer must never be served from a cache: a rotated coordinator
+        # URL or agent repo has to take effect on the very next curl.
+        headers={"Cache-Control": "no-store"},
+    )
 
 if _UI_INDEX.is_file():
     from fastapi.responses import FileResponse

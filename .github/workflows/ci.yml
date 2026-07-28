@@ -246,6 +246,13 @@ jobs:
       - name: i18n coverage
         run: node scripts/check-i18n.mjs
 
+      # A selected pill whose radius does not match its track reads as a
+      # rectangle floating in a stadium. It shipped that way in six switchers
+      # because `rounded-md` is absent from this theme's radius scale and
+      # silently falls back to Tailwind's 6px — each line looks fine alone.
+      - name: Segmented-control radii
+        run: node scripts/check-ui-radius.mjs frontend/src
+
       - name: Build
         working-directory: frontend
         run: npm run build

@@ -40,6 +40,7 @@ from database import get_db
 from models.agent import Agent, AgentStatus
 from models.config import Config
 from security.dependencies import require_platform_admin
+from security.rate_limit import rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -1076,6 +1077,14 @@ async def mint_fleet_token(
     db: AsyncSession = Depends(get_db),
     _admin=Depends(require_platform_admin),
 ):
+    """Route wrapper. The work lives in `_mint_fleet_token` so the pairing-code
+    flow mints through the identical path — same registry entry, same channel
+    key, same revocation semantics — rather than a second implementation that
+    could drift."""
+    return await _mint_fleet_token(request, db, body.name)
+
+
+async def _mint_fleet_token(request: Request, db: AsyncSession, raw_name: str | None) -> dict:
     """Mint a long-lived infrastructure service token for a new fleet agent.
 
     Returns the raw token ONCE. The stock ``writ-agent`` binary reads its token
@@ -1091,7 +1100,7 @@ async def mint_fleet_token(
     from utils.recorder_auth import generate_service_token
     from routers.oauth import _generate_token_prefix
 
-    name = (body.name or "").strip() or "fleet-agent"
+    name = (raw_name or "").strip() or "fleet-agent"
 
     recorder_secret = os.getenv("RECORDER_AUTH_SECRET", "")
     if not recorder_secret:
@@ -1319,3 +1328,137 @@ async def revoke_fleet_token(
 
     await db.commit()
     return {"success": True, "token_id": token_id, "agent_id": agent_id}
+
+
+# ============================================================
+# One-line agent enrolment — pairing codes
+# ============================================================
+#
+# The problem this solves: a coordinator running in Docker CANNOT launch an
+# agent on your host (services/local_agent.preflight blocks it — a container has
+# no host process table and no browser runtime). Since the documented install IS
+# Docker, the "run one here" button is dead for essentially every self-host user,
+# and the fallback was a ~450-character `docker run` carrying the token, the
+# coordinator URL, the doc-extract address, its secret and a host-gateway alias.
+#
+# Instead the coordinator serves its own installer. It already knows the URL and
+# the extraction settings, so none of that needs to travel in the command:
+#
+#     curl -fsSL http://<coordinator>/agent.sh | sh -s -- WRIT-4K2P-9XQ
+#
+# The code is the only thing a human handles, so it is short enough to read over
+# a call. It is single-use and short-lived: it is exchanged ONCE for a real fleet
+# token and deleted on read, exactly like the WS tickets above.
+
+_PAIR_PREFIX = "agent_pair:"
+_PAIR_TTL_SECONDS = 15 * 60
+
+# Crockford-style alphabet: no I/L/O/U, so a code cannot be misread or misheard
+# as another character when it is dictated or copied off a screen.
+_PAIR_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def _format_pair_code(raw: str) -> str:
+    """`WRIT-XXXX-XXX` — prefixed so it is obvious what it belongs to."""
+    return f"WRIT-{raw[:4]}-{raw[4:]}"
+
+
+def _normalise_pair_code(code: str) -> str:
+    """Accept what a human actually types: any case, dashes or not, `WRIT` or not."""
+    cleaned = "".join(ch for ch in (code or "").upper() if ch.isalnum())
+    if cleaned.startswith("WRIT"):
+        cleaned = cleaned[4:]
+    return cleaned
+
+
+async def _pair_redis():
+    from utils.redis_client import get_redis
+
+    return get_redis()
+
+
+class PairCodeResponse(BaseModel):
+    code: str
+    expires_in: int
+    install_command: str
+
+
+@router.post("/pair-code", response_model=PairCodeResponse)
+async def mint_pair_code(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _admin=Depends(require_platform_admin),
+):
+    """Mint a short single-use code that enrols one agent.
+
+    Admin-only, like minting a token directly — the code IS an enrolment
+    credential, just a short-lived one. It maps to a real fleet token that is
+    minted here and now, so revoking the resulting agent works exactly as it
+    does for a hand-minted token (the registry entry below is the same one).
+    """
+    name = f"agent-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    minted = await _mint_fleet_token(request, db, name)
+
+    redis = await _pair_redis()
+    # Retry on collision rather than trusting 32^7 blindly — a silent overwrite
+    # would hand two machines the same identity.
+    for _ in range(5):
+        raw = "".join(secrets.choice(_PAIR_ALPHABET) for _ in range(7))
+        if await redis.set(f"{_PAIR_PREFIX}{raw}", json.dumps(minted),
+                           ex=_PAIR_TTL_SECONDS, nx=True):
+            break
+    else:
+        raise HTTPException(status_code=503, detail="Could not allocate a pairing code, try again")
+
+    code = _format_pair_code(raw)
+    base = _http_base() or "http://localhost:8000"
+    return PairCodeResponse(
+        code=code,
+        expires_in=_PAIR_TTL_SECONDS,
+        install_command=f"curl -fsSL {base}/agent.sh | sh -s -- {code}",
+    )
+
+
+class PairExchangeRequest(BaseModel):
+    code: str
+
+
+@router.post("/pair-code/exchange")
+async def exchange_pair_code(request: Request):
+    """Trade a pairing code for the real agent settings. Called by agent.sh.
+
+    UNAUTHENTICATED by necessity — the machine being enrolled has no credential
+    yet; the code is the credential. Which is why it is single-use (deleted on
+    read, so a code captured from a shell history or a proxy log is already
+    spent), short-lived, and rate-limited per IP against brute force. 32^7 is
+    ~34 billion codes, and a spent or expired one is indistinguishable from a
+    wrong one in the response.
+    """
+    redis = await _pair_redis()
+    await rate_limit(request, redis, max_requests=10, window_seconds=60)
+
+    try:
+        body = PairExchangeRequest(**(await request.json()))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid request body")
+
+    raw = _normalise_pair_code(body.code)
+    if not raw:
+        raise HTTPException(status_code=400, detail="Missing pairing code")
+
+    key = f"{_PAIR_PREFIX}{raw}"
+    stored = await redis.get(key)
+    # Delete BEFORE returning: two machines racing the same code must not both
+    # win, and a crash after this point should spend the code rather than leave
+    # it replayable.
+    await redis.delete(key)
+    if not stored:
+        raise HTTPException(status_code=404, detail="That pairing code is invalid, already used, or expired")
+
+    minted = json.loads(stored if isinstance(stored, str) else stored.decode())
+    return {
+        "token": minted["token"],
+        "coordinator_url": _http_base() or "",
+        "agent_id": minted.get("agent_id"),
+        **_doc_extract_env(),
+    }

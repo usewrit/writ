@@ -4414,13 +4414,13 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                           </div>
                         )}
                       </div>
-                      <div className="flex items-center gap-0.5 p-0.5 bg-hover/60 rounded-lg">
+                      <div className="flex items-center gap-0.5 p-0.5 bg-hover/60 rounded-full">
                         {tabs.filter(tb => tb.show).map(tb => (
                           <button
                             key={tb.id}
                             onClick={() => setSpineTab(tb.id)}
                             className={clsx(
-                              'flex-1 flex items-center justify-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium transition-colors',
+                              'flex-1 flex items-center justify-center gap-1.5 px-2 py-1 rounded-full text-[11px] font-medium transition-colors',
                               activeTab === tb.id ? 'bg-surface text-ink shadow-sm' : 'text-secondary hover:text-ink',
                             )}
                           >

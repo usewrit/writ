@@ -80,7 +80,7 @@ const Segmented: React.FC<{
   options: { value: string; label: string }[];
   onChange: (v: string) => void;
 }> = ({ value, options, onChange }) => (
-  <div className="inline-flex rounded-lg border border-border bg-hover/30 p-0.5">
+  <div className="inline-flex rounded-full border border-border bg-hover/30 p-0.5">
     {options.map((o) => (
       <button
         key={o.value}
@@ -88,7 +88,7 @@ const Segmented: React.FC<{
         onClick={() => onChange(o.value)}
         aria-pressed={value === o.value}
         className={clsx(
-          'rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors',
+          'rounded-full px-3 py-1.5 text-[12px] font-medium transition-colors',
           value === o.value ? 'bg-surface text-ink shadow-sm' : 'text-secondary hover:text-ink',
         )}
       >
@@ -338,7 +338,7 @@ export const SiteCrawlPanel: React.FC<{ onSubmit?: () => void }> = ({ onSubmit }
 
           {/* The operation, under the bar it acts on. */}
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-            <div className="inline-flex rounded-lg border border-border bg-hover/30 p-0.5">
+            <div className="inline-flex rounded-full border border-border bg-hover/30 p-0.5">
               {VERBS.map((v) => (
                 <button
                   key={v.id}
@@ -346,7 +346,7 @@ export const SiteCrawlPanel: React.FC<{ onSubmit?: () => void }> = ({ onSubmit }
                   onClick={() => updateConfig({ crawlVerb: v.id })}
                   aria-pressed={verb === v.id}
                   className={clsx(
-                    'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors',
+                    'flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-medium transition-colors',
                     verb === v.id ? 'bg-surface text-ink shadow-sm' : 'text-secondary hover:text-ink',
                   )}
                 >

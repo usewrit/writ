@@ -105,6 +105,15 @@ export interface FleetCapacity {
   explanation: string;
 }
 
+export interface PairCode {
+  /** Human-facing, e.g. `WRIT-4K2P-9XQ`. Single use, expires. */
+  code: string;
+  /** Seconds until it stops working. */
+  expires_in: number;
+  /** The whole thing to copy: `curl -fsSL <base>/agent.sh | sh -s -- <code>`. */
+  install_command: string;
+}
+
 export interface MintedFleetToken {
   token_id: string;
   name: string;
@@ -192,6 +201,21 @@ export const fleetApi = {
   },
   async mintToken(name: string): Promise<MintedFleetToken> {
     const r = await client.post('/fleet/tokens', { name });
+    return r.data;
+  },
+
+  /**
+   * Mint a short single-use pairing code for one agent.
+   *
+   * This is the path the UI should lead with. The alternative — a raw fleet
+   * token pasted into a ~450-character `docker run` carrying the coordinator
+   * URL, the document-extractor address and its secret — exists because a
+   * containerised coordinator cannot launch an agent on the host itself. The
+   * code moves all of that server-side: the installer fetches it by exchanging
+   * the code, so the operator handles one short line.
+   */
+  async mintPairCode(): Promise<PairCode> {
+    const r = await client.post('/fleet/pair-code');
     return r.data;
   },
   /** Can this coordinator run an agent on its own host, and is one running? */

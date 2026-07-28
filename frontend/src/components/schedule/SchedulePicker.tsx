@@ -71,14 +71,14 @@ export const SchedulePicker: React.FC<SchedulePickerProps> = ({
     <div className={clsx('space-y-3', className)}>
       {/* Segmented control: Interval · Daily · Weekly */}
       {kinds.length > 1 && (
-        <div className="flex gap-0.5 bg-hover/50 rounded-xl p-0.5">
+        <div className="flex gap-0.5 bg-hover/50 rounded-full p-0.5">
           {kinds.map((k) => (
             <button
               key={k}
               type="button"
               onClick={() => setKind(k)}
               className={clsx(
-                'flex-1 px-3 py-2 rounded-lg text-xs font-medium transition-all text-center',
+                'flex-1 px-3 py-2 rounded-full text-xs font-medium transition-all text-center',
                 value.kind === k ? 'bg-ink text-white shadow-sm' : 'text-secondary hover:text-ink',
               )}
             >

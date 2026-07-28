@@ -63,21 +63,27 @@ Open **http://localhost:8000** and create your account. That is the whole instal
 ### Then connect one agent
 
 The coordinator runs no browsers itself, so **nothing will execute until one
-agent is connected**. In the app open **Fleet → Connect a new agent**: it prints
-a command with your token, the coordinator URL, and the document-extractor
-settings already filled in. Run it on any machine — the same one is fine:
+agent is connected**. Open **Fleet → Connect a new agent**, copy the line it
+shows you, and run it on whichever machine should do the browsing — your laptop
+is fine:
 
 ```bash
-WRIT_SERVICE_TOKEN=<from the app> writ-agent-fleet
+curl -fsSL http://localhost:8000/agent.sh | sh -s -- WRIT-4K2P-9XQ
 ```
+
+That installs the agent, enrols it, and starts it. The pairing code is single-use
+and expires in 15 minutes; everything else — the coordinator URL, the
+document-extractor address and its secret — the installer fetches for itself, so
+there is nothing else to paste or configure.
 
 The agent dials out over WebSocket, so it needs no inbound ports and can sit
 behind NAT. It appears in **Fleet** within seconds, and you can record and run.
 
-Get the binary from [`writ-agent`](https://github.com/usewrit/writ-agent) —
+Prefer to do it by hand? The same modal has **Binary** and **Docker** tabs with
+the raw token, and [docs/CONNECT_AGENT.md](docs/CONNECT_AGENT.md) is the full
+reference. Sources for the binary: [`writ-agent`](https://github.com/usewrit/writ-agent)
 [Releases](https://github.com/usewrit/writ-agent/releases), the
 `ghcr.io/usewrit/writ-agent:latest` image, or build from source.
-[docs/CONNECT_AGENT.md](docs/CONNECT_AGENT.md) has the full walkthrough.
 
 ### Day-to-day
 

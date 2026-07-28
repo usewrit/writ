@@ -786,11 +786,15 @@ DOC_URL="$(jsonstr DOC_EXTRACT_URL)"
 DOC_SECRET="$(jsonstr DOC_EXTRACT_SECRET)"
 
 # --- 2. Resolve this platform's release asset -------------------------------
+# These are the RELEASE ASSET INFIXES (os-arch), not Rust target triples. The
+# assets are named `writ-agent-fleet-<os>-<arch>.tar.gz`; matching on a triple
+# like `aarch64-apple-darwin` finds nothing and fails naming a string that
+# appears nowhere in the release.
 case "$(uname -s)-$(uname -m)" in
-  Darwin-arm64)        TARGET=aarch64-apple-darwin ;;
-  Darwin-x86_64)       TARGET=x86_64-apple-darwin ;;
-  Linux-x86_64)        TARGET=x86_64-unknown-linux-gnu ;;
-  Linux-aarch64|Linux-arm64) TARGET=aarch64-unknown-linux-gnu ;;
+  Darwin-arm64)              TARGET=macos-arm64 ;;
+  Darwin-x86_64)             TARGET=macos-x86_64 ;;
+  Linux-x86_64)              TARGET=linux-x86_64 ;;
+  Linux-aarch64|Linux-arm64) TARGET=linux-aarch64 ;;
   *) die "No prebuilt agent for $(uname -sm). Build from source: https://github.com/$REPO" ;;
 esac
 
@@ -802,15 +806,40 @@ if [ -x "$BIN" ] && [ "${WRIT_FORCE_DOWNLOAD:-0}" != "1" ]; then
   say "Using the agent already at $BIN"
 else
   say "Finding the $TARGET build..."
-  ASSET="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-    | grep -o "\"browser_download_url\"[[:space:]]*:[[:space:]]*\"[^\"]*${TARGET}[^\"]*\"" \
-    | head -1 | cut -d'"' -f4)"
+  URLS="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+    | grep -o "\"browser_download_url\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
+    | cut -d'"' -f4)"
+  # Every archive has a `.sha256` sibling whose name also contains the infix, so
+  # filter those out before picking — otherwise the checksum file can win.
+  ASSET="$(printf '%s\n' "$URLS" | grep -- "-${TARGET}\." | grep -v '\.sha256$' | head -1)"
   [ -n "$ASSET" ] || die "No published release asset for $TARGET yet. Build from source: https://github.com/$REPO"
+  SUMS="$(printf '%s\n' "$URLS" | grep -- "-${TARGET}\." | grep '\.sha256$' | head -1)"
 
   say "Downloading $(basename "$ASSET")..."
   TMP="$(mktemp -d)"
   trap 'rm -rf "$TMP"' EXIT
   curl -fL# "$ASSET" -o "$TMP/asset" || die "Download failed."
+
+  # Verify the checksum when the release publishes one. This is a
+  # `curl | sh` installer fetching a 60 MB binary it is about to run, so a
+  # corrupted or substituted download should stop here rather than later.
+  if [ -n "$SUMS" ]; then
+    EXPECTED="$(curl -fsSL "$SUMS" 2>/dev/null | awk '{print $1}' | head -1)"
+    if [ -n "$EXPECTED" ]; then
+      if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL="$(sha256sum "$TMP/asset" | awk '{print $1}')"
+      elif command -v shasum >/dev/null 2>&1; then
+        ACTUAL="$(shasum -a 256 "$TMP/asset" | awk '{print $1}')"
+      fi
+      if [ -n "${ACTUAL:-}" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
+        die "Checksum mismatch for $(basename "$ASSET").
+     expected $EXPECTED
+     got      $ACTUAL
+   Refusing to run it. Try again, or build from source."
+      fi
+      [ -n "${ACTUAL:-}" ] && say "Checksum verified."
+    fi
+  fi
 
   # Releases ship archives (the binary needs its Playwright driver alongside it),
   # but tolerate a bare binary so an older or hand-cut release still installs.

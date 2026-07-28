@@ -79,43 +79,50 @@ def _build_install_commands() -> dict:
     show acquisition and connection as one continuous story instead of linking
     out to a releases page and hoping.
 
-    The release asset is resolved from the GitHub API by the Rust target triple
-    derived from ``uname`` rather than a hardcoded filename: naming can change
-    across releases, and a wrong literal would 404 silently. If no asset matches,
-    the snippet says so and points at the source build instead of leaving an
-    empty file behind.
+    The asset is resolved from the GitHub API by the release's own
+    ``<os>-<arch>`` infix, NOT by a Rust target triple. That distinction has
+    already cost one release: matching ``aarch64-apple-darwin`` against assets
+    named ``writ-agent-fleet-macos-arm64.tar.gz`` finds nothing and fails naming
+    a string that appears nowhere in the release. The ``.sha256`` siblings carry
+    the same infix, so they are filtered out explicitly rather than left to
+    ordering luck.
     """
     repo = _agent_repo()
     releases_api = f"https://api.github.com/repos/{repo}/releases/latest"
 
     unix = (
-        "# Detect this machine's Rust target triple, then pull the matching\n"
-        "# asset from the latest release.\n"
+        "# Detect this machine, then pull the matching asset from the latest\n"
+        "# release and unpack it.\n"
         'case "$(uname -s)-$(uname -m)" in\n'
-        '  Darwin-arm64)   TARGET=aarch64-apple-darwin ;;\n'
-        '  Darwin-x86_64)  TARGET=x86_64-apple-darwin ;;\n'
-        '  Linux-x86_64)   TARGET=x86_64-unknown-linux-gnu ;;\n'
-        '  Linux-aarch64)  TARGET=aarch64-unknown-linux-gnu ;;\n'
+        '  Darwin-arm64)              TARGET=macos-arm64 ;;\n'
+        '  Darwin-x86_64)             TARGET=macos-x86_64 ;;\n'
+        '  Linux-x86_64)              TARGET=linux-x86_64 ;;\n'
+        '  Linux-aarch64|Linux-arm64) TARGET=linux-aarch64 ;;\n'
         '  *) echo "unsupported platform: $(uname -sm) — build from source"; exit 1 ;;\n'
         "esac\n"
         # ${TARGET} MUST stay braced: bare $TARGET followed by '[' is an array
         # subscript in zsh (macOS's default shell), which aborts the paste with
         # "bad math expression" before curl ever runs.
         f'URL=$(curl -fsSL {releases_api} \\\n'
-        '  | grep -o "\\"browser_download_url\\": *\\"[^\\"]*${TARGET}[^\\"]*\\"" \\\n'
-        '  | head -1 | cut -d\'"\' -f4)\n'
+        '  | grep -o "\\"browser_download_url\\": *\\"[^\\"]*\\"" | cut -d\'"\' -f4 \\\n'
+        '  | grep -- "-${TARGET}\\." | grep -v "\\.sha256$" | head -1)\n'
         '[ -n "$URL" ] || { echo "no release asset for ${TARGET} — build from source"; exit 1; }\n'
-        'curl -fL "$URL" -o writ-agent && chmod +x writ-agent'
+        'curl -fL "$URL" -o writ-agent-fleet.tar.gz\n'
+        '# An archive, not a bare binary: the Playwright driver ships beside the\n'
+        '# executable and it cannot launch a browser without it.\n'
+        'tar -xzf writ-agent-fleet.tar.gz && chmod +x writ-agent-fleet'
     )
 
     windows = (
         "# PowerShell — pull the matching asset from the latest release.\n"
-        '$target = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") '
-        '{ "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" }\n'
+        '# The release publishes a single Windows build (x86_64); it runs on ARM\n'
+        '# devices under emulation.\n'
+        '$target = "windows-x86_64"\n'
         f'$rel = Invoke-RestMethod {releases_api}\n'
-        '$asset = $rel.assets | Where-Object { $_.name -like "*$target*" } | Select-Object -First 1\n'
+        '$asset = $rel.assets | Where-Object { $_.name -like "*$target*" -and $_.name -notlike "*.sha256" } | Select-Object -First 1\n'
         'if (-not $asset) { throw "no release asset for $target — build from source" }\n'
-        'Invoke-WebRequest $asset.browser_download_url -OutFile writ-agent.exe'
+        'Invoke-WebRequest $asset.browser_download_url -OutFile writ-agent-fleet.zip\n'
+        'Expand-Archive writ-agent-fleet.zip -DestinationPath .'
     )
 
     source = (

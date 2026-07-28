@@ -146,8 +146,12 @@ def test_script_is_posix_sh():
     src = _script()
     assert src.startswith("#!/bin/sh")
     assert not re.search(r"\[\[(?!:)", src), "bash [[ ]] conditional"
-    for bashism in ("function ", "declare ", "local ", "$'", "&>"):
+    for bashism in ("function ", "declare ", "local ", "&>"):
         assert bashism not in src, bashism
+    # ANSI-C quoting is `$'...'` at the START of a word. A `$` immediately
+    # before a closing quote is a regex anchor — `grep -v '\.sha256$'` — and is
+    # perfectly POSIX.
+    assert not re.search(r"(^|[\s=(])\$'", src), "bash ANSI-C quoting $'...'"
 
 
 def test_script_placeholders_are_substituted_not_literal():
@@ -162,3 +166,101 @@ def test_script_placeholders_are_substituted_not_literal():
     )
     assert "@@" not in rendered
     assert base in rendered
+
+
+# --- release-asset naming ---------------------------------------------------
+#
+# These pin the ONE fact that has already broken this feature once: the
+# installer must match the release's own `<os>-<arch>` infix, not a Rust target
+# triple. `writ-agent-fleet-macos-arm64.tar.gz` contains no
+# `aarch64-apple-darwin`, so a triple matches nothing and the installer dies
+# naming a string that appears nowhere in the release.
+#
+# The names below are the assets published by writ-agent v1.0.0.
+
+REAL_ASSETS = [
+    "writ-agent-fleet-linux-aarch64.tar.gz",
+    "writ-agent-fleet-linux-aarch64.tar.gz.sha256",
+    "writ-agent-fleet-linux-x86_64.tar.gz",
+    "writ-agent-fleet-linux-x86_64.tar.gz.sha256",
+    "writ-agent-fleet-macos-arm64.tar.gz",
+    "writ-agent-fleet-macos-arm64.tar.gz.sha256",
+    "writ-agent-fleet-macos-x86_64.tar.gz",
+    "writ-agent-fleet-macos-x86_64.tar.gz.sha256",
+    "writ-agent-fleet-windows-x86_64.zip",
+    "writ-agent-fleet-windows-x86_64.zip.sha256",
+]
+
+
+@pytest.mark.parametrize("uname_s,uname_m,expected", [
+    ("Darwin", "arm64", "writ-agent-fleet-macos-arm64.tar.gz"),
+    ("Darwin", "x86_64", "writ-agent-fleet-macos-x86_64.tar.gz"),
+    ("Linux", "x86_64", "writ-agent-fleet-linux-x86_64.tar.gz"),
+    ("Linux", "aarch64", "writ-agent-fleet-linux-aarch64.tar.gz"),
+    ("Linux", "arm64", "writ-agent-fleet-linux-aarch64.tar.gz"),
+])
+def test_installer_selects_the_right_asset(uname_s, uname_m, expected):
+    """Replay the script's own selection logic against the real asset list."""
+    import re
+
+    src = _script()
+    case = re.search(r'case "\$\(uname -s\)-\$\(uname -m\)" in(.+?)esac', src, re.S)
+    assert case, "platform case block not found"
+
+    target = None
+    for line in case.group(1).splitlines():
+        m = re.match(r"\s*([^)]+)\)\s*TARGET=(\S+)\s*;;", line.strip())
+        if not m:
+            continue
+        if f"{uname_s}-{uname_m}" in [p.strip() for p in m.group(1).split("|")]:
+            target = m.group(2)
+            break
+    assert target, f"no TARGET branch for {uname_s}-{uname_m}"
+
+    # The script's own filter: infix match, minus the checksum siblings.
+    picked = [a for a in REAL_ASSETS if f"-{target}." in a and not a.endswith(".sha256")]
+    assert picked == [expected], f"target {target!r} selected {picked}"
+
+
+def test_installer_does_not_use_rust_target_triples():
+    """The regression itself: triples appear nowhere in the release.
+
+    Comment lines are stripped first — the script explains this trap by naming a
+    triple, which is the opposite of committing it.
+    """
+    code = "\n".join(
+        l for l in _script().splitlines() if not l.lstrip().startswith("#")
+    )
+    for triple in ("aarch64-apple-darwin", "x86_64-apple-darwin",
+                   "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+                   "x86_64-pc-windows-msvc"):
+        assert triple not in code, (
+            f"{triple} is a Rust target triple; release assets are named "
+            "<os>-<arch> and it will match nothing"
+        )
+
+
+def test_installer_excludes_checksum_siblings():
+    """A `.sha256` carries the same infix and must never be chosen as the asset."""
+    src = _script()
+    assert "grep -v '\\.sha256$'" in src or 'grep -v "\\.sha256$"' in src
+
+
+def test_installer_verifies_the_checksum():
+    """It is curl-pipe-sh fetching 60 MB it is about to execute."""
+    src = _script()
+    assert "sha256sum" in src and "shasum -a 256" in src
+    assert "Checksum mismatch" in src
+
+
+def test_fleet_snippets_use_the_same_naming():
+    """The Fleet page's manual commands had the identical triple bug."""
+    from routers.fleet import _build_install_commands
+
+    cmds = _build_install_commands()
+    for name, body in cmds.items():
+        for triple in ("aarch64-apple-darwin", "x86_64-unknown-linux-gnu",
+                       "x86_64-pc-windows-msvc"):
+            assert triple not in body, f"{name} snippet still uses {triple}"
+    assert "macos-arm64" in cmds["unix"]
+    assert "windows-x86_64" in cmds["windows"]

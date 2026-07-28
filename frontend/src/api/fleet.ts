@@ -112,6 +112,13 @@ export interface PairCode {
   expires_in: number;
   /** The whole thing to copy: `curl -fsSL <base>/agent.sh | sh -s -- <code>`. */
   install_command: string;
+  /** The manual fallbacks, from the SAME mint — never mint a second token
+   *  just to fill the Binary/Docker tabs. */
+  token: string;
+  agent_id: string;
+  connect_command: string;
+  docker_command: string;
+  install_commands: AgentInstallCommands;
 }
 
 export interface MintedFleetToken {

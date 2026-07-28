@@ -13,7 +13,7 @@ import client, { apiErrorMessage } from '../api/client';
 import { WritWordmark } from '../components/brand/WritMark';
 import { createAIProvider } from '../api/settings';
 import { updateEmailConfig, updatePushoverConfig, updateTwilioConfig, addTwilioRecipient } from '../api/notifications';
-import { fleetApi, type MintedFleetToken, type PairCode } from '../api/fleet';
+import { fleetApi, type PairCode } from '../api/fleet';
 
 /**
  * First-run onboarding — a fast, inline, self-contained setup flow.
@@ -343,7 +343,6 @@ const NotifyStep: React.FC<{ onNext: () => void; onBack: () => void; onSkipAll: 
 // ═══ Step: connect first agent ═══════════════════════════════════════════════
 const AgentStep: React.FC<{ onNext: () => void; onBack: () => void; onSkipAll: () => void; onConnected: () => void }> = ({ onNext, onBack, onSkipAll, onConnected }) => {
   const { t } = useTranslation();
-  const [minted, setMinted] = useState<MintedFleetToken | null>(null);
   const [pair, setPair] = useState<PairCode | null>(null);
   // The one-liner is the default. `manual` exposes the raw token forms for
   // air-gapped hosts and for anyone scripting enrolment, where a single-use
@@ -357,13 +356,13 @@ const AgentStep: React.FC<{ onNext: () => void; onBack: () => void; onSkipAll: (
     let alive = true;
     (async () => {
       try {
-        // Both up front: the pairing code drives the default tab, the token
-        // drives the manual ones, and neither should cost a click to appear.
-        const [code, token] = await Promise.all([
-          fleetApi.mintPairCode(),
-          fleetApi.mintToken('onboarding-agent'),
-        ]);
-        if (alive) { setPair(code); setMinted(token); }
+        // ONE mint drives all three tabs. Requesting a pairing code and a raw
+        // token separately minted two fleet tokens — two agent identities for a
+        // single connection — and raced two writers into the token registry,
+        // which on a fresh install failed outright with
+        // "UNIQUE constraint failed: config.key".
+        const code = await fleetApi.mintPairCode();
+        if (alive) setPair(code);
       }
       catch (err) { if (alive) setError(apiErrorMessage(err, t('Could not prepare an agent token.'))); }
     })();
@@ -388,11 +387,11 @@ const AgentStep: React.FC<{ onNext: () => void; onBack: () => void; onSkipAll: (
     };
     const h = setInterval(tick, 4000); tick();
     return () => { alive = false; clearInterval(h); };
-  }, [connected, minted, onConnected]);
+  }, [connected, onConnected]);
 
-  const command = tab === 'quick'
-    ? (pair?.install_command ?? '')
-    : minted ? (tab === 'binary' ? minted.connect_command : minted.docker_command) : '';
+  const command = !pair ? '' :
+    tab === 'quick' ? pair.install_command :
+    tab === 'binary' ? pair.connect_command : pair.docker_command;
   const copy = async () => { try { await navigator.clipboard.writeText(command); toast.success(t('Command copied')); } catch { /* http */ } };
 
   return (
@@ -404,7 +403,7 @@ const AgentStep: React.FC<{ onNext: () => void; onBack: () => void; onSkipAll: (
     >
       {error ? (
         <div className="rounded-lg border border-border bg-canvas px-3 py-2.5 text-[13px] text-secondary">{error}</div>
-      ) : !minted ? (
+      ) : !pair ? (
         <div className="flex items-center gap-2 text-sm text-secondary py-2">
           <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-800" /> {t('Preparing a connect token…')}
         </div>

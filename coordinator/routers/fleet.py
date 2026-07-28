@@ -22,6 +22,7 @@ them; revocation both blacklists the token id and evicts a live connection.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -1058,7 +1059,20 @@ async def _load_token_registry(db: AsyncSession) -> dict:
     return reg
 
 
+# The registry is a read-modify-write over ONE JSON row, and every mint does
+# load -> append -> save with awaits in between. Two overlapping mints therefore
+# interleave: on a fresh install both see no row and both INSERT (UNIQUE
+# constraint failed: config.key), and once the row exists both UPDATE and the
+# first token silently vanishes from the list.
+#
+# A process-local lock is the right scope here precisely because the coordinator
+# REFUSES to boot with more than one web worker (see main._enforce_single_worker)
+# — there is no second process to coordinate with.
+_TOKEN_REGISTRY_LOCK = asyncio.Lock()
+
+
 async def _save_token_registry(db: AsyncSession, reg: dict) -> None:
+    from sqlalchemy.exc import IntegrityError
     from sqlalchemy.orm.attributes import flag_modified
 
     row = await db.execute(select(Config).where(Config.key == _TOKENS_KEY))
@@ -1073,7 +1087,16 @@ async def _save_token_registry(db: AsyncSession, reg: dict) -> None:
         # standard fix for in-place JSON edits (see agents.py / recorder_proxy.py).
         flag_modified(cfg, "value")
     else:
-        db.add(Config(key=_TOKENS_KEY, value=reg))
+        # Defence in depth behind the lock: if anything ever creates this row
+        # concurrently, adopt it rather than failing the caller's mint.
+        try:
+            async with db.begin_nested():
+                db.add(Config(key=_TOKENS_KEY, value=reg))
+        except IntegrityError:
+            row = await db.execute(select(Config).where(Config.key == _TOKENS_KEY))
+            cfg = row.scalar_one()
+            cfg.value = reg
+            flag_modified(cfg, "value")
     await db.flush()
 
 
@@ -1152,16 +1175,22 @@ async def _mint_fleet_token(request: Request, db: AsyncSession, raw_name: str | 
     except Exception as e:  # channel key is best-effort; token still valid
         logger.warning("Failed to store channel key for fleet token: %s", e)
 
-    reg = await _load_token_registry(db)
-    reg["tokens"].append({
-        "token_id": token_id,
-        "name": name,
-        "agent_id": agent_id,
-        "token_prefix": token_prefix,
-        "created_at": _now_iso(),
-        "revoked_at": None,
-    })
-    await _save_token_registry(db, reg)
+    # Serialised: load -> append -> save is a read-modify-write over one JSON
+    # row, and two overlapping mints would otherwise race — both INSERTing the
+    # row on a fresh install, or one silently overwriting the other's entry.
+    # The setup wizard triggered exactly this by requesting a pairing code and a
+    # raw token at the same moment.
+    async with _TOKEN_REGISTRY_LOCK:
+        reg = await _load_token_registry(db)
+        reg["tokens"].append({
+            "token_id": token_id,
+            "name": name,
+            "agent_id": agent_id,
+            "token_prefix": token_prefix,
+            "created_at": _now_iso(),
+            "revoked_at": None,
+        })
+        await _save_token_registry(db, reg)
     await db.commit()
 
     commands = _build_connect_commands(token)
@@ -1388,6 +1417,15 @@ class PairCodeResponse(BaseModel):
     code: str
     expires_in: int
     install_command: str
+    # The manual fallbacks are returned from the SAME mint. The setup wizard
+    # used to request a pairing code and a raw token separately to fill its
+    # three tabs, which minted two fleet tokens — two agent identities — for one
+    # connection, and raced two writers into the token registry.
+    token: str
+    agent_id: str
+    connect_command: str
+    docker_command: str
+    install_commands: dict
 
 
 @router.post("/pair-code", response_model=PairCodeResponse)
@@ -1423,6 +1461,11 @@ async def mint_pair_code(
         code=code,
         expires_in=_PAIR_TTL_SECONDS,
         install_command=f"curl -fsSL {base}/agent.sh | sh -s -- {code}",
+        token=minted["token"],
+        agent_id=minted["agent_id"],
+        connect_command=minted["connect_command"],
+        docker_command=minted["docker_command"],
+        install_commands=minted["install_commands"],
     )
 
 

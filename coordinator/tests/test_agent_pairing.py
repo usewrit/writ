@@ -264,3 +264,59 @@ def test_fleet_snippets_use_the_same_naming():
             assert triple not in body, f"{name} snippet still uses {triple}"
     assert "macos-arm64" in cmds["unix"]
     assert "windows-x86_64" in cmds["windows"]
+
+
+# --- concurrent minting -----------------------------------------------------
+
+def test_registry_write_is_serialised():
+    """Two overlapping mints must not race on the single `config` KV row.
+
+    The registry is a read-modify-write over one JSON row with awaits in
+    between. Without serialisation two overlapping mints interleave: on a fresh
+    install both find no row and both INSERT, which SQLite rejects with
+    `UNIQUE constraint failed: config.key`; and once the row exists, both UPDATE
+    and one token vanishes from the list.
+
+    The setup wizard hit exactly this by requesting a pairing code and a raw
+    token at the same moment.
+    """
+    import inspect
+
+    from routers import fleet
+
+    assert isinstance(fleet._TOKEN_REGISTRY_LOCK, __import__("asyncio").Lock)
+    src = inspect.getsource(fleet._mint_fleet_token)
+    assert "_TOKEN_REGISTRY_LOCK" in src, "the mint must hold the lock"
+    lock_at = src.index("_TOKEN_REGISTRY_LOCK")
+    assert lock_at < src.index("_load_token_registry"), "lock must cover the READ too"
+    assert lock_at < src.index("_save_token_registry")
+
+
+def test_registry_save_tolerates_a_concurrent_creator():
+    """Defence in depth: adopt a row someone else created, never 500."""
+    import inspect
+
+    from routers import fleet
+
+    src = inspect.getsource(fleet._save_token_registry)
+    assert "IntegrityError" in src
+    assert "begin_nested" in src, "the failed INSERT must not poison the outer transaction"
+
+
+def test_pair_code_response_carries_the_manual_fallbacks():
+    """One mint fills all three tabs.
+
+    The wizard used to fetch a pairing code AND a raw token to populate its
+    quick/binary/docker tabs, minting two fleet tokens — two agent identities —
+    for a single connection.
+    """
+    fields = set(fleet_mod().PairCodeResponse.model_fields)
+    for f in ("code", "install_command", "token", "agent_id",
+              "connect_command", "docker_command", "install_commands"):
+        assert f in fields, f"PairCodeResponse is missing {f}"
+
+
+def fleet_mod():
+    from routers import fleet
+
+    return fleet

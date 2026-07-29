@@ -154,5 +154,59 @@ services:
       start_period: 90s
       retries: 3
 
+  # TLS terminator for a PUBLIC deployment. Opt-in: it only starts under the
+  # `tls` profile, so a plain `docker compose up -d` keeps the loopback-only
+  # shape above and never takes ports 80/443 on a laptop.
+  #
+  #   ./scripts/deploy.sh writ.example.com you@example.com
+  #
+  # does the whole thing — writes the domain settings into .env and runs
+  # `docker compose --profile tls up -d --build`. Caddy then obtains a Let's
+  # Encrypt certificate over HTTP-01/TLS-ALPN and RENEWS it on its own: no
+  # certbot, no cron, no reload hook. See docker/Caddyfile and docs/DEPLOYMENT.md.
+  caddy:
+    profiles: ["tls"]
+    image: caddy:2-alpine
+    ports:
+      # Both are required by ACME: :80 serves the HTTP-01 challenge and the
+      # redirect to https, :443 serves the site and TLS-ALPN-01.
+      - "80:80"
+      - "443:443"
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      # Substituted into the Caddyfile at load time. WRIT_DOMAIN is the site
+      # ADDRESS, so an empty value makes Caddy fail its config parse and exit —
+      # which is the right outcome, just an opaque one. Deliberately NOT written
+      # as `${WRIT_DOMAIN:?...}`: Compose interpolates the whole file before it
+      # filters by profile, so the error form would break the plain
+      # `docker compose up -d` quickstart for everyone not using TLS at all.
+      # scripts/deploy.sh validates the value before bringing this profile up.
+      WRIT_DOMAIN: ${WRIT_DOMAIN:-}
+      WRIT_ACME_EMAIL: ${WRIT_ACME_EMAIL:-}
+      WRIT_DOC_EXTRACT_DOMAIN: ${WRIT_DOC_EXTRACT_DOMAIN:-doc-extract.localhost}
+    volumes:
+      - ../docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      # caddy-data holds the ISSUED CERTIFICATES and the ACME account key. Losing
+      # it is survivable (Caddy re-issues on next start) but not free — Let's
+      # Encrypt allows 5 duplicate certificates per registered domain per week,
+      # so repeated loss during a rebuild loop can lock you out of issuance.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - coordinator
+    restart: unless-stopped
+    # Caddy needs to BIND 80/443. Dropping all capabilities and adding back only
+    # NET_BIND_SERVICE is what lets it do that as a non-root user.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   writ-data:
+  caddy-data:
+  caddy-config:

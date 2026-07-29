@@ -87,6 +87,28 @@ reference. Sources for the binary: [`writ-agent`](https://github.com/usewrit/wri
 [Releases](https://github.com/usewrit/writ-agent/releases), the
 `ghcr.io/usewrit/writ-agent:latest` image, or build from source.
 
+### Put it on a real domain
+
+The quickstart binds to `127.0.0.1` — nothing is exposed to the network until you
+say so. When you are ready to run it on a public server, point your domain's A
+record at that machine and run:
+
+```bash
+./scripts/deploy.sh writ.example.com you@example.com
+```
+
+One command, and you have HTTPS. It checks DNS and the ports before touching
+anything, writes every domain-derived setting into `.env` consistently, brings up
+a bundled [Caddy](https://caddyserver.com) that gets a Let's Encrypt certificate
+and **renews it by itself** — no certbot, no cron, no reload hook to forget — and
+then verifies the live `https://` URL before telling you it worked. Re-run it any
+time to change domain or repair a half-finished deploy.
+
+Already have nginx or a load balancer? Skip it — the coordinator stays on
+loopback and you point your proxy at `127.0.0.1:8000`.
+[docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) has that path, the backup checklist,
+and what to do when the certificate does not arrive.
+
 ### Day-to-day
 
 ```bash
@@ -97,7 +119,8 @@ docker compose down -v    # stop and delete everything
 ```
 
 Run these from the repository root — the root `compose.yaml` wires in
-`docker/docker-compose.yml` and loads your `.env` automatically.
+`docker/docker-compose.yml` and loads your `.env` automatically. If you deployed
+with TLS, add `--profile tls` so the commands reach Caddy too.
 
 <details>
 <summary><b>Generate the secrets</b></summary>
@@ -342,19 +365,31 @@ paths, every environment variable, healthchecks and troubleshooting.
 <br/>
 
 The defaults are tuned for a quick local trial — the compose file publishes the
-port on loopback only (`127.0.0.1:8000`). Before exposing this to the internet
+port on loopback only (`127.0.0.1:8000`), so nothing is reachable from the
+network until you say so.
+
+**`./scripts/deploy.sh <domain> <email>` does all of the below for you.** Read on
+if you are wiring it up by hand, or fronting it with a proxy you already run
 (full guide: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)):
 
-1. **Put a TLS reverse proxy in front** (nginx, Caddy, Traefik, …). Terminate HTTPS there
-   and forward to `127.0.0.1:8000`. Do **not** publish port `8000` on a public interface.
+1. **Terminate TLS in front** and forward to `127.0.0.1:8000`. Do **not** publish
+   port `8000` on a public interface. Your proxy must forward WebSocket upgrades
+   and not time out long-lived sockets — the agent fleet lives on one.
 2. **Set `WRIT_PUBLIC_URL` to your public https URL** (e.g. `https://writ.example.com`).
-   Agents use it to dial back in, so it must be reachable from wherever your agents run.
-3. **Switch `ENVIRONMENT=production`.** Enforces strong secrets, a Host allowlist, and
-   refuses a wildcard CORS policy.
-4. **Set `ALLOWED_HOSTS`** to the hostname(s) this coordinator answers on (comma-separated,
-   no scheme/port). Spoofed `Host` headers are rejected in production.
-5. **Set `CORS_ORIGINS`** to your explicit https origin(s) — `*` is refused in production.
-6. **Trust only your proxy for forwarded IPs**, so per-IP rate limiting sees the real client IP.
+   This is the load-bearing one: agents dial it, the `/agent.sh` install one-liner
+   embeds it, and the Host allowlist is derived from it. With
+   `ENVIRONMENT=production` the coordinator refuses to boot without it.
+3. **Keep `ENVIRONMENT=production`** (the default). Enforces strong secrets, the
+   Host allowlist, and refuses a wildcard CORS policy.
+4. **Set `CORS_ORIGINS`** to your explicit https origin(s) — `*` is refused in production.
+5. **Set `FORWARDED_ALLOW_IPS`** to the address your proxy connects *from*.
+   Get this wrong and every request looks like it came from the proxy: clients
+   share one rate-limit bucket, one attacker's failed logins lock out everyone,
+   and audit logs record the proxy instead of the caller.
+
+You do **not** need `ALLOWED_HOSTS` — your public URL's hostname and loopback are
+trusted automatically. Set it only for extra names (an alias, a
+`*.team.example.com` wildcard), or edit them live under **Settings → Network**.
 
 Because your proxy terminates TLS, the container keeps listening on plain HTTP `:8000` on
 the internal network — that is expected.
@@ -394,9 +429,10 @@ next visit shows first-run setup again.
 | `ui/` | The built web UI (SPA) served by the coordinator. |
 | `doc-extract/` | The document + OCR extraction service (PDF, office files, scans). |
 | `connectors/writ-mcp/` | Zero-dependency Node MCP connector (stdio↔HTTP bridge). |
-| `docker/` | `Dockerfile.coordinator`, `Dockerfile.doc-extract`, `docker-compose.yml`, `entrypoint.sh`. |
+| `docker/` | `Dockerfile.coordinator`, `Dockerfile.doc-extract`, `docker-compose.yml`, `entrypoint.sh`, `Caddyfile`. |
 | `docs/` | Operator guides (agent connect walkthrough, production deployment). |
 | `scripts/gen-env.sh` | Generates a filled-in `.env` with fresh secrets. |
+| `scripts/deploy.sh` | Puts this coordinator on a public domain with automatic HTTPS. |
 
 Health endpoints are `GET /health` on the coordinator (`:8000`) and on
 doc-extract (`:8092`) — both JSON, and both used by the container `HEALTHCHECK`

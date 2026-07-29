@@ -164,6 +164,91 @@ class AgentOwnershipError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# Capacity
+# ---------------------------------------------------------------------------
+# How many concurrent sessions an operator may pin to one agent. The lower bound
+# is 1 (0 would be "remove it", which is what the delete button is for); the upper
+# bound is a sanity rail, not a licence check — a self-host operator knows their
+# own hardware, and one browser per slot means 64 is already far past what any
+# single machine handles well.
+OPERATOR_MAX_SESSIONS_LIMIT = 64
+
+
+def _effective_max_sessions(meta: dict) -> int:
+    """Resolve the three capacity inputs into the number the scheduler uses.
+
+    Precedence, and the reasoning for it:
+
+    1. **Operator override** wins outright, and is deliberately NOT clamped to the
+       token ceiling. That ceiling exists to stop an untrusted AGENT inflating its
+       own claim; it is not a limit on what the operator may ask of hardware they
+       own. Clamping here would silently ignore a value the Fleet page had just
+       shown as saved.
+    2. **The agent's own report**, clamped to the token ceiling. Honour a machine
+       asking for FEWER slots, never let it claim more than its token grants.
+    3. **The token ceiling**, before any heartbeat has arrived.
+    """
+    ceiling = int(meta.get("token_max_sessions") or meta.get("max_sessions") or 2)
+
+    override = meta.get("operator_max_sessions")
+    try:
+        override_int = int(override)
+    except (TypeError, ValueError):
+        override_int = 0
+    if override_int >= 1:
+        return min(override_int, OPERATOR_MAX_SESSIONS_LIMIT)
+
+    reported = meta.get("agent_reported_max_sessions")
+    try:
+        reported_int = int(reported)
+    except (TypeError, ValueError):
+        reported_int = 0
+    if reported_int >= 1:
+        return max(1, min(reported_int, ceiling))
+
+    return max(1, ceiling)
+
+
+def set_operator_max_sessions(agent_id: str, value: Optional[int]) -> Optional[dict]:
+    """Apply an operator slot override to a LIVE agent, without a reconnect.
+
+    Returns the agent's new capacity block, or None when the agent is not
+    currently connected (the caller still persists the override on the DB row, so
+    it takes effect on the next connect).
+    """
+    meta = _agent_meta.get(agent_id)
+    if meta is None:
+        return None
+    meta["operator_max_sessions"] = value
+    meta["max_sessions"] = _effective_max_sessions(meta)
+    return capacity_block(meta)
+
+
+def capacity_block(meta: dict) -> dict:
+    """The capacity shape the Fleet API returns for one agent.
+
+    All four numbers are exposed, not just the effective one. The whole reason
+    this exists is that a single opaque "2 slots" gave an operator no way to tell
+    an agent's self-limit apart from a coordinator-side cap, and no idea which
+    knob would move it.
+    """
+    effective = _effective_max_sessions(meta)
+    active = meta.get("active_sessions") or 0
+    return {
+        "max_sessions": effective,
+        "active_sessions": active,
+        "free_slots": max(0, effective - active),
+        # What the machine says it can handle (None until its first heartbeat).
+        "agent_reported": meta.get("agent_reported_max_sessions"),
+        # The ceiling issued in this agent's token.
+        "token_ceiling": meta.get("token_max_sessions"),
+        # The operator's pin, if any. None = following the agent's own report.
+        "operator_override": meta.get("operator_max_sessions"),
+        "limit": OPERATOR_MAX_SESSIONS_LIMIT,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Public query helpers
 # ---------------------------------------------------------------------------
 def get_connected_recorders(
@@ -926,7 +1011,7 @@ async def _recorder_ws_handler(websocket: WebSocket):
     requested_agent_id = auth_msg.get("agent_id") or f"writ-{uuid.uuid4().hex[:12]}"
     try:
         async with AsyncSessionLocal() as db:
-            agent_id = await _register_agent(
+            agent_id, operator_max_sessions = await _register_agent(
                 db, requested_agent_id, user_id,
                 is_trusted=is_trusted,
                 token_prefix=auth.token_prefix,
@@ -983,13 +1068,26 @@ async def _recorder_ws_handler(websocket: WebSocket):
         "token_prefix": auth.token_prefix,
         "role": role,
         "is_trusted": is_trusted,
-        # `token_max_sessions` is the immutable server-issued capacity CEILING (from
-        # the agent's token). `max_sessions` is the effective cap actually used for
-        # scheduling; a heartbeat may lower it (agent self-limiting) but never raise
-        # it above the ceiling. `active_sessions` is coordinator-owned (never taken
-        # from the agent) — see _acquire_run_slot / _release_run_slot.
+        # Capacity is THREE separate numbers, and conflating them is what made an
+        # agent silently sit at 2 slots with no way to change it:
+        #
+        #   token_max_sessions       the immutable server-issued CEILING from the
+        #                            agent's token. Bounds what the AGENT may claim.
+        #   agent_reported_max_sessions  what the machine says it can handle, from
+        #                            its heartbeat. Informational, and the source of
+        #                            the surprising "2" — the stock agent self-limits.
+        #   operator_max_sessions    an explicit override set from the Fleet page and
+        #                            persisted on the agent row. Wins over the
+        #                            agent's self-report, because on a self-host the
+        #                            operator is the authority on their own hardware.
+        #
+        # `max_sessions` is the EFFECTIVE cap used for scheduling, derived from the
+        # three by _effective_max_sessions(). `active_sessions` is coordinator-owned
+        # and never taken from the agent — see _acquire_run_slot/_release_run_slot.
         "token_max_sessions": auth.max_sessions,
-        "max_sessions": auth.max_sessions,
+        "agent_reported_max_sessions": None,
+        "operator_max_sessions": operator_max_sessions,
+        "max_sessions": operator_max_sessions or auth.max_sessions,
         "active_sessions": 0,
         "ai_keys_configured": ai_keys_configured,
         "local_workflows_capable": local_workflows_capable,
@@ -1926,13 +2024,17 @@ def _handle_heartbeat(agent_id: str, msg: dict):
     # NEVER trust an OSS agent's self-reported load. `active_sessions` is
     # coordinator-authoritative (see _acquire_run_slot / _release_run_slot and the
     # record-session accounting) — the heartbeat must not clobber it, or an agent
-    # could report 0 to hog dispatch / evade the queue. `max_sessions` is a capacity
-    # CEILING issued in the agent's token at connect (auth.max_sessions); honor an
-    # agent asking for FEWER slots, but never let it claim MORE than the token grants.
-    _token_ceiling = int(meta.get("token_max_sessions", meta.get("max_sessions", 2)) or 2)
+    # could report 0 to hog dispatch / evade the queue.
+    #
+    # Capacity: record what the agent CLAIMS separately from what we USE. The stock
+    # writ-agent self-limits to 2, which is why a freshly enrolled machine appeared
+    # capped at 2 slots with nothing in the UI explaining it and no way to raise it.
+    # Keeping the claim as its own field lets the Fleet page show "the agent says 2,
+    # you have set 8" instead of one unexplained number.
     _requested = msg.get("max_sessions")
     if isinstance(_requested, (int, float)) and _requested >= 1:
-        meta["max_sessions"] = max(1, min(int(_requested), _token_ceiling))
+        meta["agent_reported_max_sessions"] = int(_requested)
+    meta["max_sessions"] = _effective_max_sessions(meta)
     meta["platform"] = msg.get("platform", meta.get("platform"))
     meta["version"] = msg.get("version")
     meta["ai_provider"] = msg.get("ai_provider")
@@ -2223,13 +2325,28 @@ def _stamp_agent_identity(agent, user_id: Optional[str], token_prefix: Optional[
     agent.meta = meta
 
 
+def _operator_cap(agent) -> Optional[int]:
+    """The operator's persisted slot override for this agent row, if any.
+
+    Stored on ``Agent.meta`` so it survives reconnects: the live registry entry is
+    rebuilt from scratch on every socket, so an override kept only in memory would
+    silently revert the moment the agent restarted.
+    """
+    raw = (agent.meta or {}).get("operator_max_sessions")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 1 else None
+
+
 async def _register_agent(
     db: AsyncSession,
     requested_agent_id: str,
     user_id: Optional[str],
     is_trusted: bool = False,
     token_prefix: Optional[str] = None,
-) -> str:
+) -> tuple[str, Optional[int]]:
     """Reuse an existing agent row, or create one (single global fleet).
 
     The client sends its stored agent_id from a previous connection.
@@ -2269,7 +2386,7 @@ async def _register_agent(
             agent.is_trusted = is_trusted
             agent.user_hosted = is_user_hosted
             _stamp_agent_identity(agent, user_id, token_prefix)
-            return agent.agent_id
+            return agent.agent_id, _operator_cap(agent)
 
     # 2. Fallback: reuse any disconnected, non-revoked agent of the same type
     result = await db.execute(
@@ -2289,7 +2406,7 @@ async def _register_agent(
             agent.last_seen_at = datetime.now(timezone.utc)
             agent.is_trusted = is_trusted
             _stamp_agent_identity(agent, user_id, token_prefix)
-            return agent.agent_id
+            return agent.agent_id, _operator_cap(agent)
 
     # 3. No reusable agent — create one
     agent = AgentModel(
@@ -2327,4 +2444,6 @@ async def _register_agent(
             )
         except Exception:
             pass
-    return requested_agent_id
+    # A brand-new row carries no operator override yet — the effective cap comes
+    # from the token ceiling until someone sets one on the Fleet page.
+    return requested_agent_id, None

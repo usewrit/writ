@@ -84,13 +84,36 @@ export const NetworkSection: React.FC = () => {
         </div>
 
         <div>
-          <label className="block text-[13px] font-medium text-ink mb-1">{t('Trusted proxy hosts / allowed origins')}</label>
-          <Input value={trustedHosts} onChange={(e) => setTrustedHosts(e.target.value)} placeholder="coordinator.example.com, 10.0.0.5" />
-          <p className="text-xs text-tertiary mt-1">{t('Comma-separated. Used behind a reverse proxy to accept forwarded hosts.')}</p>
+          <label className="block text-[13px] font-medium text-ink mb-1">{t('Additional trusted hosts')}</label>
+          <Input value={trustedHosts} onChange={(e) => setTrustedHosts(e.target.value)} placeholder="alias.example.com, *.team.example.com" />
+          <p className="text-xs text-tertiary mt-1">
+            {t('Comma-separated. Only needed for EXTRA names — the Public URL above is always accepted. A request whose Host header is not on the list gets a 400.')}
+          </p>
         </div>
 
         <div className="flex justify-end">
           <Button onClick={handleSave} loading={saving}>{t('Save')}</Button>
+        </div>
+
+        {/* The list the middleware is enforcing, not the list the operator
+            typed. These differ by design — the public URL's own hostname and
+            loopback are added for you — and without showing it, a rejected
+            hostname is only diagnosable from container logs. */}
+        <div className="rounded-lg border border-border bg-canvas px-3 py-2.5">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-tertiary mb-1.5">
+            {data.trusted_hosts_enforced ? t('Accepted right now') : t('Host checking is off')}
+          </p>
+          {data.trusted_hosts_enforced ? (
+            <div className="flex flex-wrap gap-1.5">
+              {data.effective_trusted_hosts.map((h) => (
+                <span key={h} className="px-2 py-0.5 rounded-md bg-hover text-[12px] font-mono text-ink">{h}</span>
+              ))}
+            </div>
+          ) : (
+            <p className="text-[12px] text-secondary">
+              {t('This coordinator accepts any Host header because it is not running in production mode. Set ENVIRONMENT=production to enforce the list.')}
+            </p>
+          )}
         </div>
       </div>
 

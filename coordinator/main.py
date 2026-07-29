@@ -21,7 +21,7 @@ from typing import Dict, Any
 
 from fastapi import Depends, FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from config import settings, should_expose_openapi
 from database import init_db, close_db, engine
@@ -169,6 +169,28 @@ async def lifespan(app: FastAPI):
     # Agent-WS module needs Redis for per-agent channel-key retrieval.
     from routers.user_recorder_ws import set_redis_client as set_recorder_ws_redis
     set_recorder_ws_redis(redis_client)
+
+    # Re-apply the operator's saved Network section (Public URL + Trusted hosts).
+    #
+    # The env is only the SEED for these two. Once the owner sets a domain — in
+    # onboarding or Settings → Network — the persisted value is the truth, and a
+    # restart must not silently fall back to the env-only view: the UI would keep
+    # showing the saved hostname while the running process rejected it.
+    try:
+        from database import AsyncSessionLocal
+        from services.coordinator_settings import restore_network_from_db
+        async with AsyncSessionLocal() as db:
+            await restore_network_from_db(db)
+        from security import trusted_hosts as _th
+        logger.info(
+            "Network settings applied — public_url=%s trusted_hosts=%s (enforced=%s)",
+            settings.writ_public_url or "(unset)", _th.current(), _th.is_enforced(),
+        )
+    except Exception as e:
+        # Non-fatal: the env-derived allowlist from import time is still in
+        # effect, which is a strictly safe fallback (it always contains the
+        # WRIT_PUBLIC_URL host and loopback).
+        logger.warning(f"Could not restore saved network settings: {e}")
 
     # Push AI provider configs to the AI gateway on startup (best-effort).
     try:
@@ -371,31 +393,117 @@ if os.getenv("ENABLE_METRICS", "").strip().lower() in ("1", "true", "yes"):
             "installed — /metrics will not be served."
         )
 
-# TrustedHost middleware — reject spoofed Host headers (production only).
-if settings.is_production:
-    import os as _os
-    from urllib.parse import urlparse as _urlparse
-    from starlette.middleware.trustedhost import TrustedHostMiddleware
+# Global per-IP rate ceiling.
+#
+# Until this existed, security/rate_limit.py was a per-route dependency wired to
+# exactly five endpoints; the rest of the HTTP surface — every authenticated API
+# route, /agent.sh, the OAuth device endpoints, the SPA shell — had no ceiling of
+# any kind. This is the blanket backstop. It is deliberately generous (see the
+# settings docstring): sensitive paths carry their own much stricter limits
+# (login/password-reset brute force, single-use pairing codes), so this only has
+# to stop a host from hammering the coordinator flat.
+#
+# Placed here, above CORS in file order, so the 429 it returns is still wrapped
+# by CORSMiddleware (a bare 429 with no Access-Control-Allow-Origin reads as a
+# network error to a cross-origin API client) and is still subject to the Host
+# check below (a spoofed-Host probe should not consume a real client's budget).
+_RATE_LIMIT_EXEMPT_EXACT = {"/health", "/api/health", "/metrics", "/api/about", "/favicon.ico"}
+# Built SPA assets are fingerprinted and cache-forever, but a cold load still
+# pulls dozens in a burst — counting them would throttle a first page view.
+_RATE_LIMIT_EXEMPT_PREFIXES = ("/assets/", "/fonts/", "/static/")
 
-    _allowed_hosts: list[str] = []
-    try:
-        _fe_host = _urlparse(settings.frontend_url).hostname
-        if _fe_host:
-            _allowed_hosts.append(_fe_host)
-    except Exception:
-        pass
-    for _h in (_os.getenv("ALLOWED_HOSTS", "") or "").split(","):
-        _h = _h.strip()
-        if _h:
-            _allowed_hosts.append(_h)
-    if _allowed_hosts:
-        app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
-        logger.info("TrustedHost enforcement enabled for hosts: %s", _allowed_hosts)
-    else:
-        logger.warning(
-            "TrustedHost enforcement skipped — no allowed hosts resolved "
-            "(set frontend_url and/or ALLOWED_HOSTS)"
+
+@app.middleware("http")
+async def global_rate_limit_middleware(request: Request, call_next):
+    """Per-IP request ceiling across the whole HTTP surface."""
+    if not settings.global_rate_limit_enabled:
+        return await call_next(request)
+
+    path = request.url.path
+    if (
+        path in _RATE_LIMIT_EXEMPT_EXACT
+        or path.startswith(_RATE_LIMIT_EXEMPT_PREFIXES)
+        or request.method == "OPTIONS"   # CORS preflight — not a real request
+    ):
+        return await call_next(request)
+
+    _redis = getattr(app.state, "redis", None)
+    if _redis is None:
+        # Pre-lifespan or a Redis-less boot. Fail OPEN, matching the documented
+        # posture of security/rate_limit.py: this is an abuse control, not an
+        # authz gate, and availability wins.
+        return await call_next(request)
+
+    from security.rate_limit import RateLimiter
+
+    # request.client.host is the REAL client IP only when uvicorn's
+    # proxy_headers trusts the upstream — see FORWARDED_ALLOW_IPS. Behind the
+    # bundled Caddy that is the compose network CIDR; get it wrong and every
+    # client shares the proxy's single bucket, which would throttle everyone at
+    # once. scripts/deploy.sh sets it, and docs/DEPLOYMENT.md explains it.
+    client_ip = request.client.host if request.client else "unknown"
+    limiter = RateLimiter(
+        redis_client=_redis,
+        max_requests=settings.global_rate_limit_requests,
+        window_seconds=settings.global_rate_limit_window,
+        prefix="global_rl",
+    )
+    allowed, info = await limiter.is_allowed(f"ip:{client_ip}")
+    if not allowed:
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={
+                "detail": "Too many requests. Slow down and try again shortly.",
+                "code": "rate_limited",
+            },
+            headers={
+                "X-RateLimit-Limit": str(info["limit"]),
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": str(info["reset_at"]),
+                "Retry-After": str(settings.global_rate_limit_window),
+            },
         )
+    return await call_next(request)
+
+
+# Host-header allowlist — reject spoofed Host headers (production only).
+#
+# This uses security.trusted_hosts rather than Starlette's TrustedHostMiddleware
+# for two reasons documented at length in that module: the allowlist is now
+# LIVE (so Settings → Network's "Trusted hosts" field actually enforces, instead
+# of persisting a value nothing read), and it is derived from WRIT_PUBLIC_URL
+# (so a production install on a real domain stops answering 400 to its own
+# users — the old list came from frontend_url, default http://localhost:3000).
+from security import trusted_hosts as _trusted_hosts
+
+_trusted_hosts.configure(settings.allowed_hosts_list, enforced=settings.is_production)
+if settings.is_production:
+    logger.info(
+        "Host-header enforcement enabled for: %s", _trusted_hosts.current()
+    )
+else:
+    logger.info(
+        "Host-header enforcement disabled (environment=%s) — any Host is accepted",
+        settings.environment,
+    )
+
+
+@app.middleware("http")
+async def trusted_host_middleware(request: Request, call_next):
+    """Reject requests whose Host header is not on the live allowlist."""
+    if not _trusted_hosts.is_allowed(request.headers.get("host")):
+        # Name the offending host and the fix. The bare "Invalid host header"
+        # Starlette returns is nearly undebuggable from the operator's side —
+        # it looks like a proxy fault, not a coordinator setting.
+        return PlainTextResponse(
+            "Invalid host header.\n\n"
+            f"This coordinator does not answer on {request.headers.get('host') or '(none)'}.\n"
+            "Set WRIT_PUBLIC_URL to the URL your users open (e.g. "
+            "https://writ.example.com) and restart, or add the name under "
+            "Settings → Network → Trusted hosts.\n",
+            status_code=400,
+        )
+    return await call_next(request)
 
 # CORS middleware
 app.add_middleware(

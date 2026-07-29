@@ -73,6 +73,23 @@ class Settings(BaseSettings):
         description="Public base URL of this coordinator (e.g. https://writ.example.com). Used for agent gateway URLs and absolute links."
     )
 
+    # Host header allowlist. This is ADDITIVE to the hostname derived from
+    # writ_public_url (see `allowed_hosts_list`) — an operator who sets only
+    # WRIT_PUBLIC_URL gets a correct allowlist, which is the single most common
+    # deployment and used to produce a 400 on every request.
+    #
+    # Set this only for the extra names a single coordinator also answers on
+    # (a vanity alias, a split api/app pair, a wildcard like `*.writ.example.com`).
+    allowed_hosts: str = Field(
+        default="",
+        description=(
+            "Extra hostname(s) this coordinator answers on, comma-separated, no "
+            "scheme or port. ADDITIVE to WRIT_PUBLIC_URL's hostname (which is "
+            "always trusted) and to loopback. Supports a leading-wildcard form "
+            "('*.writ.example.com'). env ALLOWED_HOSTS."
+        ),
+    )
+
     # ── Document / OCR extraction ────────────────────────────────────────────
     # The address of the doc-extract service, and the secret callers present to
     # it. The coordinator NEVER calls doc-extract itself — agents do, with bytes
@@ -571,6 +588,37 @@ class Settings(BaseSettings):
         ge=1
     )
 
+    # ── Global per-IP ceiling ────────────────────────────────────────────────
+    # The two knobs above are the DEFAULTS FOR THE PER-ROUTE ``rate_limit``
+    # dependency, which is applied to a handful of routes (pair-code exchange,
+    # inbound webhooks, three agent endpoints). Everything else — every
+    # authenticated API route, /agent.sh, the OAuth device endpoints — had no
+    # ceiling at all, so a single host could hammer the coordinator freely.
+    #
+    # These three are the blanket backstop, applied in main.py's
+    # global_rate_limit_middleware. Deliberately generous: this is a DoS/abuse
+    # ceiling, not a quota. A single browser tab loading the SPA and polling
+    # already spends tens of requests a minute, so a tight value here would
+    # break normal use, and the sensitive paths (login, password reset, pairing)
+    # carry their own far stricter limits.
+    global_rate_limit_enabled: bool = Field(
+        default=True,
+        description=(
+            "Per-IP request ceiling across the whole HTTP surface. Set false only "
+            "if a proxy in front already enforces one. env GLOBAL_RATE_LIMIT_ENABLED."
+        ),
+    )
+    global_rate_limit_requests: int = Field(
+        default=600,
+        description="Max requests per IP per window for the global ceiling. env GLOBAL_RATE_LIMIT_REQUESTS.",
+        ge=1,
+    )
+    global_rate_limit_window: int = Field(
+        default=60,
+        description="Window in seconds for the global per-IP ceiling. env GLOBAL_RATE_LIMIT_WINDOW.",
+        ge=1,
+    )
+
     # Platform Controls (can be overridden at runtime via Redis)
     maintenance_mode: bool = Field(
         default=False,
@@ -755,6 +803,46 @@ class Settings(BaseSettings):
                     "(credentials are enabled, so '*' would expose every authenticated endpoint)."
                 )
 
+            # WRIT_PUBLIC_URL is the load-bearing production setting: it is the
+            # base agents dial back on, the base the /agent.sh install one-liner
+            # embeds, AND (via allowed_hosts_list) the Host-header allowlist. An
+            # unset value silently produces agents enrolled against a URL that
+            # resolves nowhere, so refuse to boot rather than half-work.
+            _public = (self.writ_public_url or "").strip()
+            if not _public:
+                raise ValueError(
+                    "WRIT_PUBLIC_URL must be set in production. It is the base URL "
+                    "agents dial back on, the base embedded in the /agent.sh install "
+                    "command, and the source of the Host-header allowlist. Set it to "
+                    "the URL users actually open, e.g. "
+                    "WRIT_PUBLIC_URL=https://writ.example.com (scripts/deploy.sh does "
+                    "this for you)."
+                )
+            if not _public.lower().startswith(("http://", "https://")):
+                raise ValueError(
+                    f"WRIT_PUBLIC_URL must include a scheme (got {_public!r}). "
+                    "Use the full base URL, e.g. https://writ.example.com."
+                )
+
+            # Plaintext on a routable host means credentials and bearer tokens
+            # cross the network in the clear. That is a legitimate choice on a
+            # trusted private network, so this WARNS rather than raising — but it
+            # must be loud, because the far more likely cause is an operator who
+            # meant to terminate TLS and has not yet.
+            _host = (self.public_hostname or "").lower()
+            _is_loopback = _host in ("localhost", "127.0.0.1", "::1", "[::1]") or _host.endswith(".localhost")
+            if _public.lower().startswith("http://") and not _is_loopback:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "WRIT_PUBLIC_URL is plaintext http:// on a routable host (%s). "
+                    "Login credentials, bearer tokens and agent tokens will cross the "
+                    "network unencrypted. Terminate TLS in front of the coordinator "
+                    "(scripts/deploy.sh provisions Caddy + Let's Encrypt for you) and "
+                    "set WRIT_PUBLIC_URL to the https:// URL.",
+                    _host,
+                )
+
             # Admin MFA is a SOFT default in production: we WANT it on, but flipping
             # it for an operator who hasn't enrolled would lock them out of the
             # admin panel on first boot. So we only WARN (never raise) — turn it on
@@ -792,6 +880,65 @@ class Settings(BaseSettings):
     def cors_origins_list(self) -> list[str]:
         """Parse CORS origins into a list."""
         return [origin.strip() for origin in self.cors_origins.split(",")]
+
+    @property
+    def public_hostname(self) -> Optional[str]:
+        """Hostname of ``writ_public_url``, or None when it is unset/unparseable."""
+        raw = (self.writ_public_url or "").strip()
+        if not raw:
+            return None
+        try:
+            from urllib.parse import urlparse
+
+            return urlparse(raw).hostname or None
+        except Exception:
+            return None
+
+    @property
+    def allowed_hosts_list(self) -> list[str]:
+        """The effective Host-header allowlist, in priority order.
+
+        Composed from three sources, because each covers a case the others miss:
+
+        1. ``writ_public_url``'s hostname — the name real users and agents dial.
+           This is derived, NOT configured, so the overwhelmingly common
+           "I set my public URL and deployed" path cannot produce a coordinator
+           that 400s every request. Before this existed the allowlist was built
+           from ``frontend_url`` (default ``http://localhost:3000``), so a
+           production install on a real domain rejected its own traffic.
+        2. ``allowed_hosts`` (env ALLOWED_HOSTS) — additive extras: aliases, a
+           second hostname, a ``*.suffix`` wildcard.
+        3. Loopback — ALWAYS trusted, and not optional. The container's own
+           healthcheck is ``curl -f http://localhost:8000/health``, so dropping
+           localhost makes Docker mark a perfectly healthy coordinator unhealthy
+           and restart it forever. Loopback is reachable only from inside the
+           container (the published port is 127.0.0.1 on the host), so trusting
+           it costs nothing.
+
+        ``frontend_url``'s hostname is still included for back-compat with
+        installs that configured only that.
+        """
+        hosts: list[str] = []
+
+        def _add(value: Optional[str]) -> None:
+            v = (value or "").strip().lower()
+            if v and v not in hosts:
+                hosts.append(v)
+
+        _add(self.public_hostname)
+        for raw in self.allowed_hosts.split(","):
+            _add(raw)
+        try:
+            from urllib.parse import urlparse
+
+            _add(urlparse(self.frontend_url).hostname)
+        except Exception:
+            pass
+        # See point 3 above — the container healthcheck depends on these.
+        _add("localhost")
+        _add("127.0.0.1")
+        _add("[::1]")
+        return hosts
 
     @property
     def is_production(self) -> bool:

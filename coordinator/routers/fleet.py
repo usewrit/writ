@@ -274,7 +274,11 @@ async def list_fleet_agents(
     """Return every registered agent, marking online + reporting capacity from the
     in-process connected-recorder registry (the WS layer is source of truth for
     live state; the DB row is the durable identity)."""
-    from routers.user_recorder_ws import get_all_connected_recorders
+    from routers.user_recorder_ws import (
+        get_all_connected_recorders,
+        capacity_block,
+        OPERATOR_MAX_SESSIONS_LIMIT,
+    )
 
     connected = {r["agent_id"]: r for r in get_all_connected_recorders()}
 
@@ -296,20 +300,24 @@ async def list_fleet_agents(
         live = connected.get(a.agent_id)
         meta = a.meta or {}
         name = meta.get("name") or meta.get("hostname") or a.agent_id
-        max_sessions = (live or {}).get("max_sessions")
-        active_sessions = (live or {}).get("active_sessions")
+        # An OFFLINE agent has no live registry entry, but its operator override
+        # is on the durable row — surface it so the Fleet page can still show
+        # (and edit) the pin for a machine that is currently down, instead of
+        # blanking the control until it reconnects.
         agents.append({
             "id": a.agent_id,
             "name": name,
             "platform": a.platform.value if a.platform else "unknown",
             "online": a.agent_id in connected,
             "last_seen": a.last_seen_at.isoformat() if a.last_seen_at else None,
-            "capacity": {
-                "max_sessions": max_sessions,
-                "active_sessions": active_sessions,
-                "free_slots": (max_sessions - active_sessions)
-                if (max_sessions is not None and active_sessions is not None)
-                else None,
+            "capacity": capacity_block(live) if live else {
+                "max_sessions": None,
+                "active_sessions": None,
+                "free_slots": None,
+                "agent_reported": meta.get("agent_reported_max_sessions"),
+                "token_ceiling": None,
+                "operator_override": meta.get("operator_max_sessions"),
+                "limit": OPERATOR_MAX_SESSIONS_LIMIT,
             },
             "status": a.status.value if a.status else None,
             "is_trusted": a.is_trusted,
@@ -327,11 +335,7 @@ async def list_fleet_agents(
             "platform": live.get("platform", "unknown"),
             "online": True,
             "last_seen": live.get("connected_at"),
-            "capacity": {
-                "max_sessions": live.get("max_sessions"),
-                "active_sessions": live.get("active_sessions"),
-                "free_slots": (live.get("max_sessions", 0) - live.get("active_sessions", 0)),
-            },
+            "capacity": capacity_block(live),
             "status": "active",
             "is_trusted": False,
             "created_at": None,
@@ -428,6 +432,92 @@ async def _redistribute_after_removal(db: AsyncSession) -> None:
         await trigger_auto_redistribution(db, "fleet_agent_removed")
     except Exception as e:
         logger.debug("fleet: post-removal redistribution skipped: %s", e)
+
+
+# ============================================================
+# PATCH /api/fleet/agents/{agent_id}/capacity
+# How many concurrent sessions this agent may be given.
+# ============================================================
+class AgentCapacityRequest(BaseModel):
+    """Pin an agent's concurrent-session count, or clear the pin.
+
+    ``max_sessions=None`` removes the override and hands control back to whatever
+    the agent reports about itself.
+    """
+    max_sessions: Optional[int] = None
+
+
+@router.patch("/agents/{agent_id}/capacity")
+async def set_fleet_agent_capacity(
+    agent_id: str,
+    body: AgentCapacityRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin=Depends(require_platform_admin),
+):
+    """Set (or clear) the operator's concurrent-session override for one agent.
+
+    Exists because the stock ``writ-agent`` self-limits to 2 sessions in its
+    heartbeat, and the coordinator honoured that unconditionally — so a machine
+    that could comfortably run eight browsers sat at two, with nothing in the UI
+    saying where the number came from and no way to change it.
+
+    The override is written to the agent's durable row so it survives reconnects
+    (the live registry entry is rebuilt from scratch on every socket), and applied
+    to the live entry immediately so it takes effect without a restart.
+    """
+    from routers.user_recorder_ws import (
+        set_operator_max_sessions,
+        get_connected_recorder_meta,
+        OPERATOR_MAX_SESSIONS_LIMIT,
+    )
+
+    value = body.max_sessions
+    if value is not None:
+        if value < 1 or value > OPERATOR_MAX_SESSIONS_LIMIT:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"max_sessions must be between 1 and {OPERATOR_MAX_SESSIONS_LIMIT}, "
+                    "or null to follow the agent's own report."
+                ),
+            )
+        value = int(value)
+
+    result = await db.execute(select(Agent).where(Agent.agent_id == agent_id))
+    agent = result.scalar_one_or_none()
+    if agent is None and get_connected_recorder_meta(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
+
+    if agent is not None:
+        # SQLAlchemy tracks JSON columns by identity, so mutating `agent.meta` in
+        # place would not mark the row dirty and the override would vanish on the
+        # next restart. Rebind a new dict.
+        meta = dict(agent.meta or {})
+        if value is None:
+            meta.pop("operator_max_sessions", None)
+        else:
+            meta["operator_max_sessions"] = value
+        agent.meta = meta
+        await db.commit()
+
+    live = set_operator_max_sessions(agent_id, value)
+    if live is not None:
+        return {"agent_id": agent_id, "capacity": live, "applied": "live"}
+
+    # Offline agent: persisted only, and it will be picked up at next connect.
+    return {
+        "agent_id": agent_id,
+        "capacity": {
+            "max_sessions": None,
+            "active_sessions": None,
+            "free_slots": None,
+            "agent_reported": (agent.meta or {}).get("agent_reported_max_sessions") if agent else None,
+            "token_ceiling": None,
+            "operator_override": value,
+            "limit": OPERATOR_MAX_SESSIONS_LIMIT,
+        },
+        "applied": "on_next_connect",
+    }
 
 
 class PruneAgentsRequest(BaseModel):

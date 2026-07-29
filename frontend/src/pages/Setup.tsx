@@ -11,7 +11,7 @@ import {
 import { setAuth } from '../utils/auth';
 import client, { apiErrorMessage } from '../api/client';
 import { WritWordmark } from '../components/brand/WritMark';
-import { createAIProvider } from '../api/settings';
+import { createAIProvider, updateNetworkSettings } from '../api/settings';
 import { updateEmailConfig, updatePushoverConfig, updateTwilioConfig, addTwilioRecipient } from '../api/notifications';
 import { fleetApi, type PairCode } from '../api/fleet';
 
@@ -19,17 +19,23 @@ import { fleetApi, type PairCode } from '../api/fleet';
  * First-run onboarding — a fast, inline, self-contained setup flow.
  *
  * Purpose-built micro-forms (NOT the full Settings panels) get the coordinator
- * ready in four quick steps: create the admin, connect an AI provider, add a
- * notification channel, connect the first agent. Every step after the account is
- * skippable; a subtle fade carries the user between them. On finish it shows what
- * got configured. Gated by GET /api/auth/setup-status (bounces to /login once an
- * owner exists); step 1 sets the session so the rest can call authed endpoints.
+ * ready in five quick steps: create the admin, confirm the public address,
+ * connect an AI provider, add a notification channel, connect the first agent.
+ * Every step after the account is skippable; a subtle fade carries the user
+ * between them. On finish it shows what got configured. Gated by
+ * GET /api/auth/setup-status (bounces to /login once an owner exists); step 1
+ * sets the session so the rest can call authed endpoints.
+ *
+ * The ADDRESS step is second on purpose. It is the setting everything else
+ * depends on — the agent install command in step 5 embeds it, and an operator
+ * who discovers it later in Settings has already copied a localhost one-liner
+ * onto a remote machine and watched it fail to connect.
  */
 
-type Step = 'account' | 'ai' | 'notifications' | 'agent' | 'done';
-const ORDER: Step[] = ['account', 'ai', 'notifications', 'agent', 'done'];
+type Step = 'account' | 'address' | 'ai' | 'notifications' | 'agent' | 'done';
+const ORDER: Step[] = ['account', 'address', 'ai', 'notifications', 'agent', 'done'];
 const LABELS: Record<Step, string> = {
-  account: 'Account', ai: 'AI', notifications: 'Alerts', agent: 'Agent', done: 'Done',
+  account: 'Account', address: 'Address', ai: 'AI', notifications: 'Alerts', agent: 'Agent', done: 'Done',
 };
 
 // ── Strong default password (>=8, upper+lower+digit), crypto RNG ─────────────
@@ -69,7 +75,10 @@ const Fade: React.FC<{ on: string | number; children: React.ReactNode }> = ({ on
 const Progress: React.FC<{ step: Step }> = ({ step }) => {
   const { t } = useTranslation();
   const idx = ORDER.indexOf(step);
-  const steps = ORDER.slice(0, 4); // account, ai, notifications, agent
+  // Every step except the terminal 'done' card. Derived from ORDER rather than a
+  // hardcoded slice length so adding a step cannot desync the bar from the count
+  // in the caption below it.
+  const steps = ORDER.filter((s) => s !== 'done');
   return (
     <div className="mb-6">
       <div className="flex items-center gap-1.5 mb-2">
@@ -78,7 +87,9 @@ const Progress: React.FC<{ step: Step }> = ({ step }) => {
         ))}
       </div>
       <p className="text-[11px] text-tertiary">
-        {step === 'done' ? t('Setup complete') : t('Step {{n}} of 4 · {{label}}', { n: idx + 1, label: t(LABELS[step]) })}
+        {step === 'done'
+          ? t('Setup complete')
+          : t('Step {{n}} of {{total}} · {{label}}', { n: idx + 1, total: steps.length, label: t(LABELS[step]) })}
       </p>
     </div>
   );
@@ -141,6 +152,94 @@ const StepFrame: React.FC<{
         </div>
       </div>
     </div>
+  );
+};
+
+// ═══ Step: public address ════════════════════════════════════════════════════
+/**
+ * Classify the origin the browser is currently talking to. Everything this step
+ * warns about is derivable from it, and the browser's own address bar is the
+ * most reliable source there is — it is, by definition, an address that reaches
+ * this coordinator.
+ */
+type AddressKind = 'secure' | 'insecure' | 'local';
+function classifyOrigin(origin: string): AddressKind {
+  let url: URL;
+  try { url = new URL(origin); } catch { return 'local'; }
+  const host = url.hostname.toLowerCase();
+  const isLoopback =
+    host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.localhost');
+  if (isLoopback) return 'local';
+  return url.protocol === 'https:' ? 'secure' : 'insecure';
+}
+
+const AddressStep: React.FC<{ onNext: () => void; onBack: () => void; onSkipAll: () => void; onConfigured: (url: string) => void }> = ({ onNext, onBack, onSkipAll, onConfigured }) => {
+  const { t } = useTranslation();
+  // Prefill from the address bar. If the operator reached this page over
+  // https://writ.example.com then that IS the public URL, and asking them to
+  // retype it only invites a typo.
+  const [url, setUrl] = useState(() => window.location.origin);
+  const [busy, setBusy] = useState(false);
+  const kind = classifyOrigin(url);
+
+  const save = async () => {
+    const trimmed = url.trim().replace(/\/+$/, '');
+    if (!/^https?:\/\/.+/i.test(trimmed)) {
+      toast.error(t('Enter a full URL including https://'));
+      return;
+    }
+    setBusy(true);
+    try {
+      await updateNetworkSettings({ public_url: trimmed });
+      onConfigured(trimmed);
+      toast.success(t('Public address saved'));
+      onNext();
+    } catch (err) {
+      toast.error(apiErrorMessage(err, t('Could not save the address.')));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <StepFrame
+      title={t('Confirm your address')}
+      subtitle={t('The URL people open, and the one agents dial back on. It is baked into the agent install command you get in a moment.')}
+      onBack={onBack} onSkipAll={onSkipAll} onSkip={onNext}
+      primaryLabel={t('Save & continue')} onPrimary={save} busy={busy}
+    >
+      <div className="space-y-3.5">
+        <Field
+          label={t('Public URL')}
+          hint={t('Include the scheme. The hostname is trusted automatically — you do not need to configure anything else.')}
+        >
+          <input className={clsx(inputCls, 'font-mono')} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://writ.example.com" />
+        </Field>
+
+        {kind === 'local' && (
+          <div className="rounded-lg border border-border bg-canvas px-3 py-2.5 text-[12px] text-secondary leading-relaxed">
+            <span className="font-medium text-ink">{t('This address only works on this machine.')}</span>{' '}
+            {t('That is fine for trying things out. Agents on other machines cannot reach a localhost URL, so change this before you connect a fleet — or deploy on a domain with:')}
+            <pre className="mt-1.5 text-[11px] font-mono bg-ink text-white/90 rounded p-2 overflow-x-auto">./scripts/deploy.sh writ.example.com you@example.com</pre>
+          </div>
+        )}
+
+        {kind === 'insecure' && (
+          <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-[12px] text-amber-900 leading-relaxed">
+            <span className="font-medium">{t('This address is not encrypted.')}</span>{' '}
+            {t('Passwords and agent tokens would cross the network in the clear. Put TLS in front before you use this for real:')}
+            <pre className="mt-1.5 text-[11px] font-mono bg-amber-900 text-amber-50 rounded p-2 overflow-x-auto">./scripts/deploy.sh writ.example.com you@example.com</pre>
+          </div>
+        )}
+
+        {kind === 'secure' && (
+          <div className="flex items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-[12px] text-emerald-800 leading-relaxed">
+            <CheckCircleIcon className="w-4 h-4 shrink-0 mt-px" />
+            <span>{t('Served over HTTPS. Agents anywhere can reach this, and credentials stay encrypted in transit.')}</span>
+          </div>
+        )}
+      </div>
+    </StepFrame>
   );
 };
 
@@ -448,7 +547,8 @@ export const Setup: React.FC = () => {
 
   const [checking, setChecking] = useState(true);
   const [step, setStep] = useState<Step>('account');
-  const [done, setDone] = useState({ ai: false, notify: false, agent: false });
+  const [done, setDone] = useState({ address: false, ai: false, notify: false, agent: false });
+  const [publicUrl, setPublicUrl] = useState('');
 
   const [email, setEmail] = useState('admin@local');
   const [name, setName] = useState('Owner');
@@ -484,7 +584,7 @@ export const Setup: React.FC = () => {
     try {
       const { data } = await client.post('/auth/register', { email: email.trim(), password, name: name.trim() || null });
       setAuth(data.access_token, data.user, data.organization ?? null);
-      go('ai');
+      go('address');
     } catch (err: any) {
       if (err?.response?.status === 403) { toast.error(t('This coordinator already has an owner — please sign in.')); navigate('/login', { replace: true }); return; }
       toast.error(apiErrorMessage(err, t('Could not create your account.')));
@@ -531,6 +631,12 @@ export const Setup: React.FC = () => {
             </div>
           )}
 
+          {step === 'address' && (
+            <AddressStep
+              onNext={next} onBack={back} onSkipAll={skipAll}
+              onConfigured={(url) => { setPublicUrl(url); setDone((d) => ({ ...d, address: true })); }}
+            />
+          )}
           {step === 'ai' && <AiStep onNext={next} onBack={back} onSkipAll={skipAll} onConfigured={() => setDone((d) => ({ ...d, ai: true }))} />}
           {step === 'notifications' && <NotifyStep onNext={next} onBack={back} onSkipAll={skipAll} onConfigured={() => setDone((d) => ({ ...d, notify: true }))} />}
           {step === 'agent' && <AgentStep onNext={next} onBack={back} onSkipAll={skipAll} onConnected={() => setDone((d) => ({ ...d, agent: true }))} />}
@@ -546,6 +652,7 @@ export const Setup: React.FC = () => {
               <div className="space-y-1.5 mb-4">
                 {[
                   { ok: true, label: t('Admin account created') },
+                  { ok: done.address, label: done.address ? t('Public address · {{url}}', { url: publicUrl }) : t('Public address') },
                   { ok: done.ai, label: t('AI provider') },
                   { ok: done.notify, label: t('Notifications') },
                   { ok: done.agent, label: t('Agent connected') },

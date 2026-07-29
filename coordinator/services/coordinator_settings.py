@@ -259,9 +259,16 @@ async def get_network(db: AsyncSession) -> Dict[str, Any]:
         env_hosts = (os.getenv("ALLOWED_HOSTS", "") or "").split(",")
         trusted_hosts = [h.strip() for h in env_hosts if h.strip()]
 
+    from security import trusted_hosts as _trusted_hosts
+
     return {
         "public_url": public_url,
         "trusted_hosts": trusted_hosts,
+        # The allowlist the middleware is enforcing right now — the operator's
+        # entries plus the derived ones (this coordinator's own hostname,
+        # loopback). Surfaced so the UI can explain a rejected Host without logs.
+        "effective_trusted_hosts": _trusted_hosts.current(),
+        "trusted_hosts_enforced": _trusted_hosts.is_enforced(),
         "derived": _derive_network_urls(public_url),
     }
 
@@ -286,10 +293,46 @@ def _derive_network_urls(public_url: str) -> Dict[str, Optional[str]]:
     }
 
 
+async def apply_network_to_runtime(public_url: str, trusted_hosts: list) -> list:
+    """Push a persisted network section into the LIVE process state.
+
+    Both halves matter and both used to be half-done:
+
+    * ``public_url`` goes onto the settings object so ``recorder_proxy`` hands
+      agents the new gateway URL without a restart.
+    * ``trusted_hosts`` goes into ``security.trusted_hosts``, which the Host-header
+      middleware reads on every request. Before this call existed the field was
+      persisted and rendered in Settings → Network and enforced by NOTHING —
+      Starlette's TrustedHostMiddleware captured its allowlist once at startup.
+
+    Returns the effective host allowlist (the operator's entries merged over the
+    derived base, which always keeps loopback so the container healthcheck lives).
+    """
+    from config import settings
+    from security import trusted_hosts as _trusted_hosts
+
+    settings.writ_public_url = public_url or None
+    return _trusted_hosts.apply(trusted_hosts)
+
+
+async def restore_network_from_db(db: AsyncSession) -> None:
+    """Re-apply the persisted network section at boot.
+
+    Without this, a restart silently reverts to the env-only view: the operator's
+    saved Public URL and Trusted hosts would be shown in the UI (``get_network``
+    reads them back) while the running process enforced something else. Called
+    from main's lifespan.
+    """
+    section = await get_network(db)
+    await apply_network_to_runtime(section["public_url"], section["trusted_hosts"])
+
+
 async def set_network(db: AsyncSession, updates: Dict[str, Any]) -> Dict[str, Any]:
-    """Persist public_url + trusted_hosts. public_url is also pushed into the live
-    settings object so consumers (recorder_proxy gateway_ws_url) pick it up without
-    a restart."""
+    """Persist public_url + trusted_hosts, and live-apply both.
+
+    Neither value needs a restart: the public URL flows into the settings object
+    that recorder_proxy reads, and the trusted hosts flow into the live Host-header
+    allowlist."""
     current = await get_network(db)
 
     public_url = current["public_url"]
@@ -303,16 +346,18 @@ async def set_network(db: AsyncSession, updates: Dict[str, Any]) -> Dict[str, An
     to_store = {"public_url": public_url, "trusted_hosts": trusted_hosts}
     await set_section(db, KEY_NETWORK, to_store)
 
-    # Live-apply the public URL so recorder_proxy hands agents the new gateway URL
-    # without a coordinator restart (it reads settings.writ_public_url directly).
-    try:
-        from config import settings
-        settings.writ_public_url = public_url or None
-    except Exception:
-        pass
+    # Live-apply BOTH halves — see apply_network_to_runtime. This is not
+    # best-effort: if the host allowlist fails to update, the operator has just
+    # been told their new hostname is trusted when it is not, so let the error
+    # surface as a failed save instead of a silent lie.
+    effective_hosts = await apply_network_to_runtime(public_url, trusted_hosts)
 
     return {
         "public_url": public_url,
         "trusted_hosts": trusted_hosts,
+        # What the middleware will actually accept, including the derived
+        # entries (the public URL's own hostname, loopback). The UI shows this
+        # so "why is my alias still rejected?" is answerable without logs.
+        "effective_trusted_hosts": effective_hosts,
         "derived": _derive_network_urls(public_url),
     }

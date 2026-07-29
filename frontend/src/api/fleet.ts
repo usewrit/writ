@@ -4,9 +4,22 @@ import client from './client';
 // /fleet page. Served by coordinator/routers/fleet.py (prefix "/api/fleet").
 
 export interface FleetAgentCapacity {
+  /** The EFFECTIVE cap the scheduler uses, resolved from the three inputs below. */
   max_sessions: number | null;
   active_sessions: number | null;
   free_slots: number | null;
+  /**
+   * What the machine says it can handle, from its heartbeat. Null until the
+   * agent's first heartbeat. The stock writ-agent reports 2, which is why a
+   * freshly enrolled agent looks capped at two sessions.
+   */
+  agent_reported?: number | null;
+  /** The ceiling issued in this agent's token — the most it may claim for itself. */
+  token_ceiling?: number | null;
+  /** The operator's pin. Null = follow whatever the agent reports. */
+  operator_override?: number | null;
+  /** Upper bound accepted by the capacity endpoint. */
+  limit?: number;
 }
 
 export interface FleetAgent {
@@ -256,6 +269,21 @@ export const fleetApi = {
    */
   async removeAgent(agentId: string): Promise<void> {
     await client.delete(`/fleet/agents/${agentId}`);
+  },
+  /**
+   * Pin how many concurrent sessions this agent may be given, or pass null to
+   * clear the pin and follow the agent's own report again.
+   *
+   * Applies live when the agent is connected; when it is offline the override is
+   * persisted on its row and takes effect on the next connect (`applied` says
+   * which happened).
+   */
+  async setAgentCapacity(
+    agentId: string,
+    maxSessions: number | null,
+  ): Promise<{ agent_id: string; capacity: FleetAgentCapacity; applied: 'live' | 'on_next_connect' }> {
+    const r = await client.patch(`/fleet/agents/${agentId}/capacity`, { max_sessions: maxSessions });
+    return r.data;
   },
   /**
    * Bulk-remove agents in one call (the ids the operator selected, or every

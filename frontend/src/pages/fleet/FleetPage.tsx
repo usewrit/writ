@@ -11,6 +11,7 @@ import {
   SignalIcon,
   SignalSlashIcon,
   KeyIcon,
+  AdjustmentsHorizontalIcon,
 } from '@heroicons/react/24/outline';
 import { useRequireAuth } from '../../hooks/useAuth';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle';
@@ -18,6 +19,9 @@ import { useQuery } from '../../hooks/useQuery';
 import { SHELF_TOPBAR, RowsSkeleton } from '../../components/library/shelf';
 import { shelfFilterChipClass, shelfFilterCountClass } from '../../components/library/shelf';
 import { StatBar } from '../../components/ui/StatBar';
+import { Modal } from '../../components/ui/Modal';
+import { Button } from '../../components/ui/Button';
+import { NumberInput } from '../../components/ui/NumberInput';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { apiErrorMessage } from '../../api/client';
 import { FastConnectAgentModal } from '../../components/fleet/FastConnectAgentModal';
@@ -78,6 +82,132 @@ const RowCheck: React.FC<{
   </button>
 );
 
+// ── Capacity editor ────────────────────────────────────────────────────────
+/**
+ * Concurrent-session slots for one agent.
+ *
+ * This exists because the number in the meter had three possible sources and the
+ * UI showed none of them: the ceiling in the agent's token, whatever the agent
+ * reports about itself in its heartbeat (the stock writ-agent says 2 — the
+ * surprising value operators kept hitting), and an operator pin. All three are
+ * spelled out here so it is obvious which one is in force, and the pin is
+ * editable so a machine that can run eight browsers is allowed to.
+ */
+const CapacityModal: React.FC<{
+  agent: FleetAgent | null;
+  onClose: () => void;
+  onSaved: () => void;
+}> = ({ agent, onClose, onSaved }) => {
+  const { t } = useTranslation();
+  const cap = agent?.capacity;
+  const limit = cap?.limit ?? 64;
+  const [value, setValue] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  // Seed the field from the saved pin whenever the dialog OPENS. Keyed off the
+  // agent id rather than a mount effect so opening another row cannot show the
+  // previous row's number for a frame — this component stays mounted.
+  //
+  // The `!agent` branch is what makes reopening the SAME agent work: without it
+  // `seededFor` still equals that id on the second open, the re-seed is skipped,
+  // and the operator sees the value they typed and cancelled instead of what is
+  // actually saved.
+  const [seededFor, setSeededFor] = useState<string | null>(null);
+  if (!agent) {
+    if (seededFor !== null) setSeededFor(null);
+  } else if (seededFor !== agent.id) {
+    setSeededFor(agent.id);
+    setValue(agent.capacity.operator_override ?? null);
+  }
+
+  const save = async (next: number | null) => {
+    if (!agent) return;
+    setSaving(true);
+    try {
+      const res = await fleetApi.setAgentCapacity(agent.id, next);
+      toast.success(
+        res.applied === 'live'
+          ? t('Slots updated')
+          : t('Saved — applies when this agent reconnects'),
+      );
+      onSaved();
+      onClose();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, t('Could not update slots')));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      isOpen={!!agent}
+      onClose={onClose}
+      title={t('Session slots')}
+      subtitle={agent?.name}
+      size="sm"
+      footer={
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            disabled={saving || cap?.operator_override == null}
+            onClick={() => save(null)}
+            className="text-[12px] text-tertiary transition-colors hover:text-ink disabled:opacity-40"
+          >
+            {t('Use the agent’s own limit')}
+          </button>
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" onClick={onClose}>{t('Cancel')}</Button>
+            <Button onClick={() => save(value)} loading={saving} disabled={value == null || value < 1}>
+              {t('Save')}
+            </Button>
+          </div>
+        </div>
+      }
+    >
+      <div className="space-y-4">
+        <NumberInput
+          label={t('Concurrent sessions')}
+          value={value}
+          onChange={setValue}
+          min={1}
+          max={limit}
+          step={1}
+        />
+        <p className="text-[12px] leading-relaxed text-secondary">
+          {t('How many browser sessions this machine may run at once. One slot is roughly one browser, so match it to the RAM and cores you are willing to give it.')}
+        </p>
+
+        <div className="space-y-1.5 rounded-lg border border-border bg-canvas px-3 py-2.5 text-[12px]">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-tertiary">{t('The agent reports')}</span>
+            <span className="font-mono text-ink">{cap?.agent_reported ?? t('not yet')}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-tertiary">{t('Its token allows')}</span>
+            <span className="font-mono text-ink">{cap?.token_ceiling ?? '—'}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-tertiary">{t('In effect now')}</span>
+            <span className="font-mono font-semibold text-ink">{cap?.max_sessions ?? '—'}</span>
+          </div>
+        </div>
+
+        {cap?.agent_reported != null && cap.operator_override == null && (
+          <p className="text-[12px] leading-relaxed text-secondary">
+            {t('This agent is limiting itself to {{n}}. Setting a number above overrides that.', { n: cap.agent_reported })}
+          </p>
+        )}
+        {!agent?.online && (
+          <p className="text-[12px] leading-relaxed text-secondary">
+            {t('This agent is offline. Your change is saved now and applies the next time it connects.')}
+          </p>
+        )}
+      </div>
+    </Modal>
+  );
+};
+
 // ── Agent row ──────────────────────────────────────────────────────────────
 const AgentRow: React.FC<{
   a: FleetAgent;
@@ -85,7 +215,8 @@ const AgentRow: React.FC<{
   revealAll: boolean;
   onToggle: (id: string) => void;
   onRemove: (a: FleetAgent) => void;
-}> = React.memo(({ a, checked, revealAll, onToggle, onRemove }) => {
+  onEditCapacity: (a: FleetAgent) => void;
+}> = React.memo(({ a, checked, revealAll, onToggle, onRemove, onEditCapacity }) => {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
   const cap = a.capacity;
@@ -127,18 +258,40 @@ const AgentRow: React.FC<{
         </div>
       </div>
 
-      {/* Capacity meter — only meaningful while online with a known slot count. */}
+      {/* Capacity meter — only meaningful while online with a known slot count.
+          Clickable: it is the number operators most want to change, and burying
+          that behind the overflow actions is what left people believing a
+          2-slot agent was a hard limit. */}
       {a.online && hasCap && (
-        <div className="hidden items-center gap-1.5 @pair/stage:flex" title={t('{{free}} of {{max}} session slots free', { free: cap.free_slots ?? 0, max: cap.max_sessions })}>
+        <button
+          type="button"
+          onClick={() => onEditCapacity(a)}
+          title={t('{{free}} of {{max}} session slots free — click to change', { free: cap.free_slots ?? 0, max: cap.max_sessions })}
+          className="hidden items-center gap-1.5 rounded-lg px-1.5 py-1 transition-colors hover:bg-surface @pair/stage:flex"
+        >
           <div className="h-1.5 w-16 overflow-hidden rounded-full bg-border">
             <div className="h-full rounded-full bg-ink/40" style={{ width: `${usedPct}%` }} />
           </div>
           <span className="w-9 text-right text-[10px] tabular-nums text-tertiary">{cap.free_slots ?? 0}/{cap.max_sessions}</span>
-        </div>
+          {cap.operator_override != null && (
+            <span
+              title={t('Slot count pinned by you')}
+              className="h-1.5 w-1.5 shrink-0 rounded-full bg-ink/50"
+            />
+          )}
+        </button>
       )}
 
       {/* Inline actions — revealed on hover / focus-within. */}
       <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+        <button
+          onClick={() => onEditCapacity(a)}
+          title={t('Session slots')}
+          aria-label={t('Session slots')}
+          className="flex h-7 w-7 items-center justify-center rounded-lg text-tertiary transition-colors hover:bg-surface hover:text-ink"
+        >
+          <AdjustmentsHorizontalIcon className="h-4 w-4" />
+        </button>
         <button
           onClick={copyId}
           title={t('Copy agent id')}
@@ -269,6 +422,11 @@ export const FleetPage: React.FC = () => {
   const [pending, setPending] = useState<Pending | null>(null);
   const [pendingBusy, setPendingBusy] = useState(false);
 
+  // The agent whose session slots are being edited. Held by ID rather than by
+  // object so the 4s poll's fresh row flows into the open modal — keeping the
+  // object would pin it to a snapshot and show stale live counts while open.
+  const [capacityAgentId, setCapacityAgentId] = useState<string | null>(null);
+
   const agents: FleetAgent[] = useMemo(() => agentsData?.agents ?? [], [agentsData]);
   const onlineCount = agentsData?.online_count ?? agents.filter(a => a.online).length;
   const offlineAgents = useMemo(() => agents.filter(a => !a.online), [agents]);
@@ -279,6 +437,15 @@ export const FleetPage: React.FC = () => {
     if (agentFilter === 'offline') return offlineAgents;
     return agents;
   }, [agents, offlineAgents, agentFilter]);
+
+  // Resolved from the live list on every render, so an open editor tracks the
+  // poll. Resolves to null once the agent disappears, which also closes it.
+  const capacityAgent = useMemo(
+    () => agents.find((a) => a.id === capacityAgentId) ?? null,
+    [agents, capacityAgentId],
+  );
+
+  const openCapacity = useCallback((a: FleetAgent) => setCapacityAgentId(a.id), []);
 
   // Aggregate free/total session capacity across the online fleet.
   const capacity = useMemo(() => {
@@ -538,6 +705,7 @@ export const FleetPage: React.FC = () => {
                     revealAll={checkedAgents.size > 0}
                     onToggle={toggleAgent}
                     onRemove={askRemoveAgent}
+                    onEditCapacity={openCapacity}
                   />
                 ))}
               </div>
@@ -594,6 +762,13 @@ export const FleetPage: React.FC = () => {
         confirmText={pending?.confirmText}
         variant="danger"
         isLoading={pendingBusy}
+      />
+
+      {/* ── Session slots for one agent ── */}
+      <CapacityModal
+        agent={capacityAgent}
+        onClose={() => setCapacityAgentId(null)}
+        onSaved={refreshAgents}
       />
 
       {/* ── Connect modal — the SHARED flow (also rendered by the recorder gate). ── */}

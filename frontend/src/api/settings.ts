@@ -41,7 +41,18 @@ export interface NetworkDerived {
 
 export interface NetworkSettings {
   public_url: string;
+  /** The EXTRA hostnames the operator typed in. Additive, not the whole list. */
   trusted_hosts: string[];
+  /**
+   * What the Host-header middleware is actually enforcing right now: the
+   * operator's entries merged with the derived ones (this coordinator's own
+   * hostname from public_url, plus loopback for the container healthcheck).
+   * Shown read-only so "why is my alias still rejected?" is answerable without
+   * reading container logs.
+   */
+  effective_trusted_hosts: string[];
+  /** False in development, where any Host is accepted. */
+  trusted_hosts_enforced: boolean;
   derived: NetworkDerived;
 }
 

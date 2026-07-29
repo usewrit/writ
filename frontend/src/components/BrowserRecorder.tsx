@@ -444,6 +444,38 @@ const getStepTitle = (step: RecordedStep): string => {
 // ── Captured-request → workflow-step helpers ───────────────────────────────
 
 /** Short "path?query" form of a URL for compact display. */
+/**
+ * How long a burst of typing may pause before it is shipped as one `type` action.
+ *
+ * Sending a WebSocket action per character made the agent do a `page.evaluate`
+ * plus a keyboard round-trip for every keystroke, each holding its session write
+ * guard — a fast typist kept that guard churning, which is what raced page
+ * navigation and wedged the recording session. Coalescing turns a typed word into
+ * a single action.
+ *
+ * 60ms is below the gap between deliberate keystrokes (~100ms+ even for fast
+ * typists) so a pause inside a word does not split it, while staying short enough
+ * that the remote page reacts as the user types rather than in visible chunks.
+ * Anything that acts on the text — a special key, a click, focus leaving — flushes
+ * immediately regardless, so this only ever delays, never reorders.
+ */
+const TYPE_FLUSH_IDLE_MS = 60;
+
+/**
+ * Does this element own the keystroke, rather than the remote page?
+ *
+ * While recording, keys are captured at the window so that typing keeps working
+ * after focus drifts off the canvas. That capture must never eat input meant for
+ * the recorder's OWN chrome — the URL bar, the AI chat box, a step-rename field.
+ * Anything editable is the local UI's, everything else is the page's.
+ */
+const isEditableTarget = (el: HTMLElement | null): boolean => {
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+};
+
 const prettyPath = (url: string): string => {
   try {
     const u = new URL(url);
@@ -1113,6 +1145,10 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   // can map clicks/drags to page coordinates. Only active when `selectionMode` is set.
   const selectionContainerRef = useRef<HTMLDivElement>(null);
   const frameSizeRef = useRef<{ w: number; h: number }>({ w: 1280, h: 800 });
+  // Human-behavior layer capture: wall-clock of the last typed key (for the
+  // per-key `key_timings` delta). A new field's first key sends delta 0 (no
+  // leading pause), so this resets on a stage click and on any special key.
+  const lastKeyAtRef = useRef<number>(0);
   // Throttle for the cursor trajectory streamed during normal recording (~50ms).
   const lastMouseMoveRef = useRef<number>(0);
   const selection = useRecorderSelection({
@@ -1951,11 +1987,33 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   }, []);
 
   // Handle canvas click - send to browser
+  // Whether keystrokes currently belong to the remote page (see the keyboard
+  // section below). Declared here because the canvas click is what arms it.
+  const stageEngagedRef = useRef(false);
+  // Indirection to the coalescing flush, so handlers defined ABOVE the keyboard
+  // section can order their frames after any buffered text without either a
+  // forward reference or a dependency cycle between the two callbacks.
+  const flushTypeBufferRef = useRef<(() => void) | null>(null);
+
   const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     if (connectionState !== 'recording' || !wsRef.current) return;
 
     const canvas = canvasRef.current;
     if (!canvas) return;
+
+    // Anything the user typed belongs BEFORE this click. Without the flush, a
+    // click within the coalescing window (type a query, immediately hit the
+    // search button) would reach the agent first and the fill would be recorded
+    // against a page that had already navigated.
+    flushTypeBufferRef.current?.();
+
+    // Arm keyboard capture. This click is almost always the user focusing the
+    // very field they are about to type into, so it is the exact moment their
+    // keystrokes start belonging to the remote page rather than to our chrome.
+    // Focusing the canvas too keeps native affordances (scroll, focus-ring
+    // suppression) behaving as before.
+    stageEngagedRef.current = true;
+    canvas.focus({ preventScroll: true });
 
     const rect = canvas.getBoundingClientRect();
     // Scale into the agent's ACTUAL viewport (1280x800 Python vs 1920x1080 Rust),
@@ -1978,6 +2036,9 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
       return;
     }
 
+    // A click focuses a (possibly new) field — reset the typing-cadence clock so
+    // the next field's first key carries no leading pause.
+    lastKeyAtRef.current = 0;
     wsRef.current.send(JSON.stringify({
       type: 'action',
       action: 'click',
@@ -2053,31 +2114,189 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
     toast.success(t('Extraction step added'));
   }, [extractElementInfo, extractOutputName, extractType, extractAttribute, extractScript]);
 
-  // Handle keyboard input
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (connectionState !== 'recording' || !wsRef.current) return;
+  // ── Keyboard input ────────────────────────────────────────────────────────
+  //
+  // Four things were wrong with capturing this as `onKeyDown` on the <canvas>,
+  // and all four produced the same user-visible symptom — "it doesn't record
+  // what I type":
+  //
+  // 1. A React `onKeyDown` prop only fires while the canvas itself holds DOM
+  //    focus, and nothing kept it focused. Clicking any control in the recorder
+  //    chrome (a step row, a mode toggle, the URL bar) moved focus away and from
+  //    then on every keystroke went nowhere. No `type` action was sent, so the
+  //    agent never built a pending fill, and the finished workflow had a
+  //    `press Enter` with no `fill` before it. There was no feedback at all,
+  //    because a focused canvas looks identical to an unfocused one. Capturing at
+  //    the WINDOW removes focus from the equation.
+  // 2. One WebSocket action per character. Each one costs the agent a full
+  //    `page.evaluate` (to read the focused field's metadata) plus a keyboard
+  //    round-trip, all while it holds the session write guard — so a fast typist
+  //    generated a continuous stream of guard acquisitions, which is precisely
+  //    what raced a navigation and wedged the session. Characters are now
+  //    coalesced into one action per burst.
+  // 3. Paste was silently dropped: Cmd/Ctrl+V arrived as `e.key === 'v'` and was
+  //    forwarded as the literal letter v.
+  // 4. Composed input (IME, and dead-key accents on an AZERTY keyboard) produced
+  //    `e.key === 'Dead'` or 'Process' and was lost. `compositionend` carries the
+  //    real text.
+  //
+  // `stageEngagedRef` (declared with the canvas handlers above, because the canvas
+  // click is what arms it) keeps window capture from stealing every keystroke on
+  // the page: it arms on a click INSIDE the live view — the same click that
+  // focuses the field the user is about to type into — and disarms as soon as a
+  // real form control in the recorder's own UI takes focus.
+  //
+  // Coalescing buffer: pending characters, their inter-key deltas, and the flush
+  // timer. `key_timings` feeds the agent's human-behaviour layer, which already
+  // reads it off the `type` action (`action_handler::handle_type`) but has never
+  // received one — the per-character sender had no deltas to report.
+  const typeBufRef = useRef('');
+  const keyTimingsRef = useRef<number[]>([]);
+  const typeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    // Prevent default for most keys when recording
-    if (!e.metaKey && !e.ctrlKey) {
-      e.preventDefault();
+  const sendRecorderFrame = useCallback((frame: Record<string, unknown>): boolean => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify(frame));
+    return true;
+  }, []);
+
+  /** Ship whatever characters are buffered as ONE `type` action. */
+  const flushTypeBuffer = useCallback(() => {
+    if (typeTimerRef.current) {
+      clearTimeout(typeTimerRef.current);
+      typeTimerRef.current = null;
     }
+    const text = typeBufRef.current;
+    const timings = keyTimingsRef.current;
+    typeBufRef.current = '';
+    keyTimingsRef.current = [];
+    if (!text) return;
+    if (!sendRecorderFrame({ type: 'action', action: 'type', text, key_timings: timings })) {
+      // The socket went away mid-burst. Dropping is correct: the agent has no
+      // session to attribute it to, and re-queueing would replay stale text into
+      // whatever page loads next.
+      return;
+    }
+  }, [sendRecorderFrame]);
+
+  // Publish the flush to the handlers defined above (canvas click) that must
+  // order their frames after any buffered text.
+  flushTypeBufferRef.current = flushTypeBuffer;
+
+  /** Buffer a run of text, flushing after a short idle gap. */
+  const queueTypedText = useCallback((text: string, immediate = false) => {
+    if (!text) return;
+    const now = Date.now();
+    // First character of a burst has no meaningful predecessor delta.
+    const delta = lastKeyAtRef.current ? Math.min(now - lastKeyAtRef.current, 5000) : 0;
+    lastKeyAtRef.current = now;
+    typeBufRef.current += text;
+    // One delta per character so the agent's cadence model lines up with the
+    // string it receives; a multi-character chunk (paste, IME commit) arrives at
+    // once, so the characters after the first have no inter-key gap.
+    keyTimingsRef.current.push(delta, ...new Array(Math.max(0, text.length - 1)).fill(0));
+
+    if (immediate) {
+      flushTypeBuffer();
+      return;
+    }
+    if (typeTimerRef.current) clearTimeout(typeTimerRef.current);
+    typeTimerRef.current = setTimeout(flushTypeBuffer, TYPE_FLUSH_IDLE_MS);
+  }, [flushTypeBuffer]);
+
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    if (connectionState !== 'recording') return;
+    if (!stageEngagedRef.current) return;
+    // Mid-composition keydowns are placeholders ('Dead', 'Process', keyCode 229);
+    // the real text arrives on compositionend.
+    if (e.isComposing || e.keyCode === 229) return;
+
+    // Never swallow typing aimed at the recorder's OWN inputs (URL bar, AI chat,
+    // rename fields). `focusin` normally disarms us first; this is the check for
+    // anything that takes focus without firing one.
+    if (isEditableTarget(e.target as HTMLElement | null)) return;
+
+    // Leave the browser's own chords alone — copy, paste, reload, devtools. They
+    // are not text, and forwarding the base key typed a literal letter instead.
+    // (Paste is handled properly by the `paste` listener below.)
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
 
     const specialKeys = ['Enter', 'Tab', 'Escape', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
 
     if (specialKeys.includes(e.key)) {
-      wsRef.current.send(JSON.stringify({
-        type: 'action',
-        action: 'press',
-        key: e.key,
-      }));
+      // Order matters: the buffered text must land BEFORE the key that acts on
+      // it, or the agent records `press Enter` and then a fill for a field the
+      // page has already submitted.
+      flushTypeBuffer();
+      // A special key ends the current typing burst — reset the cadence clock so
+      // the next field's first char carries no leading pause.
+      lastKeyAtRef.current = 0;
+      // Tab would move focus inside OUR page, Backspace can navigate back, and
+      // Enter/space scroll. The keystroke belongs to the remote page.
+      e.preventDefault();
+      sendRecorderFrame({ type: 'action', action: 'press', key: e.key });
     } else if (e.key.length === 1) {
-      wsRef.current.send(JSON.stringify({
-        type: 'action',
-        action: 'type',
-        text: e.key,
-      }));
+      e.preventDefault();
+      queueTypedText(e.key);
     }
-  }, [connectionState]);
+  }, [connectionState, flushTypeBuffer, queueTypedText, sendRecorderFrame]);
+
+  useEffect(() => {
+    if (connectionState !== 'recording') {
+      stageEngagedRef.current = false;
+      return;
+    }
+
+    const onFocusIn = (e: FocusEvent) => {
+      if (isEditableTarget(e.target as HTMLElement | null)) {
+        // Focus moved into our own chrome — stop capturing, and do not strand
+        // half a word in the buffer.
+        flushTypeBuffer();
+        stageEngagedRef.current = false;
+      }
+    };
+
+    const onPaste = (e: ClipboardEvent) => {
+      if (!stageEngagedRef.current) return;
+      if (isEditableTarget(e.target as HTMLElement | null)) return;
+      const text = e.clipboardData?.getData('text') ?? '';
+      if (!text) return;
+      e.preventDefault();
+      queueTypedText(text, true);
+    };
+
+    const onCompositionEnd = (e: CompositionEvent) => {
+      if (!stageEngagedRef.current) return;
+      if (isEditableTarget(e.target as HTMLElement | null)) return;
+      if (e.data) queueTypedText(e.data, true);
+    };
+
+    // Anything that ends the burst from outside: the tab going away, or the
+    // window losing focus. Flush so the text is attributed to the field it was
+    // typed into rather than arriving after the next navigation.
+    const onWindowBlur = () => flushTypeBuffer();
+    const onVisibility = () => { if (document.hidden) flushTypeBuffer(); };
+
+    // Capture phase: we must see the key before a bubbling handler consumes it.
+    window.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('focusin', onFocusIn);
+    window.addEventListener('paste', onPaste, true);
+    window.addEventListener('compositionend', onCompositionEnd, true);
+    window.addEventListener('blur', onWindowBlur);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('focusin', onFocusIn);
+      window.removeEventListener('paste', onPaste, true);
+      window.removeEventListener('compositionend', onCompositionEnd, true);
+      window.removeEventListener('blur', onWindowBlur);
+      document.removeEventListener('visibilitychange', onVisibility);
+      // Leaving the recording state must not strand buffered characters, and the
+      // timer must not outlive the effect and fire against a dead socket.
+      flushTypeBuffer();
+    };
+  }, [connectionState, handleKeyDown, flushTypeBuffer, queueTypedText]);
 
   // Handle scroll - include mouse position to detect container scrolls (textarea, etc.)
   const handleWheel = useCallback((e: React.WheelEvent) => {
@@ -3642,7 +3861,10 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                           ref={canvasRef}
                           onClick={selectionMode ? selection.canvasProps.onClick : handleCanvasClick}
                           onMouseMove={selectionMode ? undefined : handleCanvasMouseMove}
-                          onKeyDown={handleKeyDown}
+                          // No onKeyDown here on purpose — keys are captured at the
+                          // window (see handleKeyDown) so typing survives focus
+                          // leaving the canvas. A handler here as well would send
+                          // every keystroke twice.
                           onWheel={handleWheel}
                           tabIndex={0}
                           className={clsx(
@@ -3659,6 +3881,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                           )}
                           style={{ outline: 'none' }}
                         />
+
                         {/* Monitor "check target" selection overlays (element flash, visual zones,
                             transient pick error, and the zone/area drawing surface). */}
                         {selectionMode && (connectionState === 'recording' || connectionState === 'connected') && (

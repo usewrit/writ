@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@fontsource/inter": "^5.2.8",
-    "@headlessui/react": "^1.7.17",
+    "@headlessui/react": "^2.2.10",
     "@heroicons/react": "^2.1.1",
     "axios": "^1.6.2",
     "clsx": "^2.0.0",

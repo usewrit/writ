@@ -42,9 +42,9 @@ PDFs and scanned pages, and dispatches all browser work to a fleet of lightweigh
 > web UI); it never launches a browser itself.
 
 <div align="center">
-  <img src="./assets/media/record-steps.gif" alt="Recording a workflow: a live browser inside step 2 of the wizard, with each click captured as an editable step" width="100%">
+  <img src="./assets/media/record-to-api.gif" alt="The full flow: name a workflow, drive a live browser while every click is captured as a step, then finish on a callable REST endpoint with a ready-to-paste curl command" width="100%">
   <br/>
-  <sub><b>Record once.</b> Drive a real browser and every action lands as an editable step — then replay it forever at zero AI-token cost.</sub>
+  <sub><b>Record once → callable API.</b> Drive a real browser, every action lands as an editable step, and you finish holding an endpoint you can curl. Replay costs no AI tokens.</sub>
 </div>
 
 ## Quickstart
@@ -179,14 +179,16 @@ fill these into `.env`. Never commit the filled-in `.env`.
 
 ## What it looks like
 
+Four things it does, each shown doing it.
+
 <table>
 <tr>
-<td width="50%"><img src="./assets/media/monitors.png" alt="Monitors: three live checks with countdown to the next run, watched selector, and change history"><br/><sub><b>Monitors</b> — watch a page or a selector. Uptime, SSL expiry and change history, with the next check counting down.</sub></td>
-<td width="50%"><img src="./assets/media/connect-mcp.png" alt="Connect page: copy-paste MCP setup for Claude Code, Claude Desktop and Cursor, listing the tools the assistant receives"><br/><sub><b>Connect your AI</b> — paste one command and your workflows become tools. The page generates the snippet for your client, prefilled.</sub></td>
+<td width="50%"><img src="./assets/media/harvest-crawl.gif" alt="Harvest: set a page budget, dispatch agents across a site, watch pages collect in real time, and end with a queryable dataset"><br/><sub><b>Harvest</b> — point it at a whole site. The crawl shards across your fleet; 100 pages, 0 failed, straight into a dataset you can query, export or call over the API.</sub></td>
+<td width="50%"><img src="./assets/media/monitor-live.gif" alt="A monitor counting down to its next check, then landing one and resetting, with the watched selector and change history"><br/><sub><b>Monitor</b> — watch a page or a selector. Uptime, SSL expiry and change history, with the next check counting down and firing on schedule.</sub></td>
 </tr>
 <tr>
-<td width="50%"><img src="./assets/media/workflows.png" alt="Workflows list with schedules, step counts and run state"><br/><sub><b>Workflows</b> — every recording is an editable step list, with its schedule and run history beside it.</sub></td>
-<td width="50%"><img src="./assets/media/fleet.png" alt="Fleet page showing a connected agent with its free capacity"><br/><sub><b>Fleet</b> — connect as many agents as you like, wherever you run them. The connect command is generated for you.</sub></td>
+<td width="50%"><img src="./assets/media/automation-blocks.gif" alt="Building an automation from blocks: a workflow event as the trigger, a condition on the run result, then a notification action with template placeholders"><br/><sub><b>Automate</b> — trigger on a workflow or monitor event, branch on the result, then notify, POST a webhook or run another workflow. Every block exposes its outputs as <code>{{placeholders}}</code> the next one can read.</sub></td>
+<td width="50%"><img src="./assets/media/connect-mcp.png" alt="Connect page: copy-paste MCP setup for Claude Code, Claude Desktop and Cursor, listing the tools the assistant receives"><br/><sub><b>Connect your AI</b> — paste one command and your workflows become tools. The page generates the snippet for your client, prefilled.</sub></td>
 </tr>
 </table>
 

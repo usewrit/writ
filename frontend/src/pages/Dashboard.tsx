@@ -14,7 +14,6 @@ import { CreateRail, FleetStatus } from '../components/home/HomeRail';
 import { homeHealthApi } from '../api/homeHealth';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { Stagger } from '../components/ui/Animated';
 import { NavMini, type NavMiniKind } from '../components/ui/NavMini';
 import {
   ArrowRightIcon,
@@ -159,31 +158,41 @@ export const Dashboard: React.FC = () => {
           spans the full width, which also lets it sit flush with the grid below.
           The mono glyph vocabulary (`▸API` / `MON` / `CRWL`) is kept — it is how
           the nav names these same surfaces. */}
-      <Stagger
-        className="mt-5 grid grid-cols-1 divide-y divide-border overflow-hidden rounded-xl border border-ink/15 bg-surface shadow-sm @pair/stage:grid-cols-3 @pair/stage:divide-x @pair/stage:divide-y-0"
-        staggerMs={60}
-      >
+      {/* A plain grid, NOT <Stagger>: Stagger wraps every child in its own
+          `div.stagger-item`, which makes the WRAPPER the grid item and leaves the
+          button sizing itself inside an auto-height, auto-stretch box — so the
+          button no longer spanned its cell and the hover fill stopped short, which
+          is what read as dead space on the right. With the buttons as direct grid
+          children they stretch on both axes, `divide-x` rules fall between the
+          buttons themselves, and the fill covers the whole cell. */}
+      <div className="mt-5 grid grid-cols-1 divide-y divide-border overflow-hidden rounded-xl border border-ink/15 bg-surface shadow-sm @pair/stage:grid-cols-3 @pair/stage:divide-x @pair/stage:divide-y-0">
         {START_DOORS.map(door => (
           <button
             key={door.id}
             data-tour={door.tour}
             onClick={() => navigate(door.to)}
-            className="nav-row group flex h-full flex-col justify-start px-5 py-4 text-left transition-colors duration-200 hover:bg-hover/50"
+            className="nav-row group flex w-full flex-col items-start justify-start px-5 py-4 text-left transition-colors duration-200 hover:bg-hover/50"
           >
-            <span className="flex items-center gap-2">
+            {/* The arrow is pushed to the FAR RIGHT (`ml-auto`), not tucked in after
+                the title. Filling the whole cell on hover exposes wherever the
+                content stops, and a title row that ended mid-cell left a wide dead
+                band to its right that only appeared on hover. Anchoring the arrow
+                to the trailing edge makes the row span the cell, so the fill reads
+                as a row rather than as a highlight with a hole in it. */}
+            <span className="flex w-full items-center gap-2">
               <span className="font-mono text-[10px] leading-none tracking-[0.08em] text-tertiary transition-colors duration-200 group-hover:text-accent-strong">
                 {door.glyph}
               </span>
               <h2 className="text-[13.5px] font-semibold leading-tight text-ink">{t(door.title)}</h2>
-              <ArrowRightIcon className="h-3 w-3 shrink-0 text-tertiary transition-transform duration-200 group-hover:translate-x-0.5 motion-reduce:transition-none" />
               <NavMini kind={door.mini} />
+              <ArrowRightIcon className="ml-auto h-3.5 w-3.5 shrink-0 text-tertiary transition-transform duration-200 group-hover:translate-x-0.5 motion-reduce:transition-none" />
             </span>
             <p className="mt-1.5 text-xs leading-relaxed text-tertiary transition-colors duration-200 group-hover:text-secondary">
               {t(door.description)}
             </p>
           </button>
         ))}
-      </Stagger>
+      </div>
 
 
       {/* Working grid: operational feed (main) · create + local status (rail) */}

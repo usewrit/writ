@@ -25,7 +25,7 @@ jobs:
       HMAC_SECRET_KEY: ci-scratch-hmac-secret
       RECORDER_AUTH_SECRET: ci-scratch-recorder-secret
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -59,7 +59,7 @@ jobs:
       HMAC_SECRET_KEY: ci-scratch-hmac-secret
       RECORDER_AUTH_SECRET: ci-scratch-recorder-secret
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -96,7 +96,7 @@ jobs:
     name: Backend (ruff — correctness rules)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -125,7 +125,7 @@ jobs:
     name: Quality + SAST
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -183,7 +183,7 @@ jobs:
       ENVIRONMENT: development
       DOC_EXTRACT_REQUIRE_DEPS: "1"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -220,9 +220,9 @@ jobs:
     name: Frontend (build)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
@@ -282,9 +282,9 @@ jobs:
       matrix:
         node: ["18", "20", "22"]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
 

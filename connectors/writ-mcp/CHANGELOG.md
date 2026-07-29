@@ -5,6 +5,22 @@ All notable changes to `writ-mcp` are documented here. This project follows
 
 ## [Unreleased]
 
+### Added
+- **Saved crawls are callable, with freshness.** New relayed tools `writ_saved_crawls`,
+  `writ_run_saved_crawl` and `writ_saved_crawl_data`, plus `save_as` on
+  `writ_crawl_site`. A saved crawl is a stored crawl configuration with a stable slug,
+  so `max_age` now answers "give me this site's pages unless what you have is older
+  than N" instead of forcing a full re-crawl. Answers carry
+  `_cache: {hit, age_seconds, source_crawl_id}`.
+- **`max_age` on Writ Cloud.** The freshness argument previously worked only against a
+  self-hosted coordinator and was silently ignored by Writ Cloud — the worst outcome
+  for a connector meant to be interchangeable. Cloud now honours it on
+  `writ_run_workflow` and on every generated per-workflow tool, with the same argument
+  name, the same `_cache` stamp and the same success-only rule.
+
+_No connector changes were needed for any of this: the bridge holds no tool
+definitions, so server-side tools reach it for free._
+
 ## [1.0.0] — 2026-07-27
 
 First public release on npm.

@@ -49,15 +49,14 @@ import {
   ArrowDownTrayIcon,
   StopIcon,
 } from '@heroicons/react/24/outline';
+import { ScribeMark } from './brand/ScribeMark';
 import toast from 'react-hot-toast';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import i18n from '../i18n';
 import { triggerMini } from '../onboarding/miniTrigger';
-import { AIScriptAssistant } from './AIScriptAssistant';
 import { useRecorderCapability } from '../hooks/useRecorderCapability';
 import { getAccessToken } from '../utils/auth';
-import { statusStyle } from '../utils/statusStyle';
 import { ConnectAgentPanel } from './ConnectAgentPanel';
 import { PersonaWizard } from './workflows/PersonaWizard';
 import { AuthenticatorImportModal } from './workflows/AuthenticatorImportModal';
@@ -65,7 +64,7 @@ import type { WorkflowStep } from '../types/api';
 import { createStep, stepMeta, GROUP_NODE_STYLE } from './steps/stepMeta';
 import { StepConfigForm } from './steps/StepConfigForm';
 import { StepTypePalette } from './steps/StepTypePalette';
-import { Checkbox, NumberInput, Select, Switch } from './ui';
+import { Checkbox, NumberInput, Select, Switch, ScrollArea } from './ui';
 
 /**
  * Mint a single-use, short-lived WebSocket auth ticket so the long-lived JWT does
@@ -131,9 +130,22 @@ interface DetectedRequest {
   response_content_type?: string;
 }
 
+/**
+ * Steps that exist in the workflow but are never shown as list rows. A `wait` is
+ * inserted by the agent to reproduce the operator's own pauses (the stealth timing
+ * model) — nobody recorded it as an action, and showing one before every real step
+ * doubled the list. `wait_for_tab` / `wait_for_change` are NOT this: those are
+ * deliberate steps a person added.
+ */
+const isHiddenStepType = (type: string): boolean => type === 'wait';
+
 interface DisplayStep {
   id: string;
+  /** Index into `steps` — what edit / move / delete / segments all address. */
   index: number;
+  /** 1-based position among the VISIBLE steps. `index` skips numbers wherever a
+   *  hidden wait step sits, which reads as a bug in the list. */
+  displayNumber: number;
   type: string;
   IconComponent: HeroIcon;
   title: string;
@@ -227,7 +239,7 @@ interface BrowserRecorderProps {
   /** When true + initialUrl set, auto-connects on mount */
   autoConnect?: boolean;
   /** Preload an existing workflow's steps so the user can open it "live" and
-   *  replay/jump to any step to continue editing (vs. recording from scratch). */
+   *  keep editing them (vs. recording from scratch). */
   initialSteps?: RecordedStep[];
   /** Streaming mode: adds handler markers, advanced script editor, handler config */
   streamingMode?: boolean;
@@ -483,6 +495,42 @@ const prettyPath = (url: string): string => {
   } catch {
     return url;
   }
+};
+
+/**
+ * Header names whose VALUE is never painted into the UI. A captured request keeps
+ * its credential headers in memory (the replayed step needs them), but a rail the
+ * user screen-shares or screenshots must not show a bearer token. Mirrors
+ * `utils/sensitive.isSensitiveHeader` — kept local so the three recorder copies
+ * stay textually identical.
+ */
+const CREDENTIAL_HEADER_RE = /(authorization|cookie|token|secret|password|api-?key|auth|session)/i;
+
+/** Cap for a body preview. Long enough to read a payload, short enough that a
+ *  megabyte of JSON never lands in the DOM. */
+const BODY_PREVIEW_LIMIT = 1500;
+
+/** Pretty-print a captured body for display: JSON gets indented, anything else is
+ *  shown verbatim. Always bounded, never throws. */
+const previewBody = (body: unknown): string => {
+  if (body == null) return '';
+  let text: string;
+  if (typeof body === 'string') {
+    try {
+      text = JSON.stringify(JSON.parse(body), null, 2);
+    } catch {
+      text = body;
+    }
+  } else {
+    try {
+      text = JSON.stringify(body, null, 2);
+    } catch {
+      text = String(body);
+    }
+  }
+  return text.length > BODY_PREVIEW_LIMIT
+    ? `${text.slice(0, BODY_PREVIEW_LIMIT)}\n… (truncated)`
+    : text;
 };
 
 /** Derive a snake_case function name from a request, e.g. POST /api/auth/login → post_login. */
@@ -780,7 +828,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   const { t } = useTranslation();
   // Connection state
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
-  // Mirror into a ref so async flows (e.g. replayToStep waiting for a fresh
+  // Mirror into a ref so async flows (e.g. an agent turn waiting for a fresh
   // session to reach 'recording') can read the latest state without re-binding.
   const connectionStateRef = useRef(connectionState);
   connectionStateRef.current = connectionState;
@@ -846,6 +894,9 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   const [serverRenderedNotices, setServerRenderedNotices] = useState<{ url: string; message: string }[]>([]);
   const [addedRequestKeys, setAddedRequestKeys] = useState<Set<string>>(new Set());
   const [showDetected, setShowDetected] = useState(true);
+  // Which detected request is expanded to its details (method/endpoint/payload).
+  // Single-open: the rail is 20rem wide, two open bodies would bury the list.
+  const [expandedDetectedId, setExpandedDetectedId] = useState<string | null>(null);
 
   // Recording state
   const [url, setUrl] = useState(initialUrl || 'https://');
@@ -861,6 +912,12 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
     onStepsChangeRef.current?.(steps);
   }, [steps]);
   const [displaySteps, setDisplaySteps] = useState<DisplayStep[]>([]);
+  // Both step surfaces (the open rail's timeline and the collapsed strip) follow the
+  // recording: a step appended off-screen is a step the operator never sees. Pinning
+  // is unconditional — the list only ever grows at the end, and the rail is the live
+  // record of what is happening, not a document being read.
+  const stepListScrollRef = useRef<HTMLDivElement | null>(null);
+  const stepStripScrollRef = useRef<HTMLDivElement | null>(null);
   // id of the step whose inline edit form is open (null = none).
   const [editingStepId, setEditingStepId] = useState<string | null>(null);
   const [workflowName, setWorkflowName] = useState('');
@@ -885,7 +942,14 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   // (segments + handlers) / Targets (monitor check-target picker). Monitor mode defaults
   // to the Targets tab since choosing what to watch is the primary action.
   const [spineTab, setSpineTab] = useState<'steps' | 'requests' | 'functions' | 'targets'>(monitorMode ? 'targets' : 'steps');
-  const stepsAutoExpandedRef = useRef(false);
+  // Pin both step surfaces to the newest step. `showSteps`/`spineTab` are deps because
+  // the timeline MOUNTS scrolled to the top: expanding the rail on a long recording
+  // would otherwise land the operator at step 1 instead of the step that just happened.
+  useEffect(() => {
+    for (const el of [stepListScrollRef.current, stepStripScrollRef.current]) {
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+  }, [displaySteps.length, showSteps, spineTab]);
   const [showCode, setShowCode] = useState(false);
   const [generatedCode, setGeneratedCode] = useState('');
 
@@ -961,8 +1025,16 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   // The AI dock rests semi-hidden at the bottom and slides up when hovered/engaged.
   const [aiDockHovered, setAiDockHovered] = useState(false);
   const [aiChatInput, setAiChatInput] = useState('');
+  // The dock's prompt field, so other surfaces (the Advanced Script "AI Assist"
+  // button) can hand it the caret instead of opening a second assistant.
+  const aiChatInputRef = useRef<HTMLInputElement | null>(null);
   const [aiChatMessages, setAiChatMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string; actions?: any[]; kind?: 'thought' | 'run' | 'result' }>>([]);
   const [aiChatLoading, setAiChatLoading] = useState(false);
+  // In streaming mode the dock's job IS the advanced script (it applies whatever it
+  // writes straight into `streamingAdvancedScript`), so an in-flight turn locks the
+  // textarea and shows the generating overlay. Derived, not stored: a second flag
+  // could only ever get stuck out of step with the turn that owns it.
+  const aiScriptGenerating = streamingMode && aiChatLoading;
   // Stable id for this AI-assist chat. Sent as `user` so the streaming provider
   // routes this conversation to its OWN browser tab instead of the shared one.
   // Regenerated whenever the chat is cleared (= a new conversation).
@@ -1014,8 +1086,6 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   const [scraperDraft, setScraperDraft] = useState<{ script: string; variable: string; iframe?: string; summary: string } | null>(null);
   const [scraperTestResult, setScraperTestResult] = useState<{ loading?: boolean; ok?: boolean; result?: any; error?: string } | null>(null);
   const scraperStopRef = useRef(false);
-  const [showAIScriptAssistant, setShowAIScriptAssistant] = useState(false);
-  const [aiScriptGenerating, setAiScriptGenerating] = useState(false);
   const [manualTestLoading, setManualTestLoading] = useState(false);
   const [manualTestResult, setManualTestResult] = useState<any>(null);
   const [optimizeLoading, setOptimizeLoading] = useState(false);
@@ -1028,19 +1098,6 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   // Per-step fast-test results, keyed by step id.
   const [scriptTests, setScriptTests] = useState<Record<string, { loading?: boolean; ok?: boolean; result?: any; error?: string }>>({});
 
-  // Visual replay / "play to here": re-execute recorded steps 0..N on the live
-  // page so the browser lands exactly at the selected step. `statuses` is keyed
-  // by step index and drives the per-step cursor highlight in the timeline.
-  type ReplayStatus = 'running' | 'done' | 'skipped' | 'failed' | 'cancelled';
-  const [replayState, setReplayState] = useState<{
-    running: boolean;
-    target: number | null;
-    current: number | null;
-    statuses: Record<number, ReplayStatus>;
-  }>({ running: false, target: null, current: null, statuses: {} });
-  // Correlation id of the in-flight replay — guards against stale frames from a
-  // superseded run updating the UI.
-  const replayReqRef = useRef<string | null>(null);
   const [detectedSegments, setDetectedSegments] = useState<Array<{
     name: string; segment_type: string; step_indices: number[];
     depends_on: string[]; extract_outputs: string[];
@@ -1224,8 +1281,6 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
       setCurrentUrl('');
       setSteps(seed);
       setDisplaySteps([]);
-      setReplayState({ running: false, target: null, current: null, statuses: {} });
-      replayReqRef.current = null;
       setScreenshot(null);
       setSessionId(null);
       setConnectionState('disconnected');
@@ -1321,18 +1376,26 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   const lastFrameUrlRef = useRef('');
   const autoConnectTriggeredRef = useRef(false);
 
-  // Convert steps to display format with tab nesting awareness
+  // Convert steps to display format with tab nesting awareness. Hidden step types
+  // (see `isHiddenStepType`) are dropped here — ONE place, so the timeline, the
+  // collapsed strip and the function-builder chips can't disagree about what a step
+  // list is. Tab nesting is still tracked across the hidden ones, or a wait recorded
+  // inside a popup would end the nesting early.
   useEffect(() => {
     let inTab = false;
-    const converted = steps.map((step, index) => {
+    let visible = 0;
+    const converted = steps.flatMap((step, index) => {
       const options = step.options || {};
       const isTabOpener = step.type === 'wait_for_tab' || step.type === 'open_tab';
       if (isTabOpener) inTab = true;
       const isInTab = inTab && !isTabOpener && step.type !== 'tab_closed';
       if (step.type === 'tab_closed') inTab = false;
-      return {
+      if (isHiddenStepType(step.type)) return [];
+      visible += 1;
+      return [{
         id: step.id,
         index,
+        displayNumber: visible,
         type: step.type,
         IconComponent: getStepIconComponent(step),
         title: getStepTitle(step),
@@ -1350,14 +1413,14 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
         isInTab,
         isTabBoundary: isTabOpener || step.type === 'tab_closed',
         script: step.config?.script,
-      };
+      }];
     });
     setDisplaySteps(converted);
   }, [steps]);
 
-  // Connect to recorder WebSocket. `startUrlOverride` lets a caller (e.g. replay
-  // from a cold start) begin the session at a specific URL without racing the
-  // `url` state update through this callback's stale closure.
+  // Connect to recorder WebSocket. `startUrlOverride` lets a caller begin the
+  // session at a specific URL without racing the `url` state update through this
+  // callback's stale closure.
   const connect = useCallback(async (startUrlOverride?: string) => {
     const startUrl = (typeof startUrlOverride === 'string' && startUrlOverride.startsWith('http'))
       ? startUrlOverride : url;
@@ -1473,8 +1536,9 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
 
         // Monitor "check target" picker responses (element_info / elements_in_region) are consumed
         // here — they're transient picks, NOT recorded steps, so they never reach the switch below.
-        // consumeMessage only matches those two frame types (only sent in selection mode), so it's a
-        // safe no-op during normal recording; its identity is stable so this closure stays correct.
+        // consumeMessage only claims those frames while a picker mode is actually armed, so the
+        // recorder's OWN element_info uses (Extract mode, per-step "pick a selector") still reach
+        // the switch during normal recording; its identity is stable so this closure stays correct.
         if (selection.consumeMessage(data)) {
           return;
         }
@@ -1502,11 +1566,10 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
           case 'step_recorded':
             setSteps(prev => [...prev, data.step]);
             resetIdleTimer();
-            // Auto-expand steps panel on first recorded step
-            if (!stepsAutoExpandedRef.current) {
-              stepsAutoExpandedRef.current = true;
-              setShowSteps(true);
-            }
+            // Deliberately does NOT open the rail. The collapsed strip already shows
+            // every new step arriving, so stealing the stage mid-interaction (the panel
+            // covers the page the user is clicking on) is pure interruption. Opening the
+            // rail is the operator's call.
             // Extract credentials from fill steps with is_sensitive
             if (data.step?.type === 'fill' && data.step?.options?.is_sensitive) {
               const fieldName = data.step.options.field_name || data.step.options.field_type || 'password';
@@ -1632,39 +1695,6 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
             toast.success(t('Recording stopped. {{n}} steps recorded.', { n: data.stepCount }));
             break;
           }
-
-          // ── Visual replay ("play to here") progress ──────────────────
-          case 'replay_progress': {
-            if (data.request_id && data.request_id !== replayReqRef.current) break;
-            const idx = data.index as number;
-            setReplayState(prev => ({
-              ...prev,
-              current: data.status === 'running' ? idx : (prev.current === idx ? null : prev.current),
-              statuses: { ...prev.statuses, [idx]: data.status as ReplayStatus },
-            }));
-            break;
-          }
-
-          case 'replay_done': {
-            if (data.request_id && data.request_id !== replayReqRef.current) break;
-            replayReqRef.current = null;
-            setReplayState(prev => ({ ...prev, running: false, current: null }));
-            const landed = (typeof data.stopped_at === 'number' ? data.stopped_at : 0) + 1;
-            if (data.cancelled) {
-              toast(t('Replay stopped'), { icon: '⏹' });
-            } else if (data.failed > 0) {
-              toast(t('Replayed to step {{n}} — {{f}} step(s) could not run', { n: landed, f: data.failed }), { icon: '↺' });
-            } else {
-              toast.success(t('Replayed to step {{n}}', { n: landed }));
-            }
-            break;
-          }
-
-          case 'replay_error':
-            replayReqRef.current = null;
-            setReplayState(prev => ({ ...prev, running: false, current: null }));
-            toast.error(data.error || t('Replay failed'));
-            break;
 
           case 'error':
             // Recorder errors are user-actionable — show the full detail.
@@ -3209,56 +3239,6 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
     ws.send(JSON.stringify({ type: 'action', action: 'evaluate_js', script: wrapScriptForEval(script) }));
   }, []);
 
-  // Re-execute recorded steps 0..index on the LIVE page so the browser is
-  // positioned exactly at that step — the spine of visual replay and the
-  // "open a saved workflow live and jump in to edit it" flow. If there's no
-  // live session yet, one is opened first (seeded from the first navigate step).
-  const replayToStep = useCallback(async (index: number) => {
-    if (replayState.running) return;
-    if (index < 0 || index >= steps.length) return;
-
-    // Ensure a live recording session is up; if not, start one then continue.
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || connectionStateRef.current !== 'recording') {
-      const firstNav = steps.find(s => s.type === 'navigate' && s.url)?.url;
-      if (firstNav) setUrl(firstNav);
-      toast(t('Opening a live browser to replay…'), { icon: '▶' });
-      await connect(firstNav);
-      const ready = await new Promise<boolean>((resolve) => {
-        const startedAt = Date.now();
-        const iv = setInterval(() => {
-          if (wsRef.current?.readyState === WebSocket.OPEN && connectionStateRef.current === 'recording') {
-            clearInterval(iv); resolve(true);
-          } else if (Date.now() - startedAt > 20000) {
-            clearInterval(iv); resolve(false);
-          }
-        }, 200);
-      });
-      if (!ready) { toast.error(t('Could not open a live browser')); return; }
-    }
-
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const reqId = crypto.randomUUID();
-    replayReqRef.current = reqId;
-    // Clear any prior run's status; mark the new run live.
-    setReplayState({ running: true, target: index, current: null, statuses: {} });
-    ws.send(JSON.stringify({
-      type: 'replay_steps',
-      request_id: reqId,
-      up_to_index: index,
-      step_delay_ms: 350,
-      steps: steps.slice(0, index + 1),
-    }));
-  }, [replayState.running, steps, connect]);
-
-  const cancelReplay = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'replay_cancel' }));
-    }
-    replayReqRef.current = null;
-    setReplayState(prev => ({ ...prev, running: false, current: null }));
-  }, []);
-
   // Detect workflow segments (code-based, no credits)
   const detectSegments = useCallback(async () => {
     if (steps.length === 0) return;
@@ -3320,13 +3300,30 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   }, []);
 
   // Move step up/down
+  // Reorder by VISIBLE neighbour, not by raw index: hidden wait steps sit between
+  // real ones, so a plain adjacent swap would trade a step with a row nobody can
+  // see — one click of "move up" that changes nothing on screen.
   const moveStep = (index: number, direction: 'up' | 'down') => {
     setSteps(prev => {
-      const newSteps = [...prev];
-      const targetIndex = direction === 'up' ? index - 1 : index + 1;
-      if (targetIndex < 0 || targetIndex >= newSteps.length) return prev;
-      [newSteps[index], newSteps[targetIndex]] = [newSteps[targetIndex], newSteps[index]];
-      return newSteps;
+      if (index < 0 || index >= prev.length) return prev;
+      let target = -1;
+      if (direction === 'up') {
+        for (let i = index - 1; i >= 0; i--) {
+          if (!isHiddenStepType(prev[i].type)) { target = i; break; }
+        }
+      } else {
+        for (let i = index + 1; i < prev.length; i++) {
+          if (!isHiddenStepType(prev[i].type)) { target = i; break; }
+        }
+      }
+      if (target < 0) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(index, 1);
+      // Moving up: land ON the neighbour's slot (it and any waits shift after us).
+      // Moving down: after the splice the neighbour sits at target - 1, so `target`
+      // is the slot just past it.
+      next.splice(target, 0, moved);
+      return next;
     });
   };
 
@@ -3398,47 +3395,12 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
 
   const recorderContent = (
               <div className={clsx("w-full flex flex-col bg-surface", embedded ? "h-full overflow-hidden" : "h-full")}>
-                {/* URL Bar — shown ONLY before recording. Once recording starts the
-                    app-bar carries the live URL + status, and the contextual on-stage
-                    toolbar (below, over the stage) takes over the recording controls.
-                    The connect-on-Enter logic is preserved here as the pre-connect
-                    surface. */}
-                {connectionState !== 'recording' && (
-                <div className="flex items-center gap-2 px-3 py-2 bg-surface border-b border-border">
-                  {/* Status dot */}
-                  <span className={clsx(
-                    'w-2 h-2 rounded-full shrink-0',
-                    connectionState === 'connected' && 'bg-ink',
-                    connectionState === 'connecting' && 'bg-tertiary animate-status-pulse',
-                    connectionState === 'disconnected' && 'bg-border',
-                    connectionState === 'error' && 'bg-ink',
-                    connectionState === 'needs_agent' && 'bg-tertiary animate-status-pulse',
-                  )} title={connectionState} />
-
-                  <input
-                    type="text"
-                    value={url}
-                    onChange={(e) => setUrl(e.target.value)}
-                    placeholder={t('Enter URL to record...')}
-                    className="flex-1 px-3 py-1.5 bg-canvas border border-border rounded-lg text-sm text-ink placeholder:text-tertiary focus:ring-2 focus:ring-ink/5 focus:border-ink/30 disabled:opacity-60 transition-all font-mono text-xs"
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && connectionState === 'disconnected') {
-                        connect();
-                      }
-                    }}
-                  />
-
-                  {/* Recording options */}
-                  <label className="flex items-center gap-2 cursor-pointer select-none">
-                    <Switch
-                      size="sm"
-                      checked={recordWaitSteps}
-                      onChange={() => setRecordWaitSteps(!recordWaitSteps)}
-                    />
-                    <span className="text-xs text-secondary whitespace-nowrap">{t('Record waits')}</span>
-                  </label>
-                </div>
-                )}
+                {/* The pre-connect URL bar used to be a standing full-width row bolted
+                    above the stage, so starting a recording SWAPPED the entire chrome:
+                    the bar vanished and a different, floating toolbar took over. There is
+                    now ONE toolbar — the floating glass pill over the stage (see the
+                    stage below) — which simply changes its contents with the connection
+                    state. The stage owns the full height in every state. */}
 
                 {/* Recording controls were relocated to the contextual on-stage
                     toolbar (rendered over the stage, only while recording). */}
@@ -3495,13 +3457,14 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                   {(connectionState === 'recording' || connectionState === 'connected') && (
                     <div
                       className={clsx(
-                        // Positioning wrapper: centers the dock over the stage, but when the
-                        // steps/selectors panel is open its region RETREATS to the left of that
-                        // panel (w-80 + right-3 gap ≈ 21rem) so the two never overlap. The dock's
-                        // width below is relative to THIS wrapper, so it shrinks to fit the
-                        // remaining space — responsive on any viewport.
+                        // Positioning wrapper: centers the dock over the stage, but its region
+                        // RETREATS to the left of the steps rail so the two never overlap —
+                        // by the open panel's width (w-80 + right-3 gap ≈ 21rem), or by the
+                        // collapsed strip's (w-16 + right-3 gap ≈ 4.75rem). The dock's width
+                        // below is relative to THIS wrapper, so it shrinks to fit the remaining
+                        // space — responsive on any viewport.
                         'absolute bottom-0 left-0 z-40 flex justify-center items-end pointer-events-none transition-[right] duration-300 ease-out',
-                        showSteps ? 'right-[21rem]' : 'right-0',
+                        showSteps ? 'right-[21rem]' : 'right-[4.75rem]',
                       )}
                     >
                     <div
@@ -3527,7 +3490,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                           className="shrink-0 h-9 flex items-center justify-center gap-1.5 text-[12px] font-medium text-ink hover:bg-chrome transition-colors"
                           title={t('Ask AI')}
                         >
-                          <SparklesIcon className="h-3.5 w-3.5 text-secondary" />
+                          <ScribeMark className="h-4 w-4 shrink-0" />
                           <span>{t('Ask AI')}</span>
                           <ChevronUpIcon className={clsx('h-3.5 w-3.5 text-tertiary', !aiDockHovered && 'animate-bounce')} />
                         </button>
@@ -3537,7 +3500,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                       {aiDockExpanded && (
                       <div className="px-4 py-2.5 flex items-center justify-between shrink-0 border-b border-border/60">
                         <span className="text-ink font-medium flex items-center gap-2 text-sm">
-                          <SparklesIcon className="h-4 w-4 text-secondary" />
+                          <ScribeMark className="h-4 w-4 shrink-0" />
                           {t('AI Assistant')}
                         </span>
                         <div className="flex items-center gap-1.5">
@@ -3768,6 +3731,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                             </div>
                           )}
                           <input
+                            ref={aiChatInputRef}
                             type="text"
                             value={aiChatInput}
                             onChange={(e) => setAiChatInput(e.target.value)}
@@ -3820,8 +3784,9 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                         below the recording browser-nav toolbar while capturing setup steps. */}
                     {monitorMode && monitorToolbar && (connectionState === 'connected' || connectionState === 'recording') && (
                       <div className={clsx(
-                        'absolute left-1/2 -translate-x-1/2 z-40 transition-all duration-300',
-                        connectionState === 'recording' ? 'top-16' : 'top-3',
+                        // Always below the stage toolbar, which no longer appears only while
+                        // recording — at top-3 it would have collided with it.
+                        'absolute left-1/2 -translate-x-1/2 z-40 transition-all duration-300 top-16',
                       )}>
                         {monitorToolbar}
                       </div>
@@ -3832,6 +3797,217 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                         capability={capability}
                       />
                     )}
+                    {/* ONE stage toolbar — the floating glass pill, present in EVERY
+                        connection state; only its CONTENTS change. It used to render only
+                        while recording, with a standing full-width bar above the stage
+                        standing in until then, so the chrome the user opened was not the
+                        chrome they ended up with. */}
+                    <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 flex items-center gap-1.5 rounded-xl border border-border bg-surface/85 backdrop-blur-xl shadow-lg px-1.5 py-1 max-w-[calc(100%-1.5rem)]">
+                      {(connectionState === 'recording' || connectionState === 'connected') ? (
+                        <>
+                          {/* Browser controls — back / forward / reload + an editable
+                              address bar so the user drives the live browser while
+                              recording. Extract / Templates / Return were removed:
+                              every step is added and managed in the steps spine. */}
+                          <button
+                            onClick={() => wsRef.current?.send(JSON.stringify({ type: 'action', action: 'back' }))}
+                            className="p-1.5 rounded-lg text-secondary hover:bg-active hover:text-ink transition-colors"
+                            title={t('Back')}
+                          >
+                            <ChevronLeftIcon className="h-4 w-4" />
+                          </button>
+                          <button
+                            onClick={() => wsRef.current?.send(JSON.stringify({ type: 'action', action: 'forward' }))}
+                            className="p-1.5 rounded-lg text-secondary hover:bg-active hover:text-ink transition-colors"
+                            title={t('Forward')}
+                          >
+                            <ChevronRightIcon className="h-4 w-4" />
+                          </button>
+                          <button
+                            onClick={() => { if (currentUrl && wsRef.current) wsRef.current.send(JSON.stringify({ type: 'action', action: 'navigate', url: currentUrl })); }}
+                            className="p-1.5 rounded-lg text-secondary hover:bg-active hover:text-ink transition-colors"
+                            title={t('Reload')}
+                          >
+                            <ArrowPathIcon className="h-4 w-4" />
+                          </button>
+                          <input
+                            key={currentUrl}
+                            defaultValue={currentUrl}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                const raw = (e.target as HTMLInputElement).value.trim();
+                                if (raw && wsRef.current) {
+                                  const u = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+                                  wsRef.current.send(JSON.stringify({ type: 'action', action: 'navigate', url: u }));
+                                }
+                              }
+                            }}
+                            placeholder={t('Enter URL…')}
+                            spellCheck={false}
+                            className="w-48 sm:w-72 min-w-0 px-2.5 py-1.5 bg-canvas border border-border rounded-lg text-xs font-mono text-ink placeholder:text-tertiary focus:outline-none focus:border-ink/30"
+                          />
+                          {connectionState === 'recording' && (<>
+                          <div className="w-px h-5 bg-border" />
+                          {/* Stop recording — ends the live session; the live-synced
+                              draft settles and the app-bar primary advances to Finalize. */}
+                          <button
+                            onClick={() => {
+                              if (isExtracting) {
+                                setIsExtracting(false);
+                                if (wsRef.current) wsRef.current.send(JSON.stringify({ type: 'action', action: 'clear_highlight' }));
+                                setExtractHighlight(null);
+                                setShowExtractPopover(false);
+                              }
+                              stopRecording();
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg font-semibold shadow-sm flex items-center gap-1.5 text-xs transition bg-accent-strong hover:bg-accent-strong/90 text-accent-on"
+                            title={t('Stop recording')}
+                          >
+                            <StopIcon className="h-3.5 w-3.5" />
+                            {t('Stop')}
+                          </button>
+                          </>)}
+                          {/* The standing "AI assist" toggle is retired — the AI
+                              dock is now always mounted bottom-center. */}
+                          {/* Streaming mode: handler markers — marking a handler range
+                              only means something while steps are still arriving. */}
+                          {streamingMode && connectionState === 'recording' && (
+                            <>
+                              <div className="w-px h-5 bg-border" />
+                              {activeHandlerName ? (
+                                <>
+                                  <span className="px-2 py-1 bg-ink/10 text-ink rounded text-[11px] font-medium animate-status-pulse">
+                                    {t('Recording: {{name}}', { name: activeHandlerName })}
+                                  </span>
+                                  <button
+                                    onClick={() => {
+                                      if (activeHandlerStart !== null) {
+                                        setStreamingHandlers(prev => [...prev, {
+                                          name: activeHandlerName,
+                                          step_range: [activeHandlerStart, steps.length] as [number, number],
+                                          input_variables: [],
+                                          extract_fields: [],
+                                        }]);
+                                      }
+                                      setActiveHandlerName(null);
+                                      setActiveHandlerStart(null);
+                                      toast.success(t('Handler "{{name}}" defined', { name: activeHandlerName }));
+                                    }}
+                                    className="px-2.5 py-1.5 bg-accent-strong hover:bg-accent-strong/90 text-accent-on rounded-lg font-semibold shadow-sm text-xs transition-colors"
+                                  >
+                                    {t('End Handler')}
+                                  </button>
+                                </>
+                              ) : showHandlerNameInput ? (
+                                <div className="flex items-center gap-1">
+                                  <input
+                                    type="text"
+                                    value={handlerNameInput}
+                                    onChange={(e) => setHandlerNameInput(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter' && handlerNameInput.trim()) {
+                                        const name = handlerNameInput.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+                                        setActiveHandlerName(name);
+                                        setActiveHandlerStart(steps.length);
+                                        setHandlerNameInput('');
+                                        setShowHandlerNameInput(false);
+                                        toast(t('Recording handler "{{name}}" — perform the steps, then click End Handler', { name }));
+                                      }
+                                      if (e.key === 'Escape') setShowHandlerNameInput(false);
+                                    }}
+                                    placeholder="handler_name"
+                                    autoFocus
+                                    className="w-28 px-2 py-1.5 text-xs font-mono border border-zinc-300 rounded bg-white text-ink"
+                                  />
+                                  <button
+                                    onClick={() => {
+                                      if (!handlerNameInput.trim()) return;
+                                      const name = handlerNameInput.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+                                      setActiveHandlerName(name);
+                                      setActiveHandlerStart(steps.length);
+                                      setHandlerNameInput('');
+                                      setShowHandlerNameInput(false);
+                                    }}
+                                    disabled={!handlerNameInput.trim()}
+                                    className="px-2 py-1.5 bg-ink text-white rounded text-xs disabled:opacity-30"
+                                  >
+                                    {t('Start')}
+                                  </button>
+                                  <button
+                                    onClick={() => { setShowHandlerNameInput(false); setHandlerNameInput(''); }}
+                                    className="px-2 py-1.5 text-secondary hover:text-ink text-xs"
+                                  >
+                                    ✕
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  onClick={() => setShowHandlerNameInput(true)}
+                                  className="px-2.5 py-1.5 bg-hover hover:bg-active text-secondary border border-border rounded-lg font-medium flex items-center gap-1.5 text-xs transition-colors"
+                                >
+                                  <BoltIcon className="h-3.5 w-3.5" />
+                                  {t('+ Handler')}
+                                </button>
+                              )}
+                            </>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          {/* Pre-connect: the same pill, carrying what you need BEFORE a
+                              browser exists — where to start, whether to record the pauses
+                              between actions, and the connection's own state. */}
+                          <span className={clsx(
+                            'w-2 h-2 rounded-full shrink-0 ml-1.5',
+                            connectionState === 'connecting' && 'bg-tertiary animate-status-pulse',
+                            connectionState === 'disconnected' && 'bg-border',
+                            connectionState === 'error' && 'bg-ink',
+                          )} title={connectionState} />
+                          <input
+                            type="text"
+                            value={url}
+                            onChange={(e) => setUrl(e.target.value)}
+                            placeholder={t('Enter URL to record...')}
+                            spellCheck={false}
+                            // Enter starts the session. Allowed from `error` too — that state
+                            // is a retry surface, and the old bar's `disconnected`-only guard
+                            // made the key silently dead after a failed attempt.
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && connectionState !== 'connecting') {
+                                e.preventDefault();
+                                connect();
+                              }
+                            }}
+                            className="w-56 @pair:w-96 min-w-0 px-2.5 py-1.5 bg-canvas border border-border rounded-lg text-xs font-mono text-ink placeholder:text-tertiary focus:outline-none focus:border-ink/30"
+                          />
+                          <label className="flex items-center gap-1.5 cursor-pointer select-none px-1" title={t('Record the pauses between actions so replay reproduces your timing')}>
+                            <Switch
+                              size="sm"
+                              checked={recordWaitSteps}
+                              onChange={(next) => setRecordWaitSteps(next)}
+                              aria-label={t('Record waits')}
+                            />
+                            <span className="text-[11px] text-secondary whitespace-nowrap">{t('Record waits')}</span>
+                          </label>
+                          <div className="w-px h-5 bg-border" />
+                          {/* The start action was previously invisible — only Enter in the URL
+                              field (or the wizard's autoConnect) could open a browser. */}
+                          <button
+                            onClick={() => connect()}
+                            disabled={connectionState === 'connecting' || !url.trim() || url.trim() === 'https://'}
+                            className="px-2.5 py-1.5 rounded-lg font-medium flex items-center gap-1.5 text-xs transition bg-accent-strong hover:bg-accent-strong/90 text-accent-on disabled:bg-hover disabled:text-tertiary"
+                            title={t('Start recording')}
+                          >
+                            {connectionState === 'connecting'
+                              ? <ArrowPathIcon className="h-3.5 w-3.5 animate-spin" />
+                              : <PlayIcon className="h-3.5 w-3.5" />}
+                            {t('Start')}
+                          </button>
+                        </>
+                      )}
+                    </div>
+
                     {(connectionState === 'disconnected' || connectionState === 'connecting' || connectionState === 'error') && (
                       <div className="text-center">
                         {connectionState === 'connecting' ? (
@@ -3951,159 +4127,6 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                           </div>
                         )}
 
-                        {/* Contextual on-stage toolbar — shown ONLY while recording.
-                            Demoted from the old standing recording toolbar; floats over
-                            the top of the stage so the recording controls live with the
-                            canvas instead of in a permanent header. All handler wiring is
-                            preserved verbatim. */}
-                        {connectionState === 'recording' && (
-                          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 flex items-center gap-1.5 rounded-xl border border-border bg-surface/85 backdrop-blur-xl shadow-lg px-1.5 py-1">
-                            {/* Browser controls — back / forward / reload + an editable
-                                address bar so the user drives the live browser while
-                                recording. Extract / Templates / Return were removed:
-                                every step is added and managed in the steps spine. */}
-                            <button
-                              onClick={() => wsRef.current?.send(JSON.stringify({ type: 'action', action: 'back' }))}
-                              className="p-1.5 rounded-lg text-secondary hover:bg-active hover:text-ink transition-colors"
-                              title={t('Back')}
-                            >
-                              <ChevronLeftIcon className="h-4 w-4" />
-                            </button>
-                            <button
-                              onClick={() => wsRef.current?.send(JSON.stringify({ type: 'action', action: 'forward' }))}
-                              className="p-1.5 rounded-lg text-secondary hover:bg-active hover:text-ink transition-colors"
-                              title={t('Forward')}
-                            >
-                              <ChevronRightIcon className="h-4 w-4" />
-                            </button>
-                            <button
-                              onClick={() => { if (currentUrl && wsRef.current) wsRef.current.send(JSON.stringify({ type: 'action', action: 'navigate', url: currentUrl })); }}
-                              className="p-1.5 rounded-lg text-secondary hover:bg-active hover:text-ink transition-colors"
-                              title={t('Reload')}
-                            >
-                              <ArrowPathIcon className="h-4 w-4" />
-                            </button>
-                            <input
-                              key={currentUrl}
-                              defaultValue={currentUrl}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
-                                  e.preventDefault();
-                                  const raw = (e.target as HTMLInputElement).value.trim();
-                                  if (raw && wsRef.current) {
-                                    const u = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
-                                    wsRef.current.send(JSON.stringify({ type: 'action', action: 'navigate', url: u }));
-                                  }
-                                }
-                              }}
-                              placeholder={t('Enter URL…')}
-                              spellCheck={false}
-                              className="w-48 sm:w-72 px-2.5 py-1.5 bg-canvas border border-border rounded-lg text-xs font-mono text-ink placeholder:text-tertiary focus:outline-none focus:border-ink/30"
-                            />
-                            <div className="w-px h-5 bg-border" />
-                            {/* Stop recording — ends the live session; the live-synced
-                                draft settles and the app-bar primary advances to Finalize. */}
-                            <button
-                              onClick={() => {
-                                if (isExtracting) {
-                                  setIsExtracting(false);
-                                  if (wsRef.current) wsRef.current.send(JSON.stringify({ type: 'action', action: 'clear_highlight' }));
-                                  setExtractHighlight(null);
-                                  setShowExtractPopover(false);
-                                }
-                                stopRecording();
-                              }}
-                              className="px-2.5 py-1.5 rounded-lg font-semibold shadow-sm flex items-center gap-1.5 text-xs transition bg-accent-strong hover:bg-accent-strong/90 text-accent-on"
-                              title={t('Stop recording')}
-                            >
-                              <StopIcon className="h-3.5 w-3.5" />
-                              {t('Stop')}
-                            </button>
-                            {/* The standing "AI assist" toggle is retired — the AI
-                                dock is now always mounted bottom-center. */}
-                            {/* Streaming mode: handler markers */}
-                            {streamingMode && (
-                              <>
-                                <div className="w-px h-5 bg-border" />
-                                {activeHandlerName ? (
-                                  <>
-                                    <span className="px-2 py-1 bg-ink/10 text-ink rounded text-[11px] font-medium animate-status-pulse">
-                                      {t('Recording: {{name}}', { name: activeHandlerName })}
-                                    </span>
-                                    <button
-                                      onClick={() => {
-                                        if (activeHandlerStart !== null) {
-                                          setStreamingHandlers(prev => [...prev, {
-                                            name: activeHandlerName,
-                                            step_range: [activeHandlerStart, steps.length] as [number, number],
-                                            input_variables: [],
-                                            extract_fields: [],
-                                          }]);
-                                        }
-                                        setActiveHandlerName(null);
-                                        setActiveHandlerStart(null);
-                                        toast.success(t('Handler "{{name}}" defined', { name: activeHandlerName }));
-                                      }}
-                                      className="px-2.5 py-1.5 bg-accent-strong hover:bg-accent-strong/90 text-accent-on rounded-lg font-semibold shadow-sm text-xs transition-colors"
-                                    >
-                                      {t('End Handler')}
-                                    </button>
-                                  </>
-                                ) : showHandlerNameInput ? (
-                                  <div className="flex items-center gap-1">
-                                    <input
-                                      type="text"
-                                      value={handlerNameInput}
-                                      onChange={(e) => setHandlerNameInput(e.target.value)}
-                                      onKeyDown={(e) => {
-                                        if (e.key === 'Enter' && handlerNameInput.trim()) {
-                                          const name = handlerNameInput.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-                                          setActiveHandlerName(name);
-                                          setActiveHandlerStart(steps.length);
-                                          setHandlerNameInput('');
-                                          setShowHandlerNameInput(false);
-                                          toast(t('Recording handler "{{name}}" — perform the steps, then click End Handler', { name }));
-                                        }
-                                        if (e.key === 'Escape') setShowHandlerNameInput(false);
-                                      }}
-                                      placeholder="handler_name"
-                                      autoFocus
-                                      className="w-28 px-2 py-1.5 text-xs font-mono border border-zinc-300 rounded bg-white text-ink"
-                                    />
-                                    <button
-                                      onClick={() => {
-                                        if (!handlerNameInput.trim()) return;
-                                        const name = handlerNameInput.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-                                        setActiveHandlerName(name);
-                                        setActiveHandlerStart(steps.length);
-                                        setHandlerNameInput('');
-                                        setShowHandlerNameInput(false);
-                                      }}
-                                      disabled={!handlerNameInput.trim()}
-                                      className="px-2 py-1.5 bg-ink text-white rounded text-xs disabled:opacity-30"
-                                    >
-                                      {t('Start')}
-                                    </button>
-                                    <button
-                                      onClick={() => { setShowHandlerNameInput(false); setHandlerNameInput(''); }}
-                                      className="px-2 py-1.5 text-secondary hover:text-ink text-xs"
-                                    >
-                                      ✕
-                                    </button>
-                                  </div>
-                                ) : (
-                                  <button
-                                    onClick={() => setShowHandlerNameInput(true)}
-                                    className="px-2.5 py-1.5 bg-hover hover:bg-active text-secondary border border-border rounded-lg font-medium flex items-center gap-1.5 text-xs transition-colors"
-                                  >
-                                    <BoltIcon className="h-3.5 w-3.5" />
-                                    {t('+ Handler')}
-                                  </button>
-                                )}
-                              </>
-                            )}
-                          </div>
-                        )}
 
                         {/* Extraction highlight overlay */}
                         {isExtracting && extractHighlight && canvasRef.current && (() => {
@@ -4401,7 +4424,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                     <div className="absolute inset-0 bg-black/60 flex items-center justify-center z-50">
                       <div className="bg-surface border border-border rounded-xl shadow-2xl p-5 w-[460px] max-h-[88%] overflow-y-auto">
                         <div className="flex items-center gap-2 mb-4">
-                          <SparklesIcon className="h-5 w-5 text-secondary" />
+                          <ScribeMark className="h-5 w-5 shrink-0" />
                           <span className="text-ink font-medium">{t('AI Extract Builder')}</span>
                         </div>
                         <p className="text-xs text-secondary mb-3">
@@ -4589,28 +4612,62 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                           { id: 'steps', label: t('Setup'), show: true, count: steps.length || undefined },
                         ]
                       : [
-                          { id: 'steps', label: t('Steps'), show: true, count: steps.length },
+                          { id: 'steps', label: t('Steps'), show: true, count: displaySteps.length },
                           { id: 'requests', label: t('Requests'), show: hasRequests, count: requestCount || undefined },
                           { id: 'functions', label: t('Functions'), show: hasFunctions, count: (detectedSegments.length + streamingHandlers.length) || undefined },
                         ];
 
                     return (
                   <>
-                    {/* Reopen pill — fades/scales in when the rail is collapsed. */}
-                    <button
-                      onClick={() => setShowSteps(true)}
-                      title={t('Show steps')}
-                      className={clsx(
-                        "absolute top-3 right-3 z-30 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-surface/85 backdrop-blur-xl border border-border shadow-lg text-tertiary hover:text-ink transition-all duration-300",
-                        showSteps ? "opacity-0 scale-95 pointer-events-none" : "opacity-100 scale-100"
-                      )}
-                    >
-                      <ChevronLeftIcon className="h-3.5 w-3.5" />
-                      <span className="text-[11px] font-medium text-ink">{monitorMode ? t('Targets') : t('Steps')}</span>
-                      {(monitorMode ? monitorTargetCount : steps.length) > 0 && (
-                        <span className="text-[10px] font-bold text-ink bg-hover rounded-full min-w-[18px] h-[18px] px-1 flex items-center justify-center">{monitorMode ? monitorTargetCount : steps.length}</span>
-                      )}
-                    </button>
+                    {/* Collapsed strip — the rail never disappears entirely. A thin glass
+                        column keeps every recorded step on screen (icon + label) so new
+                        steps announce themselves while the page keeps the stage. Any chip
+                        opens the full rail; nothing here opens it on its own. */}
+                    <div className={clsx(
+                      "absolute right-3 bottom-3 z-30 w-16 bg-surface/85 backdrop-blur-xl border border-border rounded-2xl shadow-lg flex flex-col overflow-hidden transition-all duration-300 ease-out",
+                      // Same top band as the rail below, so collapsing/expanding doesn't jump.
+                      // The stage toolbar is present in EVERY state now, so the strip clears
+                      // it unconditionally (monitor mode also clears its action switcher).
+                      monitorMode ? 'top-28' : 'top-16',
+                      showSteps ? "opacity-0 translate-x-2 pointer-events-none" : "opacity-100 translate-x-0"
+                    )}>
+                      <button
+                        onClick={() => { setSpineTab(monitorMode ? 'targets' : 'steps'); setShowSteps(true); }}
+                        title={t('Show steps')}
+                        className="shrink-0 flex flex-col items-center gap-0.5 py-2 border-b border-border text-tertiary hover:text-ink hover:bg-chrome/40 transition-colors"
+                      >
+                        <ChevronLeftIcon className="h-3.5 w-3.5" />
+                        <span className="text-[9px] font-semibold text-ink uppercase tracking-wide">
+                          {monitorMode ? t('Targets') : t('Steps')}
+                        </span>
+                        {(monitorMode ? monitorTargetCount : displaySteps.length) > 0 && (
+                          <span className="text-[10px] font-bold text-ink bg-hover rounded-full min-w-[18px] h-[18px] px-1 flex items-center justify-center tabular-nums">
+                            {monitorMode ? monitorTargetCount : displaySteps.length}
+                          </span>
+                        )}
+                      </button>
+                      <div
+                        ref={stepStripScrollRef}
+                        className="flex-1 min-h-0 overflow-y-auto scrollbar-thin px-1 py-1.5 flex flex-col items-center gap-1"
+                      >
+                        {displaySteps.length === 0 ? (
+                          <span className="text-[9px] leading-tight text-tertiary text-center px-0.5">{t('No steps yet')}</span>
+                        ) : displaySteps.map(ds => {
+                          const StripIcon = ds.IconComponent;
+                          return (
+                            <button
+                              key={ds.id}
+                              onClick={() => { setSpineTab('steps'); setShowSteps(true); }}
+                              title={`${ds.displayNumber}. ${ds.title}${ds.description ? ` — ${ds.description}` : ''}`}
+                              className="w-full shrink-0 flex flex-col items-center gap-0.5 px-0.5 py-1.5 rounded-lg bg-hover/60 border border-border/60 text-secondary hover:text-ink hover:bg-chrome hover:border-border transition-colors animate-step-enter"
+                            >
+                              <StripIcon className="h-3.5 w-3.5 text-ink" />
+                              <span className="w-full text-[9px] leading-tight text-center truncate">{ds.title}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
 
                     {/* Floating rail — a detached glass card (same language as the floating
                         URL bar) so the browser keeps the FULL width behind it. Slides off to
@@ -4618,11 +4675,10 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                     <div className={clsx(
                       "absolute right-3 bottom-3 z-30 w-80 max-w-[calc(100%-1.5rem)] bg-surface/85 backdrop-blur-xl border border-border rounded-2xl shadow-2xl flex flex-col overflow-hidden transition-all duration-300 ease-out",
                       // Tuck below the top toolbar band so the centered URL / monitor toolbar
-                      // (z-40) never sits on top of the panel. The monitor toolbar itself drops
-                      // to top-16 while recording, so clear that lower position too.
-                      monitorMode && connectionState === 'recording' ? 'top-28'
-                        : (connectionState === 'recording' || monitorMode) ? 'top-16'
-                        : 'top-3',
+                      // (z-40) never sits on top of the panel. Both are always mounted now,
+                      // so this offset no longer changes with the connection state — the rail
+                      // stops jumping when a recording starts.
+                      monitorMode ? 'top-28' : 'top-16',
                       showSteps ? "translate-x-0 opacity-100" : "translate-x-[calc(100%+0.75rem)] opacity-0 pointer-events-none"
                     )}>
                     <>
@@ -4639,9 +4695,8 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                         </button>
                         <span className="text-xs font-medium text-ink">{monitorMode ? t('Monitor') : t('Recording')}</span>
                         {/* Add a step manually — Extract is a click-to-select mode on the
-                            canvas; Return appends a return-data step. Replaces the old
-                            toolbar Extract/Return: steps are added where they live.
-                            Hidden in monitor mode (monitors watch, they don't extract/return). */}
+                            canvas, so the step is added where it lives.
+                            Hidden in monitor mode (monitors watch, they don't extract). */}
                         {connectionState === 'recording' && !monitorMode && (
                           <div className="ml-auto flex items-center gap-0.5">
                             <button
@@ -4659,18 +4714,6 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                             >
                               <ArrowTopRightOnSquareIcon className="h-3.5 w-3.5" />
                               {t('Extract')}
-                            </button>
-                            <button
-                              onClick={() => {
-                                if (!wsRef.current) return;
-                                wsRef.current.send(JSON.stringify({ type: 'action', action: 'add_extract_step', selector: '', output_name: '', extract_type: 'return', description: 'Return extracted data to caller' }));
-                                toast.success(t('Return step added — workflow will return extracted data'));
-                              }}
-                              className="flex items-center gap-1 px-1.5 py-1 rounded text-[10px] font-medium text-secondary hover:bg-chrome hover:text-ink transition-colors"
-                              title={t('Return data — append a step that returns the extracted data to the caller')}
-                            >
-                              <ArrowUturnLeftIcon className="h-3.5 w-3.5" />
-                              {t('Return')}
                             </button>
                           </div>
                         )}
@@ -4743,32 +4786,107 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                             {detectedRequests.map((req) => {
                               const key = `${req.method} ${req.url}`;
                               const added = addedRequestKeys.has(key);
+                              const isExp = expandedDetectedId === req.id;
+                              const reqHeaders = Object.entries(req.request_headers || {});
                               return (
                                 <div
                                   key={req.id}
                                   className={clsx(
-                                    'group flex items-center gap-2 px-2 py-1.5 rounded border transition',
-                                    added ? 'border-border bg-ink/[0.03] opacity-70' : 'border-border hover:bg-chrome'
+                                    'group rounded border transition',
+                                    added ? 'border-border bg-ink/[0.03] opacity-70' : 'border-border hover:bg-chrome',
+                                    isExp && 'bg-chrome/40',
                                   )}
                                 >
-                                  <span className="text-[9px] font-bold font-mono px-1.5 py-0.5 rounded bg-hover text-secondary shrink-0">{req.method}</span>
-                                  <div className="min-w-0 flex-1">
-                                    <p className="text-[11px] text-ink font-mono truncate" title={req.url}>{prettyPath(req.url)}</p>
-                                    <p className="text-[10px] text-tertiary">
-                                      {req.response_status ?? '—'}
-                                      {req.response_content_type ? ` · ${req.response_content_type.split(';')[0]}` : ''}
-                                    </p>
+                                  {/* Summary row — the whole row toggles the details, so the
+                                      only thing that must NOT bubble is "Step". */}
+                                  <div
+                                    role="button"
+                                    tabIndex={0}
+                                    aria-expanded={isExp}
+                                    onClick={() => setExpandedDetectedId(isExp ? null : req.id)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter' || e.key === ' ') {
+                                        e.preventDefault();
+                                        setExpandedDetectedId(isExp ? null : req.id);
+                                      }
+                                    }}
+                                    className="flex items-center gap-1.5 px-2 py-1.5 cursor-pointer"
+                                    title={isExp ? t('Hide request details') : t('Show request details')}
+                                  >
+                                    {isExp
+                                      ? <ChevronDownIcon className="h-3 w-3 text-tertiary shrink-0" />
+                                      : <ChevronRightIcon className="h-3 w-3 text-tertiary shrink-0" />}
+                                    <span className="text-[9px] font-bold font-mono px-1.5 py-0.5 rounded bg-hover text-secondary shrink-0">{req.method}</span>
+                                    <div className="min-w-0 flex-1">
+                                      <p className="text-[11px] text-ink font-mono truncate" title={req.url}>{prettyPath(req.url)}</p>
+                                      <p className="text-[10px] text-tertiary">
+                                        {req.response_status ?? '—'}
+                                        {req.response_content_type ? ` · ${req.response_content_type.split(';')[0]}` : ''}
+                                      </p>
+                                    </div>
+                                    {added ? (
+                                      <span className="flex items-center gap-1 text-[10px] text-secondary shrink-0"><CheckIcon className="h-3.5 w-3.5" /> {t('Added')}</span>
+                                    ) : (
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); addRequestAsStep(req); }}
+                                        className="shrink-0 flex items-center gap-1 px-2 py-1 text-[10px] font-medium text-ink bg-hover hover:bg-ink hover:text-white rounded transition"
+                                        title={t('Add as workflow step')}
+                                      >
+                                        <PlusIcon className="h-3 w-3" /> {t('Step')}
+                                      </button>
+                                    )}
                                   </div>
-                                  {added ? (
-                                    <span className="flex items-center gap-1 text-[10px] text-secondary shrink-0"><CheckIcon className="h-3.5 w-3.5" /> {t('Added')}</span>
-                                  ) : (
-                                    <button
-                                      onClick={() => addRequestAsStep(req)}
-                                      className="shrink-0 flex items-center gap-1 px-2 py-1 text-[10px] font-medium text-ink bg-hover hover:bg-ink hover:text-white rounded transition"
-                                      title={t('Add as workflow step')}
-                                    >
-                                      <PlusIcon className="h-3 w-3" /> {t('Step')}
-                                    </button>
+
+                                  {/* Details — what the request actually is, so the user can tell
+                                      two same-path calls apart before turning one into a step. */}
+                                  {isExp && (
+                                    <div className="px-2.5 pb-2 pt-1.5 space-y-2 border-t border-border/60 animate-step-enter">
+                                      <div>
+                                        <p className="text-[9px] uppercase tracking-wide text-tertiary mb-0.5">{t('Endpoint')}</p>
+                                        <p className="text-[10px] font-mono text-ink break-all">
+                                          <span className="font-bold">{req.method}</span> {req.url}
+                                        </p>
+                                      </div>
+
+                                      <div>
+                                        <p className="text-[9px] uppercase tracking-wide text-tertiary mb-0.5">
+                                          {t('Request Body')}
+                                          {req.request_content_type ? ` · ${req.request_content_type.split(';')[0]}` : ''}
+                                        </p>
+                                        {req.request_body ? (
+                                          <pre className="text-[10px] font-mono text-ink/80 bg-canvas/70 border border-border rounded p-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-all">{previewBody(req.request_body)}</pre>
+                                        ) : (
+                                          <p className="text-[10px] text-tertiary">{t('None — everything travels in the URL')}</p>
+                                        )}
+                                      </div>
+
+                                      {reqHeaders.length > 0 && (
+                                        <div>
+                                          <p className="text-[9px] uppercase tracking-wide text-tertiary mb-0.5">{t('Headers')}</p>
+                                          <div className="bg-canvas/70 border border-border rounded p-1.5 max-h-28 overflow-auto space-y-0.5">
+                                            {reqHeaders.map(([hk, hv]) => (
+                                              <p key={hk} className="text-[10px] font-mono break-all">
+                                                <span className="text-secondary">{hk}</span>
+                                                <span className="text-tertiary">: </span>
+                                                <span className="text-ink/80">
+                                                  {CREDENTIAL_HEADER_RE.test(hk) ? t('[redacted]') : String(hv)}
+                                                </span>
+                                              </p>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {req.response_body && (
+                                        <div>
+                                          <p className="text-[9px] uppercase tracking-wide text-tertiary mb-0.5">
+                                            {t('Response')}
+                                            {req.response_status != null ? ` · ${req.response_status}` : ''}
+                                          </p>
+                                          <pre className="text-[10px] font-mono text-ink/80 bg-canvas/70 border border-border rounded p-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-all">{previewBody(req.response_body)}</pre>
+                                        </div>
+                                      )}
+                                    </div>
                                   )}
                                 </div>
                               );
@@ -4783,42 +4901,9 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                     {/* === STEPS TAB === (the recorded / AI step timeline — default) */}
                     {activeTab === 'steps' && (
                     <div className="flex-1 min-h-0 flex flex-col">
-                      {/* Visual-replay toolbar: click a step to re-run up to it live. */}
-                      {displaySteps.length > 0 && !apiMode && (
-                        <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-surface/60 shrink-0">
-                          {replayState.running ? (
-                            <>
-                              <ArrowPathIcon className="h-3.5 w-3.5 text-amber-600 animate-spin shrink-0" />
-                              <span className="text-[11px] text-secondary truncate">
-                                {replayState.current !== null
-                                  ? t('Replaying step {{n}} of {{total}}…', { n: (replayState.current ?? 0) + 1, total: (replayState.target ?? 0) + 1 })
-                                  : t('Replaying…')}
-                              </span>
-                              <button
-                                onClick={cancelReplay}
-                                className="ml-auto flex items-center gap-1 px-2 py-1 text-[10px] font-medium text-ink bg-hover hover:bg-ink hover:text-white rounded transition"
-                              >
-                                <StopIcon className="h-3 w-3" /> {t('Stop')}
-                              </button>
-                            </>
-                          ) : (
-                            <>
-                              <EyeIcon className="h-3.5 w-3.5 text-tertiary shrink-0" />
-                              <span className="text-[11px] text-tertiary truncate">
-                                {t('Click a step to replay up to it in the live browser')}
-                              </span>
-                              <button
-                                onClick={() => replayToStep(steps.length - 1)}
-                                className="ml-auto flex items-center gap-1 px-2 py-1 text-[10px] font-medium text-ink bg-hover hover:bg-ink hover:text-white rounded transition"
-                                title={t('Replay the whole workflow in the live browser')}
-                              >
-                                <PlayIcon className="h-3 w-3" /> {t('Replay all')}
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      )}
-                      <div className="flex-1 overflow-y-auto px-3 py-3">
+                      {/* The app's floating scroll indicator (edge fade + hover chevrons)
+                          rather than a raw scroller, same as every other list surface. */}
+                      <ScrollArea className="flex-1" viewportClassName="px-3 py-3" viewportRef={stepListScrollRef}>
                         {displaySteps.length === 0 ? (
                           <div className="text-center py-10">
                             <div className="w-10 h-10 rounded-full bg-hover border border-border flex items-center justify-center mx-auto mb-3">
@@ -4866,16 +4951,6 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                             const handlerStart = streamingMode
                               ? streamingHandlers.find(h => step.index === h.step_range[0])
                               : null;
-                            // Visual-replay cursor state for this step.
-                            const replayStatus = replayState.statuses[step.index];
-                            const replaySS = replayStatus
-                              ? statusStyle(replayStatus === 'done' ? 'completed' : replayStatus)
-                              : null;
-                            const isReplayCursor = replayState.current === step.index;
-                            // Clicking a step re-runs everything up to it on the live page —
-                            // disabled while building functions, editing, in API mode, or mid-replay.
-                            const canReplay = !functionBuilderOpen && !editingStepId && !apiMode && !replayState.running;
-
                             return (
                               <React.Fragment key={step.id}>
                                 {handlerStart && (
@@ -4902,19 +4977,11 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                     "group relative flex items-start gap-3 animate-step-enter rounded-lg",
                                     !isLastGlobal && "pb-2.5",
                                     step.isInTab && "ml-5",
-                                    (functionBuilderOpen || canReplay) && "cursor-pointer",
+                                    functionBuilderOpen && "cursor-pointer",
                                     functionBuilderOpen && selectedStepIndices.has(step.index) && "ring-2 ring-ink/20 bg-ink/[0.03]",
-                                    isReplayCursor && "ring-2 ring-amber-400/60 bg-amber-50/50",
                                   )}
                                   style={{ animationDelay: `${Math.min(arrIdx * 30, 300)}ms` }}
-                                  onClick={
-                                    functionBuilderOpen
-                                      ? () => toggleStepSelection(step.index)
-                                      : canReplay
-                                        ? () => replayToStep(step.index)
-                                        : undefined
-                                  }
-                                  title={canReplay ? t('Replay to here — re-run steps up to this point in the live browser') : undefined}
+                                  onClick={functionBuilderOpen ? () => toggleStepSelection(step.index) : undefined}
                                 >
                                   {/* Timeline connector */}
                                   {!isLastGlobal && (
@@ -4924,7 +4991,6 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                   {/* Node */}
                                   <div className={clsx(
                                     "relative z-10 flex-shrink-0 w-[26px] h-[26px] rounded-full flex items-center justify-center border transition-all",
-                                    replayStatus === 'running' && "ring-2 ring-amber-400 animate-pulse",
                                     functionBuilderOpen && selectedStepIndices.has(step.index)
                                       ? "bg-ink text-white border-ink scale-110"
                                       : functionBuilderOpen
@@ -4935,26 +5001,17 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                             ? "bg-hover border-border text-secondary"
                                             : "bg-ink text-white border-ink",
                                   )}>
-                                    {replayStatus === 'running'
-                                      ? <ArrowPathIcon className="h-3 w-3 animate-spin" />
-                                      : functionBuilderOpen && selectedStepIndices.has(step.index)
-                                        ? <CheckIcon className="h-3 w-3" />
-                                        : <StepIcon className="h-3 w-3" />
+                                    {functionBuilderOpen && selectedStepIndices.has(step.index)
+                                      ? <CheckIcon className="h-3 w-3" />
+                                      : <StepIcon className="h-3 w-3" />
                                     }
-                                    {/* Replay outcome dot (done / skipped / failed) */}
-                                    {replaySS && replayStatus !== 'running' && (
-                                      <span
-                                        className={clsx('absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-surface', replaySS.dot)}
-                                        title={t('Replay: {{status}}', { status: replayStatus })}
-                                      />
-                                    )}
                                   </div>
 
                                   {/* Content */}
                                   <div className="flex-1 min-w-0 pt-0.5 rounded-lg px-2 py-1.5 -ml-0.5 transition-colors hover:bg-chrome">
                                     <div className="flex items-center gap-1.5">
                                       <span className="text-[10px] font-medium text-tertiary tabular-nums w-4 shrink-0">
-                                        {step.index + 1}
+                                        {step.displayNumber}
                                       </span>
                                       <span className="text-xs font-medium text-ink truncate">
                                         {step.title}
@@ -5021,10 +5078,14 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                     >
                                       <PencilSquareIcon className="h-3 w-3" />
                                     </button>
-                                    <button onClick={() => moveStep(step.index, 'up')} disabled={step.index === 0} className="p-1 hover:bg-chrome rounded disabled:opacity-30">
+                                    {/* Bounds are the VISIBLE list's, not the raw one's: with
+                                        waits hidden, `index === displaySteps.length - 1` never
+                                        matched on the last row, so "move down" stayed live and
+                                        did nothing. */}
+                                    <button onClick={() => moveStep(step.index, 'up')} disabled={step.displayNumber === 1} className="p-1 hover:bg-chrome rounded disabled:opacity-30">
                                       <ChevronUpIcon className="h-3 w-3 text-secondary" />
                                     </button>
-                                    <button onClick={() => moveStep(step.index, 'down')} disabled={step.index === displaySteps.length - 1} className="p-1 hover:bg-chrome rounded disabled:opacity-30">
+                                    <button onClick={() => moveStep(step.index, 'down')} disabled={step.displayNumber === displaySteps.length} className="p-1 hover:bg-chrome rounded disabled:opacity-30">
                                       <ChevronDownIcon className="h-3 w-3 text-secondary" />
                                     </button>
                                     {step.type === 'extract' && connectionState === 'recording' && wsRef.current && (
@@ -5135,7 +5196,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                           </div>
                           );
                         })()}
-                      </div>
+                      </ScrollArea>
 
                     {/* Manual Step Add */}
                     {connectionState === 'recording' && (
@@ -5197,7 +5258,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                         onClick={() => toggleStepSelection(idx)}
                                       >
                                         <Icon className="h-2.5 w-2.5 text-secondary" />
-                                        {idx + 1}. {ds.title}
+                                        {ds.displayNumber}. {ds.title}
                                         <XMarkIcon className="h-2.5 w-2.5 text-tertiary ml-0.5" />
                                       </span>
                                     );
@@ -5558,10 +5619,25 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                               />
                               {streamingAdvancedEnabled && (
                                 <button
-                                  onClick={() => setShowAIScriptAssistant(true)}
+                                  // One assistant, not two: this hands the caret to the
+                                  // bottom dock (which already writes ps.fn scripts into
+                                  // this very textarea). The rail stays OPEN — the dock's
+                                  // wrapper insets itself to the left of it — so the user
+                                  // watches the script fill in as the AI works.
+                                  onClick={() => {
+                                    if (connectionState !== 'recording' && connectionState !== 'connected') {
+                                      toast(t('Start the browser first — the AI writes the script against the live page.'), { icon: '💡' });
+                                      return;
+                                    }
+                                    setAiDockExpanded(true);
+                                    // Focus after the dock's slide-up commits, or the browser
+                                    // scrolls to a control that is still translated off-screen.
+                                    requestAnimationFrame(() => aiChatInputRef.current?.focus());
+                                  }}
+                                  title={t('Ask the AI to write this script — opens the assistant at the bottom of the stage')}
                                   className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-ink bg-chrome rounded-md hover:bg-chrome transition-colors"
                                 >
-                                  <SparklesIcon className="w-3 h-3" />
+                                  <ScribeMark className="w-3.5 h-3.5" />
                                   {t('AI Assist')}
                                 </button>
                               )}
@@ -5930,95 +6006,6 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                     </>
                     </div>
                   </>
-                    );
-                  })()}
-
-                  {/* AI Script Assistant — side panel */}
-                  {showAIScriptAssistant && (() => {
-                    // Shared: evaluate JS in recorder browser via WebSocket
-                    const wsEval = (script: string): Promise<any> => {
-                      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)
-                        return Promise.reject(new Error(t('Browser not connected')));
-                      return new Promise((resolve, reject) => {
-                        const ws = wsRef.current!;
-                        const timer = setTimeout(() => { ws.removeEventListener('message', h); reject(new Error(t('Eval timed out (10s) — recorder may not support evaluate_js'))); }, 10000);
-                        const h = (e: MessageEvent) => {
-                          try {
-                            const m = JSON.parse(e.data);
-                            if (m.type === 'eval_result') {
-                              clearTimeout(timer); ws.removeEventListener('message', h);
-                              if (m.error) reject(new Error(m.error));
-                              else resolve(m.result);
-                            } else if (m.type === 'error' && m.message?.includes('Script error')) {
-                              // Fallback: recorder returned error instead of eval_result
-                              clearTimeout(timer); ws.removeEventListener('message', h);
-                              reject(new Error(m.message));
-                            }
-                          } catch {}
-                        };
-                        ws.addEventListener('message', h);
-                        ws.send(JSON.stringify({ type: 'action', action: 'evaluate_js', script }));
-                      });
-                    };
-                    return (
-                      <div className={clsx(
-                        "absolute right-3 bottom-3 z-20 w-72 max-w-[calc(100%-1.5rem)] bg-surface/90 backdrop-blur-xl border border-border rounded-2xl shadow-2xl overflow-hidden",
-                        // Tuck below the recording URL/nav toolbar (z-40) so it isn't overlapped.
-                        connectionState === 'recording' ? 'top-16' : 'top-3',
-                      )}>
-                        <AIScriptAssistant
-                          open={showAIScriptAssistant}
-                          onClose={() => setShowAIScriptAssistant(false)}
-                          getScreenshot={getCanvasScreenshot}
-                          pageUrl={currentUrl}
-                          handlerNames={streamingHandlers.map((h: any) => h.name)}
-                          currentScript={streamingAdvancedScript}
-                          onApplyScript={(script) => { setStreamingAdvancedScript(script); setStreamingAdvancedEnabled(true); }}
-                          onGeneratingChange={setAiScriptGenerating}
-                          evaluateInPage={wsEval}
-                          onTestScript={async (script) => {
-                            try {
-                              // Extract action names from the script to build realistic test data
-                              const actionMatches = script.match(/action\s*===?\s*["'](\w+)["']/g) || [];
-                              const actions = actionMatches.map((m: string) => {
-                                const match = m.match(/["'](\w+)["']/);
-                                return match ? match[1] : null;
-                              }).filter(Boolean);
-                              const testAction = actions[0] || 'test';
-                              const testData: Record<string, any> = {};
-                              if (testAction.toLowerCase().includes('send') || testAction.toLowerCase().includes('message')) testData.message = 'Hello from test';
-                              if (testAction.toLowerCase().includes('search') || testAction.toLowerCase().includes('query')) testData.query = 'test query';
-
-                              // Use test_streaming_script — executes REAL Playwright actions
-                              if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)
-                                return { success: false, error: t('Browser not connected') };
-                              const ws = wsRef.current;
-                              const r: any = await new Promise((resolve, reject) => {
-                                const timer = setTimeout(() => { ws.removeEventListener('message', h); reject(new Error(t('Test timed out (30s)'))); }, 30000);
-                                const h = (e: MessageEvent) => {
-                                  try {
-                                    const m = JSON.parse(e.data);
-                                    if (m.type === 'eval_result') {
-                                      clearTimeout(timer); ws.removeEventListener('message', h);
-                                      if (m.error) reject(new Error(m.error));
-                                      else resolve(m.result);
-                                    }
-                                  } catch {}
-                                };
-                                ws.addEventListener('message', h);
-                                ws.send(JSON.stringify({
-                                  type: 'action',
-                                  action: 'test_streaming_script',
-                                  script,
-                                  test_action: testAction,
-                                  test_data: testData,
-                                }));
-                              });
-                              return r?.ok === false ? { success: false, error: r.error } : { success: true, result: r };
-                            } catch (e: any) { return { success: false, error: e.message }; }
-                          }}
-                        />
-                      </div>
                     );
                   })()}
                 </div>

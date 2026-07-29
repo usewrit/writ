@@ -48,6 +48,7 @@ from .stored_file import StoredFile
 from .local_workflow import LocalWorkflow
 from .ai_session import AiSession
 from .crawl_job import CrawlJob
+from .crawl_definition import CrawlDefinition
 
 
 __all__ = [
@@ -102,4 +103,5 @@ __all__ = [
     "LocalWorkflow",
     "AiSession",
     "CrawlJob",
+    "CrawlDefinition",
 ]

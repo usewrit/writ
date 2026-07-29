@@ -23,16 +23,25 @@ import logging
 import re
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
+from models.crawl_definition import CrawlDefinition
 from models.crawl_job import CrawlJob
 from security.api_key import get_current_api_key
 from security.validation import InputValidator
-from services import crawl_orchestrator, crawl_targeting, domain_guard, url_policy, visual_storage
+from services import (
+    crawl_orchestrator,
+    crawl_targeting,
+    crawl_definition_service,
+    domain_guard,
+    url_policy,
+    visual_storage,
+)
 from services.brand import DRAGNET_NAME
 
 logger = logging.getLogger(__name__)
@@ -139,6 +148,312 @@ async def start_crawl(
         allow_subdomains=body.allow_subdomains,
     )
     return _view(crawl)
+
+
+# --------------------------------------------------------------------------- #
+# Saved crawls — the callable API surface                                      #
+#                                                                              #
+# ROUTE ORDER: every route below MUST stay above ``GET /{crawl_id}``. FastAPI   #
+# matches in declaration order and "definitions" is not an int, so a later      #
+# declaration would be swallowed by the crawl-id route and 422 instead of       #
+# resolving here.                                                              #
+# --------------------------------------------------------------------------- #
+
+class SaveCrawlRequest(BaseModel):
+    """Create a saved, re-runnable crawl.
+
+    Provide EITHER ``config`` (the same shape as ``POST /api/crawl`` — whoever can
+    start a crawl can save one) OR ``from_crawl_id`` to capture the settings an
+    existing crawl actually ran with.
+
+    ``from_crawl_id`` exists because a crawl's status view deliberately does not
+    echo every knob (politeness, shard sizing, path filters), so a client cannot
+    faithfully reconstruct them — and one that filled the gaps with defaults would
+    produce a saved crawl that behaves differently from the one the user pointed
+    at. The row has full fidelity, so the server reads it.
+    """
+    name: Optional[str] = Field(None, max_length=200, description="Human label; defaults to the seed host")
+    slug: Optional[str] = Field(None, max_length=120, description="Stable URL ref; derived from the name when omitted")
+    description: Optional[str] = None
+    default_max_age_seconds: Optional[int] = Field(
+        None, ge=0, le=crawl_definition_service.MAX_FRESHNESS_SECONDS,
+        description="Freshness applied when a caller omits max_age (unset = always re-crawl)")
+    config: Optional[StartCrawlRequest] = Field(None, description="The crawl settings to save")
+    from_crawl_id: Optional[int] = Field(
+        None, description="Capture the settings from this existing crawl instead of passing config")
+
+
+class UpdateSavedCrawlRequest(BaseModel):
+    name: Optional[str] = Field(None, max_length=200)
+    description: Optional[str] = None
+    default_max_age_seconds: Optional[int] = Field(
+        None, ge=0, le=crawl_definition_service.MAX_FRESHNESS_SECONDS)
+    config: Optional[StartCrawlRequest] = None
+
+
+class RunSavedCrawlRequest(BaseModel):
+    """Body for the callable run. Every field is a DELIVERY control, never a
+    crawl setting — the settings are the saved ones, which is the point."""
+    max_age: Optional[int] = Field(
+        None, ge=0, le=crawl_definition_service.MAX_FRESHNESS_SECONDS,
+        description="Reuse the last completed crawl if it finished within this many seconds")
+    wait: bool = Field(False, description="Block until the crawl converges instead of returning a handle")
+    timeout: int = Field(120, ge=5, le=300, description="Seconds to block for when wait=true")
+    limit: int = Field(50, ge=1, le=500, description="Rows of collected data to inline in the response")
+
+
+def _definition_view(defn: CrawlDefinition) -> dict:
+    d = defn.summary()
+    d["run_url"] = f"/api/crawl/definitions/{defn.slug}/run"
+    d["data_url"] = f"/api/crawl/definitions/{defn.slug}/data"
+    return d
+
+
+async def _load_definition(db: AsyncSession, ref: str) -> CrawlDefinition:
+    """Resolve a saved crawl by numeric id OR slug."""
+    stmt = select(CrawlDefinition).where(
+        CrawlDefinition.id == int(ref) if ref.isdigit() else CrawlDefinition.slug == ref
+    )
+    defn = await db.scalar(stmt)
+    if not defn:
+        raise HTTPException(404, "Saved crawl not found")
+    return defn
+
+
+async def _inline_crawl_data(db: AsyncSession, crawl: CrawlJob, limit: int) -> Optional[dict]:
+    """The crawl's collected rows, read through the same engine the Workflow
+    Data API uses so a caller sees exactly what ``/api/workflows/{id}/data``
+    returns. Imported lazily — routers.automation is large and a module-scope
+    import here would close a cycle through the shared dispatch helpers."""
+    if not crawl.workflow_id:
+        return None
+    try:
+        from routers.automation import _scan_workflow_data_tasks
+        from services import extracted_data_table as edt
+
+        tasks, truncated = await _scan_workflow_data_tasks(db, crawl.workflow_id)
+        table = edt.build_table(tasks, declared=None, offset=0, limit=limit)
+        table["truncated"] = truncated
+        return table
+    except Exception:
+        # Data assembly must never sink an otherwise-successful call: the caller
+        # still gets the crawl status plus data_url to read at their leisure.
+        logger.exception("crawl %s: inline data assembly failed", crawl.id)
+        return None
+
+
+@router.post("/definitions", status_code=201)
+async def create_saved_crawl(
+    body: SaveCrawlRequest,
+    db: AsyncSession = Depends(get_db),
+    _api_key: dict = Depends(get_current_api_key),
+):
+    """Save a crawl configuration so it can be re-run by API with a minted key."""
+    if body.config is None and body.from_crawl_id is None:
+        raise HTTPException(400, "Provide either `config` or `from_crawl_id`.")
+    if body.from_crawl_id is not None:
+        source = await db.get(CrawlJob, body.from_crawl_id)
+        if not source:
+            raise HTTPException(404, "Crawl not found")
+        raw_config = crawl_definition_service.config_from_crawl(source)
+    else:
+        raw_config = body.config.model_dump(exclude_none=True)
+    config = crawl_definition_service.validate_config(raw_config)
+    seed_url = config.get("url") or ""
+    label = body.name or crawl_orchestrator._host(seed_url) or "Saved crawl"
+    slug = await crawl_definition_service.mint_slug(db, body.slug or label)
+    defn = CrawlDefinition(
+        name=label[:200],
+        slug=slug,
+        description=body.description,
+        config=config,
+        seed_url=seed_url,
+        default_max_age_seconds=crawl_definition_service.clamp_freshness(body.default_max_age_seconds),
+    )
+    db.add(defn)
+    await db.commit()
+    await db.refresh(defn)
+    return _definition_view(defn)
+
+
+@router.get("/definitions")
+async def list_saved_crawls(
+    db: AsyncSession = Depends(get_db),
+    _api_key: dict = Depends(get_current_api_key),
+    limit: int = Query(50, ge=1, le=200),
+):
+    rows = (await db.execute(
+        select(CrawlDefinition).order_by(CrawlDefinition.created_at.desc()).limit(limit)
+    )).scalars().all()
+    return {"definitions": [_definition_view(d) for d in rows]}
+
+
+@router.get("/definitions/{ref}")
+async def get_saved_crawl(
+    ref: str,
+    db: AsyncSession = Depends(get_db),
+    _api_key: dict = Depends(get_current_api_key),
+):
+    return _definition_view(await _load_definition(db, ref))
+
+
+@router.patch("/definitions/{ref}")
+async def update_saved_crawl(
+    ref: str,
+    body: UpdateSavedCrawlRequest,
+    db: AsyncSession = Depends(get_db),
+    _api_key: dict = Depends(get_current_api_key),
+):
+    defn = await _load_definition(db, ref)
+    if body.name is not None:
+        defn.name = body.name[:200]
+    if body.description is not None:
+        defn.description = body.description
+    if body.default_max_age_seconds is not None:
+        defn.default_max_age_seconds = crawl_definition_service.clamp_freshness(body.default_max_age_seconds)
+    if body.config is not None:
+        defn.config = crawl_definition_service.validate_config(body.config.model_dump(exclude_none=True))
+        defn.seed_url = defn.config.get("url") or defn.seed_url
+    await db.commit()
+    await db.refresh(defn)
+    return _definition_view(defn)
+
+
+@router.delete("/definitions/{ref}", status_code=204)
+async def delete_saved_crawl(
+    ref: str,
+    db: AsyncSession = Depends(get_db),
+    _api_key: dict = Depends(get_current_api_key),
+):
+    defn = await _load_definition(db, ref)
+    # The runs this definition launched are deliberately NOT deleted — their
+    # collected data outlives the config (CrawlJob.definition_id is SET NULL).
+    await db.delete(defn)
+    await db.commit()
+    return Response(status_code=204)
+
+
+@router.post("/definitions/{ref}/run")
+async def run_saved_crawl(
+    ref: str,
+    request: Request,
+    body: Optional[RunSavedCrawlRequest] = None,
+    db: AsyncSession = Depends(get_db),
+    _api_key: dict = Depends(get_current_api_key),
+):
+    """Run a saved crawl — the callable, key-minted crawl surface.
+
+    Freshness: pass ``max_age`` (body, ``?max_age=``, or ``Cache-Control:
+    max-age=``) and if the last completed run finished within that window its
+    already-collected data comes back immediately, with no crawl dispatched.
+    Otherwise the saved settings are re-crawled.
+
+    Delivery: a cold call returns **202** with a ``crawl_id`` and ``status_url``
+    — a site crawl routinely outlives any sane HTTP timeout, so a handle is the
+    honest answer. ``wait=true`` blocks up to ``timeout`` seconds; on overrun
+    that returns **504 with the same collectable handle**, never a dead end.
+    """
+    opts = body or RunSavedCrawlRequest()
+    defn = await _load_definition(db, ref)
+
+    max_age = crawl_definition_service.requested_max_age(
+        request.headers.get("cache-control"),
+        request.query_params.get("max_age"),
+        opts.max_age,
+    )
+    # The definition's default applies only when the caller said nothing at all.
+    # An explicit max_age=0 means "run it fresh" and must win over it.
+    if max_age is None:
+        max_age = defn.default_max_age_seconds
+
+    if max_age:
+        fresh = await crawl_definition_service.find_fresh_run(
+            db, definition_id=defn.id, max_age_seconds=max_age
+        )
+        if fresh:
+            age = crawl_definition_service.run_age_seconds(fresh)
+            return {
+                "cached": True,
+                "_cache": crawl_definition_service.cache_stamp(True, age, fresh.id),
+                "definition": _definition_view(defn),
+                "crawl": _view(fresh),
+                "status_url": f"/api/crawl/{fresh.id}",
+                "data_url": f"/api/automation/workflows/{fresh.workflow_id}/data" if fresh.workflow_id else None,
+                "data": await _inline_crawl_data(db, fresh, opts.limit),
+            }
+
+    crawl = await crawl_orchestrator.start_crawl(
+        db, **crawl_definition_service.to_start_kwargs(defn.config)
+    )
+    crawl.definition_id = defn.id
+    defn.last_run_at = crawl.created_at
+    await db.commit()
+
+    if opts.wait:
+        crawl = await crawl_definition_service.wait_for_crawl(db, crawl.id, timeout=opts.timeout)
+        if crawl is not None and crawl.is_terminal:
+            return {
+                "cached": False,
+                "_cache": crawl_definition_service.cache_stamp(False),
+                "definition": _definition_view(defn),
+                "crawl": _view(crawl),
+                "status_url": f"/api/crawl/{crawl.id}",
+                "data_url": f"/api/automation/workflows/{crawl.workflow_id}/data" if crawl.workflow_id else None,
+                "data": await _inline_crawl_data(db, crawl, opts.limit),
+            }
+        # Still running past the caller's budget. 504 WITH the handle, so the
+        # work already paid for stays collectable.
+        raise HTTPException(
+            504,
+            detail={
+                "error": "crawl_timeout",
+                "message": f"Crawl did not converge within {opts.timeout}s; it is still running.",
+                "crawl_id": crawl.id if crawl else None,
+                "status_url": f"/api/crawl/{crawl.id}" if crawl else None,
+                "retryable": True,
+            },
+        )
+
+    return JSONResponse(
+        status_code=202,
+        headers={"Location": f"/api/crawl/{crawl.id}", "Retry-After": "10"},
+        content={
+            "cached": False,
+            "_cache": crawl_definition_service.cache_stamp(False),
+            "definition": _definition_view(defn),
+            "crawl": _view(crawl),
+            "status_url": f"/api/crawl/{crawl.id}",
+            "data_url": f"/api/automation/workflows/{crawl.workflow_id}/data" if crawl.workflow_id else None,
+        },
+    )
+
+
+@router.get("/definitions/{ref}/data")
+async def get_saved_crawl_data(
+    ref: str,
+    db: AsyncSession = Depends(get_db),
+    _api_key: dict = Depends(get_current_api_key),
+    limit: int = Query(50, ge=1, le=500),
+):
+    """The data already collected by this saved crawl's most recent completed
+    run — a pure read, never dispatches a crawl."""
+    defn = await _load_definition(db, ref)
+    last = await db.scalar(
+        select(CrawlJob)
+        .where(CrawlJob.definition_id == defn.id, CrawlJob.status == "completed")
+        .order_by(CrawlJob.completed_at.desc())
+        .limit(1)
+    )
+    if not last:
+        return {"definition": _definition_view(defn), "crawl": None, "data": None,
+                "age_seconds": None, "data_url": None}
+    return {
+        "definition": _definition_view(defn),
+        "crawl": _view(last),
+        "age_seconds": crawl_definition_service.run_age_seconds(last),
+        "data_url": f"/api/automation/workflows/{last.workflow_id}/data" if last.workflow_id else None,
+        "data": await _inline_crawl_data(db, last, limit),
+    }
 
 
 # --------------------------------------------------------------------------- #

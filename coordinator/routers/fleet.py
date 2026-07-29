@@ -70,49 +70,41 @@ def _agent_repo() -> str:
     return (os.getenv("WRIT_AGENT_REPO") or "usewrit/writ-agent").strip().strip("/")
 
 
+def _base_or_default() -> str:
+    """The URL to build copy-paste commands against.
+
+    ``WRIT_PUBLIC_URL`` when configured; otherwise the default a local install
+    listens on, so a coordinator that has not been told its address still emits
+    something runnable on the same host rather than an empty string. The UI
+    warns separately when the public URL is unset — see ``/connect-info``.
+    """
+    return _http_base() or "http://localhost:8000"
+
+
+# Where /agent.sh installs the binary. Referenced by the manual run command so
+# the two steps compose: download with the one-liner, then run THAT binary.
+AGENT_INSTALL_PATH = "~/.writ/writ-agent-fleet"
+
+
 def _build_install_commands() -> dict:
     """Complete, copy-pasteable "get the agent onto this machine" commands.
 
-    The connect commands below assume a ``./writ-agent`` that already exists —
-    which is the one thing a new operator does NOT have. Every path here ends
-    with a runnable binary in the current directory (or, for Docker, an image
-    pulled on first run), so the fleet modal and the recorder's connect gate can
-    show acquisition and connection as one continuous story instead of linking
-    out to a releases page and hoping.
+    The connect commands below assume a ``writ-agent-fleet`` that already exists
+    — which is the one thing a new operator does NOT have. Every path here ends
+    with a runnable binary, so the fleet modal and the recorder's connect gate
+    can show acquisition and connection as one continuous story instead of
+    linking out to a releases page and hoping.
 
-    The asset is resolved from the GitHub API by the release's own
-    ``<os>-<arch>`` infix, NOT by a Rust target triple. That distinction has
-    already cost one release: matching ``aarch64-apple-darwin`` against assets
-    named ``writ-agent-fleet-macos-arm64.tar.gz`` finds nothing and fails naming
-    a string that appears nowhere in the release. The ``.sha256`` siblings carry
-    the same infix, so they are filtered out explicitly rather than left to
-    ordering luck.
+    The unix path is the coordinator's OWN installer in ``--download-only``
+    mode. It used to be a fifteen-line blob (a ``uname`` case statement, a
+    GitHub releases API call piped through grep/cut, an untar) pasted into the
+    modal — unreadable, and a second copy of resolution logic that ``/agent.sh``
+    already implements with checksum verification. One line, one implementation.
     """
     repo = _agent_repo()
     releases_api = f"https://api.github.com/repos/{repo}/releases/latest"
 
-    unix = (
-        "# Detect this machine, then pull the matching asset from the latest\n"
-        "# release and unpack it.\n"
-        'case "$(uname -s)-$(uname -m)" in\n'
-        '  Darwin-arm64)              TARGET=macos-arm64 ;;\n'
-        '  Darwin-x86_64)             TARGET=macos-x86_64 ;;\n'
-        '  Linux-x86_64)              TARGET=linux-x86_64 ;;\n'
-        '  Linux-aarch64|Linux-arm64) TARGET=linux-aarch64 ;;\n'
-        '  *) echo "unsupported platform: $(uname -sm) — build from source"; exit 1 ;;\n'
-        "esac\n"
-        # ${TARGET} MUST stay braced: bare $TARGET followed by '[' is an array
-        # subscript in zsh (macOS's default shell), which aborts the paste with
-        # "bad math expression" before curl ever runs.
-        f'URL=$(curl -fsSL {releases_api} \\\n'
-        '  | grep -o "\\"browser_download_url\\": *\\"[^\\"]*\\"" | cut -d\'"\' -f4 \\\n'
-        '  | grep -- "-${TARGET}\\." | grep -v "\\.sha256$" | head -1)\n'
-        '[ -n "$URL" ] || { echo "no release asset for ${TARGET} — build from source"; exit 1; }\n'
-        'curl -fL "$URL" -o writ-agent-fleet.tar.gz\n'
-        '# An archive, not a bare binary: the Playwright driver ships beside the\n'
-        '# executable and it cannot launch a browser without it.\n'
-        'tar -xzf writ-agent-fleet.tar.gz && chmod +x writ-agent-fleet'
-    )
+    unix = f"curl -fsSL {_base_or_default()}/agent.sh | sh -s -- --download-only"
 
     windows = (
         "# PowerShell — pull the matching asset from the latest release.\n"
@@ -164,19 +156,25 @@ def _doc_extract_env() -> dict[str, str]:
 
 
 def _build_connect_commands(raw_token: str) -> dict:
-    """Build the ACTUAL runnable invocations for the stock ``writ-agent`` binary.
+    """Build the ACTUAL runnable invocations for the agent this coordinator installs.
 
-    The binary takes its token from the ``WRIT_SERVICE_TOKEN`` env var (presence ⇒
-    infrastructure mode) and its coordinator URL from ``saas.url`` in its config
-    file — there is no ``--token`` flag and it never reads ``SAAS_URL``. So we emit:
+    The binary the install step above produces is ``writ-agent-fleet``, and it is
+    configured ENTIRELY BY ENVIRONMENT — token in ``WRIT_SERVICE_TOKEN``,
+    coordinator in ``WRIT_COORDINATOR_URL``, plaintext opt-in in
+    ``WRIT_FLEET_ALLOW_INSECURE``. It has no ``config`` subcommand and no
+    ``start`` subcommand; those belong to the DESKTOP ``writ-agent`` binary, and
+    emitting them here handed the operator a two-line command that could not run
+    against the binary the line above it had just downloaded. ``main.py``'s
+    ``/agent.sh`` is the reference for the contract used here — it launches the
+    same binary the same way.
 
-      * binary — set ``saas.url`` in the config, then run with the token in env.
-      * docker — the published image reads ``WRIT_SERVICE_TOKEN``; the URL is still
-        a config value, so we set it inside the container before ``start``.
+      * binary — one line: the env the agent reads, then the installed path.
+      * docker — the published image ships the desktop-style CLI, so the URL is
+        still set as a config value inside the container before ``start``.
 
-    ``allow_insecure`` is appended only for a non-loopback plaintext ``http://``
+    ``allow_insecure`` is set only for a non-loopback plaintext ``http://``
     base, because the agent refuses to send its bearer token over plaintext to a
-    non-loopback host unless ``saas.allow_insecure=true`` (see the agent's
+    non-loopback host unless it is opted in (see the agent's
     ``require_secure_url``). Loopback and ``https://`` need no such opt-in.
 
     Loopback addresses are rewritten to ``host.docker.internal`` in the DOCKER
@@ -197,22 +195,17 @@ def _build_connect_commands(raw_token: str) -> dict:
         if host not in ("localhost", "127.0.0.1", "::1", "[::1]"):
             needs_insecure = True
 
-    # `./writ-agent` — the self-host flow downloads the release binary and runs it
-    # from the current directory, so macOS/Linux (and PowerShell) need the `./`
-    # prefix; a bare `writ-agent` only works if it happens to be on PATH. The Docker
-    # variant below stays bare because the binary is on PATH inside the image.
-    insecure_line = "./writ-agent config set saas.allow_insecure true\n" if needs_insecure else ""
-
     # Document/OCR settings ride along in the same env prefix as the token, so
     # the operator never has to know this lane exists to get it working.
     doc_env = _doc_extract_env()
-    doc_inline = "".join(f"{k}={v} " for k, v in doc_env.items())
 
-    binary = (
-        f"./writ-agent config set saas.url {url}\n"
-        f"{insecure_line}"
-        f"WRIT_SERVICE_TOKEN={raw_token} {doc_inline}./writ-agent start --headless"
-    )
+    # One line, in the same env-var form `/agent.sh` uses to launch it, ending in
+    # the path that installer writes to — so "download" then "run" compose.
+    binary_env = [f"WRIT_SERVICE_TOKEN={raw_token}", f"WRIT_COORDINATOR_URL={url}"]
+    if needs_insecure:
+        binary_env.append("WRIT_FLEET_ALLOW_INSECURE=1")
+    binary_env += [f"{k}={v}" for k, v in doc_env.items()]
+    binary = " ".join(binary_env + [AGENT_INSTALL_PATH])
 
     docker_image = os.getenv("WRIT_AGENT_DOCKER_IMAGE", "ghcr.io/usewrit/writ-agent:latest")
 
@@ -263,6 +256,55 @@ def _build_connect_commands(raw_token: str) -> dict:
     return {"connect_command": binary, "docker_command": docker}
 
 
+def _operator_names(registry: dict) -> tuple[dict, dict]:
+    """Operator-chosen agent labels from the token registry, keyed two ways.
+
+    An agent never learns the name it was minted with — nothing on the wire
+    carries one — so without this lookup the connect modal's "Name" field wrote
+    a label into the registry that no surface ever read, and every machine
+    listed as its raw ``writ-xxxxxxxx`` id.
+
+    Keyed by BOTH agent id and token prefix because the two can diverge: the
+    token pins an agent_id, but a reconnecting agent may claim its own stored id
+    and land on a different row (see ``_register_agent``'s reuse paths). The
+    token prefix is stamped onto that row's meta at registration and identifies
+    the mint exactly.
+
+    Only ``display_name`` counts. ``name`` always holds something — a generated
+    ``agent-<timestamp>`` for pairing codes, or the ``fleet-agent`` default — and
+    promoting those would relabel every unnamed machine with a placeholder
+    nobody chose.
+    """
+    by_agent: dict[str, str] = {}
+    by_prefix: dict[str, str] = {}
+    for tk in (registry or {}).get("tokens", []) or []:
+        label = (tk.get("display_name") or "").strip()
+        # A revoked token's label belongs to a machine that was torn out.
+        if not label or tk.get("revoked_at"):
+            continue
+        if tk.get("agent_id"):
+            by_agent[tk["agent_id"]] = label
+        if tk.get("token_prefix"):
+            by_prefix[tk["token_prefix"]] = label
+    return by_agent, by_prefix
+
+
+def _agent_display_name(
+    agent_id: str,
+    meta: dict,
+    by_agent: dict,
+    by_prefix: dict,
+) -> str:
+    """What to call this agent in the fleet list, best source first."""
+    return (
+        (meta or {}).get("name")
+        or (meta or {}).get("hostname")
+        or by_agent.get(agent_id)
+        or by_prefix.get((meta or {}).get("oauth_token_prefix") or "")
+        or agent_id
+    )
+
+
 # ============================================================
 # GET /api/fleet/agents — the live fleet
 # ============================================================
@@ -282,6 +324,13 @@ async def list_fleet_agents(
 
     connected = {r["agent_id"]: r for r in get_all_connected_recorders()}
 
+    try:
+        names = _operator_names(await _load_token_registry(db))
+    except Exception as e:  # a naming nicety must never break the fleet list
+        logger.warning("Could not read fleet token names: %s", e)
+        names = ({}, {})
+    names_by_agent, names_by_prefix = names
+
     # REVOKED agents were explicitly torn out of the fleet (token revoke / remove)
     # — they must not keep haunting the list, which is the whole "surfaces many
     # old agents" complaint. Everything else (active / inactive / suspended) still
@@ -299,7 +348,7 @@ async def list_fleet_agents(
         seen.add(a.agent_id)
         live = connected.get(a.agent_id)
         meta = a.meta or {}
-        name = meta.get("name") or meta.get("hostname") or a.agent_id
+        name = _agent_display_name(a.agent_id, meta, names_by_agent, names_by_prefix)
         # An OFFLINE agent has no live registry entry, but its operator override
         # is on the durable row — surface it so the Fleet page can still show
         # (and edit) the pin for a machine that is currently down, instead of
@@ -331,7 +380,7 @@ async def list_fleet_agents(
             continue
         agents.append({
             "id": agent_id,
-            "name": live.get("name") or agent_id,
+            "name": live.get("name") or names_by_agent.get(agent_id) or agent_id,
             "platform": live.get("platform", "unknown"),
             "online": True,
             "last_seen": live.get("connected_at"),
@@ -1201,10 +1250,16 @@ async def mint_fleet_token(
     flow mints through the identical path — same registry entry, same channel
     key, same revocation semantics — rather than a second implementation that
     could drift."""
-    return await _mint_fleet_token(request, db, body.name)
+    return await _mint_fleet_token(request, db, body.name, operator_named=True)
 
 
-async def _mint_fleet_token(request: Request, db: AsyncSession, raw_name: str | None) -> dict:
+async def _mint_fleet_token(
+    request: Request,
+    db: AsyncSession,
+    raw_name: str | None,
+    *,
+    operator_named: bool = False,
+) -> dict:
     """Mint a long-lived infrastructure service token for a new fleet agent.
 
     Returns the raw token ONCE. The stock ``writ-agent`` binary reads its token
@@ -1275,6 +1330,12 @@ async def _mint_fleet_token(request: Request, db: AsyncSession, raw_name: str | 
         reg["tokens"].append({
             "token_id": token_id,
             "name": name,
+            # Only a name the OPERATOR typed labels the machine in the fleet
+            # list. `name` always has a value (a generated `agent-<timestamp>`
+            # for pairing codes, or the "fleet-agent" default), and promoting
+            # those to display names would relabel every unnamed agent with a
+            # timestamp instead of leaving its id visible.
+            "display_name": (raw_name or "").strip() if operator_named else None,
             "agent_id": agent_id,
             "token_prefix": token_prefix,
             "created_at": _now_iso(),
@@ -1310,8 +1371,10 @@ async def _mint_fleet_token(request: Request, db: AsyncSession, raw_name: str | 
 #
 # The token path above assumes a second machine. When the operator is sitting at
 # the machine the coordinator runs on (the run-local.sh case, i.e. most first
-# installs), the whole download → configure → launch sequence can just be done
-# for them. See services/local_agent.py for the guard rails.
+# installs), the whole mint → install → launch sequence can just be done for them.
+# The install step runs the SAME /agent.sh this router hands out above, in
+# --download-only mode, so there is no second asset-resolution implementation to
+# drift. See services/local_agent.py for the guard rails.
 
 
 @router.get("/local-agent")
@@ -1329,6 +1392,7 @@ async def local_agent_status(_admin=Depends(require_platform_admin)):
 @router.post("/local-agent")
 async def start_local_agent(
     body: MintTokenRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     _admin=Depends(require_platform_admin),
 ):
@@ -1338,6 +1402,13 @@ async def start_local_agent(
     in the registry and stays revocable) and is handed straight to the child
     process's environment — it is never returned to the browser, because nobody
     needs to paste it anywhere.
+
+    ``request`` is threaded through because the mint needs it (the per-agent
+    channel key is written to the Redis client on ``app.state``). This route used
+    to call the ROUTE FUNCTION ``mint_fleet_token(body, db=…, _admin=…)`` and omit
+    it — outside FastAPI nothing fills a route's parameters in, so that call
+    raised ``TypeError: missing 1 required positional argument: 'request'`` and
+    every "run one on this machine" attempt 500'd before touching the host.
     """
     from services import local_agent
 
@@ -1357,10 +1428,9 @@ async def start_local_agent(
             ),
         )
 
-    minted = await mint_fleet_token(
-        MintTokenRequest(name=(body.name or "").strip() or "local-agent"),
-        db=db,
-        _admin=_admin,
+    label = (body.name or "").strip()
+    minted = await _mint_fleet_token(
+        request, db, label or "local-agent", operator_named=bool(label),
     )
 
     try:
@@ -1383,7 +1453,7 @@ async def stop_local_agent(_admin=Depends(require_platform_admin)):
     from services import local_agent
 
     try:
-        return local_agent.stop()
+        return await local_agent.stop()
     except local_agent.LocalAgentError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1518,9 +1588,19 @@ class PairCodeResponse(BaseModel):
     install_commands: dict
 
 
+class PairCodeRequest(BaseModel):
+    """Optional label for the machine being enrolled.
+
+    The body is optional as a whole — `POST /pair-code` with no body still
+    works, which is what the setup wizard sends.
+    """
+    name: Optional[str] = None
+
+
 @router.post("/pair-code", response_model=PairCodeResponse)
 async def mint_pair_code(
     request: Request,
+    body: Optional[PairCodeRequest] = None,
     db: AsyncSession = Depends(get_db),
     _admin=Depends(require_platform_admin),
 ):
@@ -1531,8 +1611,9 @@ async def mint_pair_code(
     minted here and now, so revoking the resulting agent works exactly as it
     does for a hand-minted token (the registry entry below is the same one).
     """
-    name = f"agent-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
-    minted = await _mint_fleet_token(request, db, name)
+    label = (body.name or "").strip() if body else ""
+    name = label or f"agent-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    minted = await _mint_fleet_token(request, db, name, operator_named=bool(label))
 
     redis = await _pair_redis()
     # Retry on collision rather than trusting 32^7 blindly — a silent overwrite

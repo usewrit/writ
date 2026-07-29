@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
-import { PlusIcon, TrashIcon, PaperAirplaneIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, TrashIcon, PaperAirplaneIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
 import { SectionHead } from '../common/SectionHead';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { NumberInput, Switch } from '../ui';
+import { Expand } from '../ui/Expand';
+import { SettingGroup } from './SettingsLayout';
 import { apiErrorMessage } from '../../api/client';
 import {
   getAllProviders,
@@ -130,7 +132,7 @@ const PreferenceMatrixCard: React.FC = () => {
   );
 
   return (
-    <div className="border-t border-border pt-4 space-y-5">
+    <div className="pt-4 space-y-5">
       {prefs.catalog.events.map((event) => {
         const effective = prefs.effective[event.key] || {};
         return (
@@ -179,11 +181,11 @@ const PreferenceMatrixCard: React.FC = () => {
         </p>
         <div className="grid @pair/stage:grid-cols-2 gap-3">
           <div>
-            <label className="block text-xs text-secondary mb-1">{t('Phone (SMS / WhatsApp / Signal)')}</label>
+            <label className="block text-[13px] font-medium text-ink mb-1">{t('Phone (SMS / WhatsApp / Signal)')}</label>
             <Input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+15551234567" />
           </div>
           <div>
-            <label className="block text-xs text-secondary mb-1">{t('Pushover user key')}</label>
+            <label className="block text-[13px] font-medium text-ink mb-1">{t('Pushover user key')}</label>
             <Input
               value={pushoverKey}
               onChange={(e) => setPushoverKey(e.target.value)}
@@ -201,33 +203,70 @@ const PreferenceMatrixCard: React.FC = () => {
   );
 };
 
-const ProviderCard: React.FC<{
+/**
+ * One delivery channel, as a DISCLOSURE row.
+ *
+ * All five providers used to render their full form at once — an SMTP block, a
+ * Pushover block, Twilio plus its recipient list, WhatsApp, Signal — stacked
+ * under identical hairlines with no containment. The page was a wall you had to
+ * scroll to find the one channel you came to set up, and every field was equally
+ * loud whether or not you used that channel.
+ *
+ * Collapsed, the five rows are a menu: name, what state it is in, done. Open one
+ * and only that form exists. `Expand` is the app's shared collapsible (so this
+ * animates like every other disclosure rather than snapping), and `mountOnEnter`
+ * keeps four unopened provider forms — each with its own effects and fetches —
+ * from mounting at all.
+ */
+/** Every delivery-channel component takes the same shape. */
+type ProviderProps = {
+  configured: boolean;
+  enabled: boolean;
+  refresh: () => void;
+  open: boolean;
+  onToggle: () => void;
+};
+
+const ProviderRow: React.FC<{
   title: string;
   configured: boolean;
   enabled: boolean;
+  open: boolean;
+  onToggle: () => void;
   children: React.ReactNode;
-}> = ({ title, configured, enabled, children }) => {
+}> = ({ title, configured, enabled, open, onToggle, children }) => {
   const { t } = useTranslation();
+  const tone = configured && enabled ? 'on' : configured ? 'idle' : 'off';
   return (
-    <div className="border-t border-border pt-4 space-y-4">
-      <div className="flex items-center justify-between">
-        <h4 className="text-base font-semibold text-ink tracking-tight">{title}</h4>
+    <div className="border-b border-border">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="flex w-full items-center gap-3 py-3.5 text-left transition-colors hover:bg-hover/40"
+      >
+        <ChevronRightIcon
+          className={clsx('h-4 w-4 shrink-0 text-tertiary transition-transform', open && 'rotate-90')}
+        />
+        <span className="min-w-0 flex-1 text-[13px] font-medium leading-snug text-ink">{title}</span>
         <span
           className={clsx(
-            'inline-flex items-center gap-1.5 text-xs',
-            configured && enabled ? 'text-emerald-600' : configured ? 'text-amber-600' : 'text-tertiary',
+            'inline-flex shrink-0 items-center gap-1.5 text-[12px]',
+            tone === 'on' ? 'text-emerald-600' : tone === 'idle' ? 'text-amber-600' : 'text-tertiary',
           )}
         >
           <span
             className={clsx(
-              'w-1.5 h-1.5 rounded-full',
-              configured && enabled ? 'bg-emerald-500' : configured ? 'bg-amber-500' : 'bg-zinc-300',
+              'h-1.5 w-1.5 rounded-full',
+              tone === 'on' ? 'bg-emerald-500' : tone === 'idle' ? 'bg-amber-500' : 'bg-zinc-300',
             )}
           />
-          {configured ? (enabled ? t('Enabled') : t('Configured, off')) : t('Not configured')}
+          {configured ? (enabled ? t('Enabled') : t('Configured, off')) : t('Not set up')}
         </span>
-      </div>
-      {children}
+      </button>
+      <Expand open={open} mountOnEnter className="pb-5 pl-7 pr-1 space-y-4">
+        {children}
+      </Expand>
     </div>
   );
 };
@@ -288,10 +327,12 @@ const RecipientList: React.FC<{
 };
 
 // ── Email / SMTP ────────────────────────────────────────────────────────────
-const EmailProvider: React.FC<{ configured: boolean; enabled: boolean; refresh: () => void }> = ({
+const EmailProvider: React.FC<ProviderProps> = ({
   configured,
   enabled,
   refresh,
+  open,
+  onToggle,
 }) => {
   const { t } = useTranslation();
   const [form, setForm] = useState({
@@ -352,7 +393,7 @@ const EmailProvider: React.FC<{ configured: boolean; enabled: boolean; refresh: 
   };
 
   return (
-    <ProviderCard title={t('Email (SMTP)')} configured={configured} enabled={enabled}>
+    <ProviderRow open={open} onToggle={onToggle} title={t('Email (SMTP)')} configured={configured} enabled={enabled}>
       <div className="grid @pair/stage:grid-cols-2 gap-3">
         <Input value={form.smtp_host} onChange={(e) => setForm((f) => ({ ...f, smtp_host: e.target.value }))} placeholder={t('SMTP host')} />
         <NumberInput value={form.smtp_port} onChange={(v) => setForm((f) => ({ ...f, smtp_port: v ?? 587 }))} min={1} max={65535} />
@@ -377,15 +418,17 @@ const EmailProvider: React.FC<{ configured: boolean; enabled: boolean; refresh: 
           {t('Test')}
         </Button>
       </div>
-    </ProviderCard>
+    </ProviderRow>
   );
 };
 
 // ── Pushover ────────────────────────────────────────────────────────────────
-const PushoverProvider: React.FC<{ configured: boolean; enabled: boolean; refresh: () => void }> = ({
+const PushoverProvider: React.FC<ProviderProps> = ({
   configured,
   enabled,
   refresh,
+  open,
+  onToggle,
 }) => {
   const { t } = useTranslation();
   const [appToken, setAppToken] = useState('');
@@ -412,7 +455,7 @@ const PushoverProvider: React.FC<{ configured: boolean; enabled: boolean; refres
   };
 
   return (
-    <ProviderCard title={t('Pushover')} configured={configured} enabled={enabled}>
+    <ProviderRow open={open} onToggle={onToggle} title={t('Pushover')} configured={configured} enabled={enabled}>
       <div className="grid @pair/stage:grid-cols-2 gap-3">
         <Input value={appToken} onChange={(e) => setAppToken(e.target.value)} placeholder={configured ? t('App token (leave blank to keep)') : t('App token')} />
         <Input value={userKey} onChange={(e) => setUserKey(e.target.value)} placeholder={configured ? t('User/group key (leave blank to keep)') : t('User/group key')} />
@@ -420,15 +463,17 @@ const PushoverProvider: React.FC<{ configured: boolean; enabled: boolean; refres
       <div className="flex justify-end">
         <Button onClick={save} loading={saving} size="sm">{t('Save')}</Button>
       </div>
-    </ProviderCard>
+    </ProviderRow>
   );
 };
 
 // ── Twilio SMS ──────────────────────────────────────────────────────────────
-const TwilioProvider: React.FC<{ configured: boolean; enabled: boolean; refresh: () => void }> = ({
+const TwilioProvider: React.FC<ProviderProps> = ({
   configured,
   enabled,
   refresh,
+  open,
+  onToggle,
 }) => {
   const { t } = useTranslation();
   const [form, setForm] = useState({ account_sid: '', auth_token: '', from_phone: '', enabled: true });
@@ -473,7 +518,7 @@ const TwilioProvider: React.FC<{ configured: boolean; enabled: boolean; refresh:
   };
 
   return (
-    <ProviderCard title={t('Twilio SMS')} configured={configured} enabled={enabled}>
+    <ProviderRow open={open} onToggle={onToggle} title={t('Twilio SMS')} configured={configured} enabled={enabled}>
       <div className="grid @pair/stage:grid-cols-2 gap-3">
         <Input value={form.account_sid} onChange={(e) => setForm((f) => ({ ...f, account_sid: e.target.value }))} placeholder={t('Account SID')} />
         <Input type="password" value={form.auth_token} onChange={(e) => setForm((f) => ({ ...f, auth_token: e.target.value }))} placeholder={configured ? t('Auth token (leave blank to keep)') : t('Auth token')} />
@@ -511,15 +556,17 @@ const TwilioProvider: React.FC<{ configured: boolean; enabled: boolean; refresh:
           }}
         />
       </div>
-    </ProviderCard>
+    </ProviderRow>
   );
 };
 
 // ── WhatsApp ────────────────────────────────────────────────────────────────
-const WhatsAppProvider: React.FC<{ configured: boolean; enabled: boolean; refresh: () => void }> = ({
+const WhatsAppProvider: React.FC<ProviderProps> = ({
   configured,
   enabled,
   refresh,
+  open,
+  onToggle,
 }) => {
   const { t } = useTranslation();
   const [form, setForm] = useState({ account_sid: '', auth_token: '', from_number: '', enabled: true });
@@ -564,7 +611,7 @@ const WhatsAppProvider: React.FC<{ configured: boolean; enabled: boolean; refres
   };
 
   return (
-    <ProviderCard title={t('WhatsApp')} configured={configured} enabled={enabled}>
+    <ProviderRow open={open} onToggle={onToggle} title={t('WhatsApp')} configured={configured} enabled={enabled}>
       <div className="grid @pair/stage:grid-cols-2 gap-3">
         <Input value={form.account_sid} onChange={(e) => setForm((f) => ({ ...f, account_sid: e.target.value }))} placeholder={t('Account SID')} />
         <Input type="password" value={form.auth_token} onChange={(e) => setForm((f) => ({ ...f, auth_token: e.target.value }))} placeholder={configured ? t('Auth token (leave blank to keep)') : t('Auth token')} />
@@ -602,15 +649,17 @@ const WhatsAppProvider: React.FC<{ configured: boolean; enabled: boolean; refres
           }}
         />
       </div>
-    </ProviderCard>
+    </ProviderRow>
   );
 };
 
 // ── Signal ──────────────────────────────────────────────────────────────────
-const SignalProvider: React.FC<{ configured: boolean; enabled: boolean; refresh: () => void }> = ({
+const SignalProvider: React.FC<ProviderProps> = ({
   configured,
   enabled,
   refresh,
+  open,
+  onToggle,
 }) => {
   const { t } = useTranslation();
   const [form, setForm] = useState({ api_url: '', sender_number: '', enabled: true });
@@ -655,7 +704,7 @@ const SignalProvider: React.FC<{ configured: boolean; enabled: boolean; refresh:
   };
 
   return (
-    <ProviderCard title={t('Signal')} configured={configured} enabled={enabled}>
+    <ProviderRow open={open} onToggle={onToggle} title={t('Signal')} configured={configured} enabled={enabled}>
       <div className="grid @pair/stage:grid-cols-2 gap-3">
         <Input value={form.api_url} onChange={(e) => setForm((f) => ({ ...f, api_url: e.target.value }))} placeholder={t('signal-cli REST API URL')} />
         <Input value={form.sender_number} onChange={(e) => setForm((f) => ({ ...f, sender_number: e.target.value }))} placeholder={t('Sender number')} />
@@ -692,7 +741,7 @@ const SignalProvider: React.FC<{ configured: boolean; enabled: boolean; refresh:
           }}
         />
       </div>
-    </ProviderCard>
+    </ProviderRow>
   );
 };
 
@@ -731,7 +780,7 @@ const BehaviorCard: React.FC = () => {
   if (loading || !data) return <div className="text-sm text-secondary">{t('Loading...')}</div>;
 
   return (
-    <div className="border-t border-border pt-4 space-y-5">
+    <div className="pt-4 space-y-5">
       <Switch
         checked={data.quiet_hours_enabled}
         onChange={(v) => set('quiet_hours_enabled', v)}
@@ -742,11 +791,11 @@ const BehaviorCard: React.FC = () => {
       {data.quiet_hours_enabled && (
         <div className="grid @pair/stage:grid-cols-2 gap-3 pl-1">
           <div>
-            <label className="block text-xs text-secondary mb-1">{t('Start (HH:MM)')}</label>
+            <label className="block text-[13px] font-medium text-ink mb-1">{t('Start (HH:MM)')}</label>
             <Input value={data.quiet_hours_start || ''} onChange={(e) => set('quiet_hours_start', e.target.value)} placeholder="22:00" />
           </div>
           <div>
-            <label className="block text-xs text-secondary mb-1">{t('End (HH:MM)')}</label>
+            <label className="block text-[13px] font-medium text-ink mb-1">{t('End (HH:MM)')}</label>
             <Input value={data.quiet_hours_end || ''} onChange={(e) => set('quiet_hours_end', e.target.value)} placeholder="07:00" />
           </div>
         </div>
@@ -762,11 +811,11 @@ const BehaviorCard: React.FC = () => {
       {data.rate_limiting_enabled && (
         <div className="grid @pair/stage:grid-cols-2 gap-3 pl-1">
           <div>
-            <label className="block text-xs text-secondary mb-1">{t('Max per period')}</label>
+            <label className="block text-[13px] font-medium text-ink mb-1">{t('Max per period')}</label>
             <NumberInput min={1} value={data.rate_limit_max} onChange={(v) => set('rate_limit_max', v ?? 5)} />
           </div>
           <div>
-            <label className="block text-xs text-secondary mb-1">{t('Period')}</label>
+            <label className="block text-[13px] font-medium text-ink mb-1">{t('Period')}</label>
             <Input value={data.rate_limit_period} onChange={(e) => set('rate_limit_period', e.target.value)} placeholder="hour" />
           </div>
         </div>
@@ -781,7 +830,7 @@ const BehaviorCard: React.FC = () => {
       />
       {data.batch_enabled && (
         <div className="pl-1">
-          <label className="block text-xs text-secondary mb-1">{t('Batch window (minutes)')}</label>
+          <label className="block text-[13px] font-medium text-ink mb-1">{t('Batch window (minutes)')}</label>
           <NumberInput min={1} value={data.batch_window_minutes} onChange={(v) => set('batch_window_minutes', v ?? 5)} />
         </div>
       )}
@@ -807,6 +856,13 @@ const BehaviorCard: React.FC = () => {
 export const NotificationsSection: React.FC = () => {
   const { t } = useTranslation();
   const [status, setStatus] = useState<Record<string, { configured: boolean; enabled: boolean }>>({});
+  // Accordion: one channel open at a time. Configuring a provider is a
+  // one-at-a-time job, and letting several stand open rebuilds the wall of forms
+  // this page was. `null` = all collapsed, which is the useful default — the
+  // collapsed list reads as a menu of channels and their state.
+  const [openProvider, setOpenProvider] = useState<string | null>(null);
+  const toggleProvider = (key: string) =>
+    setOpenProvider((cur) => (cur === key ? null : key));
 
   const refresh = () => {
     getAllProviders()
@@ -829,44 +885,47 @@ export const NotificationsSection: React.FC = () => {
 
   const st = (k: string) => status[k] || { configured: false, enabled: false };
 
+  // Shared by all five rows; only `configured`/`enabled` differ per provider.
+  const rowProps = (key: string) => ({
+    configured: st(key).configured,
+    enabled: st(key).enabled,
+    refresh,
+    open: openProvider === key,
+    onToggle: () => toggleProvider(key),
+  });
+
   return (
-    <div className="space-y-6">
+    // ONE SectionHead for the tab, then hairline-ruled groups — the rhythm
+    // SectionHead's own contract describes. This page used to stack FOUR
+    // SectionHeads, so four different things all announced themselves with the
+    // same h2 and nothing read as subordinate to anything else.
+    <div className="space-y-9">
       <SectionHead
         title={t('Notifications')}
-        description={t('Configure delivery channels and how alerts are batched and throttled.')}
+        description={t('Where alerts reach you, which channels are set up, and how they are throttled.')}
       />
 
-      <div>
-        <SectionHead
-          title={t("What you're notified about")}
-          description={t('Choose the channels each platform event reaches you on.')}
-        />
-        <div className="mt-3">
-          <PreferenceMatrixCard />
-        </div>
-      </div>
+      <SettingGroup
+        title={t("What you're notified about")}
+        description={t('Choose the channels each platform event reaches you on.')}
+      >
+        <PreferenceMatrixCard />
+      </SettingGroup>
 
-      <div>
-        <SectionHead
-          title={t('Delivery channels')}
-          description={t('Provider setup, per-channel tests, and monitor-alert recipients.')}
-        />
-      </div>
+      <SettingGroup
+        title={t('Delivery channels')}
+        description={t('Open a channel to set it up, send a test, or manage its recipients.')}
+      >
+        <EmailProvider {...rowProps('email')} />
+        <PushoverProvider {...rowProps('pushover')} />
+        <TwilioProvider {...rowProps('twilio')} />
+        <WhatsAppProvider {...rowProps('whatsapp')} />
+        <SignalProvider {...rowProps('signal')} />
+      </SettingGroup>
 
-      <div className="space-y-4">
-        <EmailProvider configured={st('email').configured} enabled={st('email').enabled} refresh={refresh} />
-        <PushoverProvider configured={st('pushover').configured} enabled={st('pushover').enabled} refresh={refresh} />
-        <TwilioProvider configured={st('twilio').configured} enabled={st('twilio').enabled} refresh={refresh} />
-        <WhatsAppProvider configured={st('whatsapp').configured} enabled={st('whatsapp').enabled} refresh={refresh} />
-        <SignalProvider configured={st('signal').configured} enabled={st('signal').enabled} refresh={refresh} />
-      </div>
-
-      <div>
-        <SectionHead title={t('Global behavior')} description={t('Applies across every channel.')} />
-        <div className="mt-3">
-          <BehaviorCard />
-        </div>
-      </div>
+      <SettingGroup title={t('Global behavior')} description={t('Applies across every channel.')}>
+        <BehaviorCard />
+      </SettingGroup>
     </div>
   );
 };

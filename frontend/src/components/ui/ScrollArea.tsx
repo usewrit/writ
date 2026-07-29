@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { ChevronUpIcon, ChevronDownIcon } from '@heroicons/react/24/outline';
@@ -125,6 +125,12 @@ export interface ScrollAreaProps extends React.HTMLAttributes<HTMLDivElement> {
   fade?: ScrollFade;
   /** Keep the native scrollbar (default false — the floating indicator replaces it). */
   showScrollbar?: boolean;
+  /**
+   * Handle on the scroll VIEWPORT, for callers that have to drive scrollTop
+   * themselves (e.g. a live log that pins to the newest row). Populated alongside
+   * the hook's own ref, never instead of it, so the hint keeps measuring.
+   */
+  viewportRef?: React.MutableRefObject<HTMLDivElement | null>;
   children: React.ReactNode;
 }
 
@@ -144,11 +150,21 @@ export const ScrollArea: React.FC<ScrollAreaProps> = ({
   viewportClassName,
   fade,
   showScrollbar = false,
+  viewportRef,
   children,
   ...rest
 }) => {
   const { scrollRef, canUp, canDown, scrollByPage } = useScrollHint<HTMLDivElement>();
   const [hovered, setHovered] = useState(false);
+  // One callback ref feeding both handles — a bare `ref={viewportRef}` would
+  // REPLACE the hook's ref and silently kill the hint's measurements.
+  const setViewport = useCallback(
+    (el: HTMLDivElement | null) => {
+      scrollRef.current = el;
+      if (viewportRef) viewportRef.current = el;
+    },
+    [scrollRef, viewportRef],
+  );
   return (
     <div
       // `min-w-0` is load-bearing: this wrapper is the flex item that sits next
@@ -163,7 +179,7 @@ export const ScrollArea: React.FC<ScrollAreaProps> = ({
       onMouseLeave={() => setHovered(false)}
     >
       <div
-        ref={scrollRef}
+        ref={setViewport}
         className={clsx(
           'relative flex-1 overflow-auto',
           // The floating indicator is the affordance, so the native scrollbar is

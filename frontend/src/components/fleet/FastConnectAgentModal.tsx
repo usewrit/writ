@@ -3,10 +3,9 @@ import {
   ArrowPathIcon,
   ArrowTopRightOnSquareIcon,
   CheckCircleIcon,
-  CommandLineIcon,
-  ComputerDesktopIcon,
-  SparklesIcon,
+  ChevronRightIcon,
 } from '@heroicons/react/24/outline';
+import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 
@@ -34,6 +33,15 @@ import { CopyButton } from './CopyButton';
  * Duplicating the flow would have made a second copy to drift; this component is
  * the single source both surfaces render.
  *
+ * ONE path leads: the pairing-code one-liner. It is the only route that works on a
+ * machine with nothing installed, and the only one where nothing can be pasted
+ * wrong. The modal used to open on a three-card fork that gave a raw-token flow
+ * equal billing with it, and that flow opened on a fifteen-line shell blob —
+ * a `uname` case statement over a GitHub releases API call — above a name input.
+ * Both alternatives still exist (a bakeable long-lived token is genuinely needed
+ * for Docker and CI), but they are one disclosure down, where a reader who does
+ * not need them never meets them.
+ *
  * Self-contained: it owns every piece of state the flow needs and talks only to
  * `fleetApi`. `onConnected` lets a host refresh its own lists when something
  * actually changes.
@@ -46,19 +54,26 @@ export const FastConnectAgentModal: React.FC<{
 }> = ({ isOpen, onClose, onConnected }) => {
   const { t } = useTranslation();
 
-  const [mintName, setMintName] = useState('');
-  const [minting, setMinting] = useState(false);
-  const [minted, setMinted] = useState<MintedFleetToken | null>(null);
-  // Which door the operator picked. `null` = still choosing.
-  const [connectMode, setConnectMode] = useState<'local' | 'oneline' | 'command' | null>(null);
-  const [localBusy, setLocalBusy] = useState(false);
-  const [localResult, setLocalResult] = useState<LocalAgentStatus | null>(null);
-  const [localError, setLocalError] = useState<string | null>(null);
-  // The one-liner path mints a PAIRING CODE, never a long-lived token. Minting both
-  // would enrol the same machine twice and race two writers into the token registry.
+  // One name for whichever path the operator takes. It is a real label now:
+  // the coordinator stores it against the minted token and the fleet list
+  // resolves it back, so a machine shows as "laptop-1" instead of its raw
+  // `writ-3f9c…` id. (Nothing on the wire carries it TO the agent — the agent
+  // never learns its own name — which is why the field used to do nothing.)
+  const [name, setName] = useState('');
+
+  // ── The one-liner: a single-use pairing code, never a long-lived token here.
   const [pairCode, setPairCode] = useState<PairCode | null>(null);
   const [pairBusy, setPairBusy] = useState(false);
   const [pairError, setPairError] = useState<string | null>(null);
+
+  // ── Advanced. Collapsed by default; opened by the operator, or by a failed
+  //    local start (which is exactly when the manual path becomes the answer).
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [localBusy, setLocalBusy] = useState(false);
+  const [localResult, setLocalResult] = useState<LocalAgentStatus | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [minting, setMinting] = useState(false);
+  const [minted, setMinted] = useState<MintedFleetToken | null>(null);
 
   const { data: connectInfo } = useQuery<FleetConnectInfo>(
     'fleet:connect-info',
@@ -71,18 +86,21 @@ export const FastConnectAgentModal: React.FC<{
     { silent: true },
   );
 
-  const dockerCommand = minted?.docker_command ?? '';
+  const trimmedName = name.trim();
+  const localBlocked = localAgent ? !localAgent.supported || localAgent.running : false;
 
-  const handleMint = async () => {
-    setMinting(true);
+  /** Mint the single-use pairing code behind the one-liner. */
+  const handleMintPair = async () => {
+    if (pairBusy) return;
+    setPairBusy(true);
+    setPairError(null);
     try {
-      setMinted(await fleetApi.mintToken(mintName.trim() || 'fleet-agent'));
-      setMintName('');
+      setPairCode(await fleetApi.mintPairCode(trimmedName || undefined));
       await onConnected?.();
-    } catch (e) {
-      toast.error(apiErrorMessage(e, t('Failed to mint fleet token')));
+    } catch (err) {
+      setPairError(apiErrorMessage(err, t('Could not prepare a connect code.')));
     } finally {
-      setMinting(false);
+      setPairBusy(false);
     }
   };
 
@@ -92,7 +110,10 @@ export const FastConnectAgentModal: React.FC<{
     setLocalBusy(true);
     setLocalError(null);
     try {
-      const res = await fleetApi.startLocalAgent(mintName.trim() || 'local-agent');
+      // Empty is meaningful: the coordinator names the registry entry itself and
+      // leaves the fleet list showing the agent's own id, rather than labelling
+      // every unnamed machine with a placeholder the operator never chose.
+      const res = await fleetApi.startLocalAgent(trimmedName);
       setLocalResult(res);
       await Promise.all([refreshLocalAgent(), onConnected?.()]);
       toast.success(res.status === 'already_running' ? t('Agent already running') : t('Agent started'));
@@ -104,333 +125,294 @@ export const FastConnectAgentModal: React.FC<{
     }
   };
 
-  /** Mint the single-use pairing code behind the one-liner. */
-  const handleMintPair = async () => {
-    setPairBusy(true);
-    setPairError(null);
+  const handleMintToken = async () => {
+    setMinting(true);
     try {
-      setPairCode(await fleetApi.mintPairCode());
+      setMinted(await fleetApi.mintToken(trimmedName));
       await onConnected?.();
-    } catch (err) {
-      setPairError(apiErrorMessage(err, t('Could not prepare a connect code.')));
+    } catch (e) {
+      toast.error(apiErrorMessage(e, t('Failed to mint fleet token')));
     } finally {
-      setPairBusy(false);
+      setMinting(false);
     }
   };
 
-  const closeMint = () => {
+  const closeModal = () => {
     onClose();
-    setMinted(null);
-    setMintName('');
-    setConnectMode(null);
-    setLocalResult(null);
-    setLocalError(null);
+    setName('');
     // A pairing code is single-use and short-lived; never let a stale one from a
-    // previous open be presented as if it were still good.
+    // previous open be presented as if it were still good. Same for a minted
+    // token's raw value, which is shown exactly once.
     setPairCode(null);
     setPairError(null);
+    setAdvancedOpen(false);
+    setLocalResult(null);
+    setLocalError(null);
+    setMinted(null);
   };
+
+  const expiryMinutes = pairCode ? Math.max(1, Math.round(pairCode.expires_in / 60)) : 0;
+
+  const dialHint = connectInfo?.ws_url ? (
+    <p className="text-[11.5px] text-tertiary">
+      {t('Agents will dial')}: <span className="font-mono text-secondary">{connectInfo.ws_url}</span>
+    </p>
+  ) : (
+    <p className="text-[11.5px] leading-relaxed text-amber-600">
+      {t('Set WRIT_PUBLIC_URL on the coordinator so agents know where to dial in. Configure it under Settings → Network.')}
+    </p>
+  );
 
   return (
     <Modal
       isOpen={isOpen}
-      onClose={closeMint}
-      title={minted ? t('Agent token created') : t('Connect a new agent')}
-      subtitle={minted ? t('Copy the command below — the raw token is shown only once.') : t('Mint a long-lived token, then run writ-agent-fleet with it.')}
+      onClose={closeModal}
+      title={t('Connect a new agent')}
+      subtitle={t('One line on the machine that should run the browsers.')}
     >
-      {!minted && connectMode === null ? (
-        /* ── The fork. Running one on this machine is the common first case,
-              so it leads — but only when preflight says this host can host it
-              (right platform, not a browser-less container). Otherwise the
-              card explains why and the copy-paste path is the only option. ── */
-        <div className="space-y-4">
-          <div>
-            <label className="mb-1 block text-sm font-medium text-ink">{t('Name')}</label>
-            <Input
-              value={mintName}
-              onChange={e => setMintName(e.target.value)}
-              placeholder={t('e.g. laptop-1, vps-eu')}
-              autoFocus
-            />
-          </div>
-
-          <div className="grid gap-2.5">
-            <button
-              onClick={() => { setConnectMode('local'); void handleStartLocal(); }}
-              disabled={localAgent ? !localAgent.supported || localAgent.running : false}
-              className="group flex items-start gap-3 rounded-xl border border-ink/30 bg-surface p-3.5 text-left transition-colors hover:border-ink/50 hover:bg-hover/40 disabled:cursor-not-allowed disabled:opacity-55 disabled:hover:border-ink/30 disabled:hover:bg-surface"
-            >
-              <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-chrome">
-                <ComputerDesktopIcon className="h-4 w-4 text-ink" />
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block text-[13.5px] font-semibold text-ink">{t('Run one on this machine')}</span>
-                <span className="mt-0.5 block text-[12px] leading-relaxed text-tertiary">
-                  {localAgent?.running
-                    ? t('An agent is already running here ({{name}}).', { name: localAgent.agent_name || t('local-agent') })
-                    : localAgent && !localAgent.supported
-                      ? localAgent.blockers.join(' ')
-                      : t('Downloads the agent for {{platform}}, points it at this coordinator, and starts it. Nothing to copy.', { platform: localAgent?.platform || t('this host') })}
-                </span>
-              </span>
-            </button>
-
-            {/* The one-liner. It is the path onboarding leads with and the one that
-                actually works for a machine that has NOTHING installed yet — the
-                token doors below both assume a ./writ-agent the reader must first
-                fetch. It was reachable only during first-run setup, so anyone adding
-                a second machine later was sent down the long path. */}
-            <button
-              onClick={() => { setConnectMode('oneline'); void handleMintPair(); }}
-              className="group flex items-start gap-3 rounded-xl border border-border bg-surface p-3.5 text-left transition-colors hover:border-ink/30 hover:bg-hover/40"
-            >
-              <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-chrome">
-                <SparklesIcon className="h-4 w-4 text-ink" />
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block text-[13.5px] font-semibold text-ink">{t('One line, any machine')}</span>
-                <span className="mt-0.5 block text-[12px] leading-relaxed text-tertiary">
-                  {t('Paste a single command over there — it downloads the agent, connects it, and expires after one use. Nothing to install first.')}
-                </span>
-              </span>
-            </button>
-
-            <button
-              onClick={() => setConnectMode('command')}
-              className="group flex items-start gap-3 rounded-xl border border-border bg-surface p-3.5 text-left transition-colors hover:border-ink/30 hover:bg-hover/40"
-            >
-              <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-chrome">
-                <CommandLineIcon className="h-4 w-4 text-ink" />
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block text-[13.5px] font-semibold text-ink">{t('Connect another machine')}</span>
-                <span className="mt-0.5 block text-[12px] leading-relaxed text-tertiary">
-                  {t('Mint a token and get the download + connect commands to run over there.')}
-                </span>
-              </span>
-            </button>
-          </div>
-
-          {connectInfo?.ws_url ? (
-            <p className="text-xs text-tertiary">
-              {t('Agents will dial')}: <span className="font-mono text-secondary">{connectInfo.ws_url}</span>
-            </p>
-          ) : (
-            <p className="text-xs text-amber-600">
-              {t('Set WRIT_PUBLIC_URL on the coordinator so agents know where to dial in. Configure it under Settings → Network.')}
-            </p>
-          )}
-          <div className="flex justify-end pt-1">
-            <Button variant="secondary" onClick={closeMint}>{t('Cancel')}</Button>
-          </div>
-        </div>
-      ) : connectMode === 'oneline' ? (
-        /* ── One line: a single-use pairing code, same as first-run onboarding. ── */
-        <div className="space-y-4">
-          {pairError ? (
-            <div className="rounded-lg border border-border bg-canvas px-3 py-2.5 text-[13px] text-secondary">{pairError}</div>
-          ) : pairBusy || !pairCode ? (
-            <div className="flex items-center gap-2 py-2 text-sm text-secondary">
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-800" />
-              {t('Preparing a connect code…')}
-            </div>
-          ) : (
-            <>
-              <p className="text-[12px] leading-relaxed text-secondary">
-                {t('Run this on the machine that should do the browsing. It installs the agent and connects it. The code works once and expires.')}
-              </p>
-              <div className="relative">
-                <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded-lg bg-ink p-3 font-mono text-[11px] leading-relaxed text-white/90">{pairCode.install_command}</pre>
-                <div className="absolute right-2 top-2">
-                  <CopyButton value={pairCode.install_command} />
-                </div>
-              </div>
-              {/* The agent list polls on its own, so an agent that dials in shows up
-                  above without the operator re-opening anything. */}
-              <p className="text-[11.5px] text-tertiary">
-                {t('The agent appears in the fleet above as soon as it connects.')}
-              </p>
-            </>
-          )}
-          <div className="flex justify-end gap-2 pt-1">
-            <Button variant="secondary" onClick={() => { setConnectMode(null); setPairCode(null); setPairError(null); }}>{t('Back')}</Button>
-            <Button onClick={closeMint}>{t('Done')}</Button>
-          </div>
-        </div>
-      ) : connectMode === 'local' ? (
-        /* ── Running one here: progress, then the outcome. ── */
-        <div className="space-y-4">
-          {localBusy && (
-            <div className="flex items-center gap-3 rounded-xl border border-border bg-canvas p-4">
-              <ArrowPathIcon className="h-4 w-4 shrink-0 animate-spin text-secondary" />
-              <div className="min-w-0">
-                <p className="text-[13px] font-medium text-ink">{t('Installing the agent on this machine…')}</p>
-                <p className="mt-0.5 text-[12px] text-tertiary">{t('Resolving the release, downloading, then starting it.')}</p>
-              </div>
-            </div>
-          )}
-
-          {localError && (
-            <div className="rounded-xl border border-amber-300 bg-amber-50 p-3.5">
-              <p className="text-[13px] font-medium text-amber-900">{t('Could not start it here')}</p>
-              <p className="mt-1 text-[12px] leading-relaxed text-amber-800">{localError}</p>
-              <button
-                onClick={() => { setLocalError(null); setConnectMode('command'); }}
-                className="mt-2.5 text-[12px] font-medium text-ink underline underline-offset-2"
-              >
-                {t('Use the command instead')}
-              </button>
-            </div>
-          )}
-
-          {localResult && !localError && (
-            <div className="space-y-2.5">
-              <div className="flex items-start gap-3 rounded-xl border border-border bg-canvas p-3.5">
-                <CheckCircleIcon className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
-                <div className="min-w-0">
-                  <p className="text-[13px] font-medium text-ink">
-                    {localResult.status === 'already_running' ? t('Already running here') : t('Agent is running on this machine')}
-                  </p>
-                  <p className="mt-0.5 text-[12px] leading-relaxed text-tertiary">
-                    {t('It appears in the fleet above and picks up work automatically.')}
-                    {localResult.pid ? ` · PID ${localResult.pid}` : ''}
-                  </p>
-                </div>
-              </div>
-              {localResult.checksum_verified === false && (
-                /* Say so rather than implying a verification that did not happen. */
-                <p className="text-[11.5px] leading-relaxed text-tertiary">
-                  {t('The release published no checksum for this asset, so its integrity was not verified.')}
-                </p>
-              )}
-              <p className="text-[11.5px] text-tertiary">
-                {t('Logs')}: <span className="font-mono">{localResult.log_path}</span>
+      <div className="space-y-4">
+        {/* ── The one-liner. The only path that works on a machine with nothing
+              installed, so it is the only one shown at this level. ── */}
+        {!pairCode ? (
+          <div className="space-y-3">
+            <div>
+              <label className="mb-1 block text-sm font-medium text-ink" htmlFor="fleet-agent-name">
+                {t('Name this machine')}{' '}
+                <span className="font-normal text-tertiary">{t('(optional)')}</span>
+              </label>
+              <Input
+                id="fleet-agent-name"
+                value={name}
+                onChange={e => setName(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void handleMintPair(); } }}
+                placeholder={t('e.g. laptop-1, vps-eu')}
+                autoFocus
+              />
+              <p className="mt-1 text-[11.5px] text-tertiary">
+                {t('Labels it in the fleet list. Leave blank to use its agent id.')}
               </p>
             </div>
-          )}
-
-          <div className="flex justify-end gap-2 pt-1">
-            {!localBusy && !localResult && !localError && (
-              <Button variant="secondary" onClick={() => setConnectMode(null)}>{t('Back')}</Button>
+            {pairError && (
+              <div className="rounded-lg border border-border bg-canvas px-3 py-2.5 text-[13px] text-secondary">{pairError}</div>
             )}
-            <Button onClick={closeMint} disabled={localBusy}>{t('Done')}</Button>
+            <Button onClick={handleMintPair} loading={pairBusy} className="w-full">
+              {t('Get the connect command')}
+            </Button>
           </div>
-        </div>
-      ) : !minted ? (
-        <div className="space-y-4">
-          {/* Step 1 — GET the binary. The connect commands below assume a
-              ./writ-agent that a new operator does not have yet; leaving this
-              out is what sent people to a releases page mid-onboarding. */}
-          <div className="rounded-lg border border-border bg-canvas p-3">
-            <div className="mb-1.5 flex items-center justify-between">
-              <span className="text-xs font-medium uppercase tracking-wide text-tertiary">{t('1 · Download the agent (macOS / Linux)')}</span>
-              {connectInfo?.install_commands?.unix && <CopyButton value={connectInfo.install_commands.unix} />}
-            </div>
-            <code className="block whitespace-pre-wrap break-all font-mono text-xs text-ink">
-              {connectInfo?.install_commands?.unix || t('Unavailable — update the coordinator.')}
-            </code>
-            {connectInfo?.repo_url && (
-              <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px]">
-                <a href={connectInfo.repo_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-secondary hover:text-ink hover:underline">
-                  <ArrowTopRightOnSquareIcon className="h-3 w-3" /> {connectInfo.repo}
-                </a>
-                <a href={connectInfo.github_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-secondary hover:text-ink hover:underline">
-                  <ArrowTopRightOnSquareIcon className="h-3 w-3" /> {t('Releases')}
-                </a>
-                <span className="font-mono text-tertiary">{connectInfo.docker_image}</span>
-              </div>
-            )}
-          </div>
-          <p className="text-[11.5px] text-tertiary">
-            {t('Windows and build-from-source commands appear after the token is minted.')}
-          </p>
-          <div>
-            <label className="mb-1 block text-sm font-medium text-ink">{t('Name')}</label>
-            <Input
-              value={mintName}
-              onChange={e => setMintName(e.target.value)}
-              placeholder={t('e.g. laptop-1, vps-eu')}
-              autoFocus
-            />
-          </div>
-          {connectInfo?.ws_url ? (
-            <p className="text-xs text-tertiary">
-              {t('Agents will dial')}: <span className="font-mono text-secondary">{connectInfo.ws_url}</span>
+        ) : (
+          <div className="space-y-2.5">
+            <p className="text-[12px] leading-relaxed text-secondary">
+              {t('Run this on the machine that should do the browsing. It installs the agent and connects it — nothing to install first.')}
             </p>
-          ) : (
-            <p className="text-xs text-amber-600">
-              {t('Set WRIT_PUBLIC_URL on the coordinator so agents know where to dial in. Configure it under Settings → Network.')}
-            </p>
-          )}
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="secondary" onClick={() => setConnectMode(null)}>{t('Back')}</Button>
-            <Button onClick={handleMint} loading={minting}>{t('Mint token')}</Button>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-4">
-          {/* Native binary variant */}
-          <div className="rounded-lg border border-border bg-canvas p-3">
-            <div className="mb-1.5 flex items-center justify-between">
-              <span className="text-xs font-medium uppercase tracking-wide text-tertiary">{t('Run the agent (binary)')}</span>
-              <CopyButton value={minted.connect_command} />
-            </div>
-            <code className="block whitespace-pre-wrap break-all font-mono text-xs text-ink">{minted.connect_command}</code>
-          </div>
-
-          {/* Docker variant */}
-          <div className="rounded-lg border border-border bg-canvas p-3">
-            <div className="mb-1.5 flex items-center justify-between">
-              <span className="text-xs font-medium uppercase tracking-wide text-tertiary">{t('Run the agent (Docker)')}</span>
-              <CopyButton value={dockerCommand} />
-            </div>
-            <code className="block whitespace-pre-wrap break-all font-mono text-xs text-ink">{dockerCommand}</code>
-          </div>
-
-          {/* Other platforms — same download step, different shell. */}
-          {minted.install_commands && (
-            <details className="rounded-lg border border-border bg-canvas p-3">
-              <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-tertiary">
-                {t('Download on Windows, or build from source')}
-              </summary>
-              <div className="mt-3 space-y-3">
-                <div>
-                  <div className="mb-1.5 flex items-center justify-between">
-                    <span className="text-[11px] font-medium text-secondary">{t('Windows (PowerShell)')}</span>
-                    <CopyButton value={minted.install_commands.windows} />
-                  </div>
-                  <code className="block whitespace-pre-wrap break-all font-mono text-xs text-ink">{minted.install_commands.windows}</code>
-                </div>
-                <div>
-                  <div className="mb-1.5 flex items-center justify-between">
-                    <span className="text-[11px] font-medium text-secondary">{t('Build from source')}</span>
-                    <CopyButton value={minted.install_commands.source} />
-                  </div>
-                  <code className="block whitespace-pre-wrap break-all font-mono text-xs text-ink">{minted.install_commands.source}</code>
-                </div>
+            <div className="relative">
+              <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded-lg bg-ink p-3 pr-16 font-mono text-[11px] leading-relaxed text-white/90">{pairCode.install_command}</pre>
+              <div className="absolute right-2 top-2">
+                <CopyButton value={pairCode.install_command} tone="on-dark" />
               </div>
-            </details>
-          )}
-
-          <p className="text-xs text-tertiary">
-            {t('Run one of the commands above on each machine you want to add to the fleet. The raw token is shown only once.')}
-          </p>
-          {connectInfo?.github_url && (
-            <a
-              href={connectInfo.github_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-sm text-ink hover:underline"
+            </div>
+            {/* The agent list polls on its own, so an agent that dials in shows up
+                above without the operator re-opening anything. */}
+            <p className="text-[11.5px] leading-relaxed text-tertiary">
+              {t('Works once and expires in {{minutes}} minutes. The agent appears in the fleet as soon as it connects.', { minutes: expiryMinutes })}
+            </p>
+            <button
+              type="button"
+              onClick={() => { setPairCode(null); setName(''); }}
+              className="text-[12px] font-medium text-ink underline underline-offset-2"
             >
-              <ArrowTopRightOnSquareIcon className="h-4 w-4" />
-              {t('Get the writ-agent-fleet binary')}
-            </a>
-          )}
-          <div className="flex justify-end pt-2">
-            <Button onClick={closeMint}>{t('Done')}</Button>
+              {t('Connect another machine')}
+            </button>
           </div>
+        )}
+
+        {dialHint}
+
+        {/* ── Everything else, one disclosure down. ── */}
+        <div className="overflow-hidden rounded-xl border border-border">
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen(o => !o)}
+            aria-expanded={advancedOpen}
+            className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-hover/40"
+          >
+            <ChevronRightIcon className={clsx('h-3.5 w-3.5 shrink-0 text-tertiary transition-transform', advancedOpen && 'rotate-90')} />
+            <span className="text-[12.5px] font-medium text-ink">{t('Other ways to connect')}</span>
+            <span className="ml-auto truncate text-[11px] text-tertiary">{t('This machine · Docker · long-lived token')}</span>
+          </button>
+
+          {advancedOpen && (
+            <div className="space-y-4 border-t border-border p-3">
+              {/* ── Run one on the coordinator's own host. Preflight decides
+                    whether this host can host it at all (right platform, not a
+                    browser-less container). ── */}
+              <section className="space-y-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-[13px] font-semibold text-ink">{t('Run one on this machine')}</p>
+                    <p className="mt-0.5 text-[12px] leading-relaxed text-tertiary">
+                      {localAgent?.running
+                        ? t('An agent is already running here ({{name}}).', { name: localAgent.agent_name || t('local-agent') })
+                        : localAgent && !localAgent.supported
+                          ? localAgent.blockers.join(' ')
+                          : t('Downloads the agent for {{platform}}, points it at this coordinator, and starts it. Nothing to copy.', { platform: localAgent?.platform || t('this host') })}
+                    </p>
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={handleStartLocal}
+                    loading={localBusy}
+                    disabled={localBlocked || localBusy}
+                    className="shrink-0"
+                  >
+                    {t('Start')}
+                  </Button>
+                </div>
+
+                {localBusy && (
+                  <div className="flex items-center gap-3 rounded-lg border border-border bg-canvas p-3">
+                    <ArrowPathIcon className="h-4 w-4 shrink-0 animate-spin text-secondary" />
+                    <div className="min-w-0">
+                      <p className="text-[12.5px] font-medium text-ink">{t('Installing the agent on this machine…')}</p>
+                      <p className="mt-0.5 text-[11.5px] text-tertiary">{t('Resolving the release, downloading, then starting it.')}</p>
+                    </div>
+                  </div>
+                )}
+
+                {localError && (
+                  <div className="rounded-lg border border-amber-300 bg-amber-50 p-3">
+                    <p className="text-[12.5px] font-medium text-amber-900">{t('Could not start it here')}</p>
+                    <p className="mt-1 text-[11.5px] leading-relaxed text-amber-800">{localError}</p>
+                  </div>
+                )}
+
+                {localResult && !localError && (
+                  <div className="space-y-2">
+                    <div className="flex items-start gap-3 rounded-lg border border-border bg-canvas p-3">
+                      <CheckCircleIcon className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+                      <div className="min-w-0">
+                        <p className="text-[12.5px] font-medium text-ink">
+                          {localResult.status === 'already_running' ? t('Already running here') : t('Agent is running on this machine')}
+                        </p>
+                        <p className="mt-0.5 text-[11.5px] leading-relaxed text-tertiary">
+                          {t('It appears in the fleet above and picks up work automatically.')}
+                          {localResult.pid ? ` · PID ${localResult.pid}` : ''}
+                        </p>
+                      </div>
+                    </div>
+                    {localResult.checksum_verified === false && (
+                      /* Say so rather than implying a verification that did not happen. */
+                      <p className="text-[11px] leading-relaxed text-tertiary">
+                        {t('The release published no checksum for this asset, so its integrity was not verified.')}
+                      </p>
+                    )}
+                    <p className="text-[11px] text-tertiary">
+                      {t('Logs')}: <span className="font-mono">{localResult.log_path}</span>
+                    </p>
+                  </div>
+                )}
+              </section>
+
+              {/* ── A long-lived token: for Docker, CI, or an image you bake. ── */}
+              <section className="space-y-2 border-t border-border pt-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-[13px] font-semibold text-ink">{t('Mint a long-lived token')}</p>
+                    <p className="mt-0.5 text-[12px] leading-relaxed text-tertiary">
+                      {t('For Docker, CI, or a machine you provision from a script — where a single-use interactive code is the wrong shape.')}
+                    </p>
+                  </div>
+                  {!minted && (
+                    <Button variant="secondary" size="sm" onClick={handleMintToken} loading={minting} className="shrink-0">
+                      {t('Mint')}
+                    </Button>
+                  )}
+                </div>
+
+                {minted && (
+                  <div className="space-y-3">
+                    {/* Step 1 — GET the binary. The run command below assumes a
+                        writ-agent-fleet that a new operator does not have yet. */}
+                    <div className="rounded-lg border border-border bg-canvas p-3">
+                      <div className="mb-1.5 flex items-center justify-between gap-3">
+                        <span className="text-[11px] font-medium uppercase tracking-wide text-tertiary">{t('1 · Download it (macOS / Linux)')}</span>
+                        {minted.install_commands?.unix && <CopyButton value={minted.install_commands.unix} />}
+                      </div>
+                      <code className="block whitespace-pre-wrap break-all font-mono text-[11px] text-ink">
+                        {minted.install_commands?.unix || t('Unavailable — update the coordinator.')}
+                      </code>
+                    </div>
+
+                    {/* Step 2 — run THAT binary, with the token in its environment. */}
+                    <div className="rounded-lg border border-border bg-canvas p-3">
+                      <div className="mb-1.5 flex items-center justify-between gap-3">
+                        <span className="text-[11px] font-medium uppercase tracking-wide text-tertiary">{t('2 · Run it')}</span>
+                        <CopyButton value={minted.connect_command} />
+                      </div>
+                      <code className="block whitespace-pre-wrap break-all font-mono text-[11px] text-ink">{minted.connect_command}</code>
+                    </div>
+
+                    <details className="rounded-lg border border-border bg-canvas p-3">
+                      <summary className="cursor-pointer text-[11px] font-medium uppercase tracking-wide text-tertiary">
+                        {t('Docker, Windows, or build from source')}
+                      </summary>
+                      <div className="mt-3 space-y-3">
+                        <div>
+                          <div className="mb-1.5 flex items-center justify-between gap-3">
+                            <span className="text-[11px] font-medium text-secondary">{t('Docker')}</span>
+                            <CopyButton value={minted.docker_command} />
+                          </div>
+                          <code className="block whitespace-pre-wrap break-all font-mono text-[11px] text-ink">{minted.docker_command}</code>
+                        </div>
+                        {minted.install_commands && (
+                          <>
+                            <div>
+                              <div className="mb-1.5 flex items-center justify-between gap-3">
+                                <span className="text-[11px] font-medium text-secondary">{t('Windows (PowerShell)')}</span>
+                                <CopyButton value={minted.install_commands.windows} />
+                              </div>
+                              <code className="block whitespace-pre-wrap break-all font-mono text-[11px] text-ink">{minted.install_commands.windows}</code>
+                            </div>
+                            <div>
+                              <div className="mb-1.5 flex items-center justify-between gap-3">
+                                <span className="text-[11px] font-medium text-secondary">{t('Build from source')}</span>
+                                <CopyButton value={minted.install_commands.source} />
+                              </div>
+                              <code className="block whitespace-pre-wrap break-all font-mono text-[11px] text-ink">{minted.install_commands.source}</code>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </details>
+
+                    <p className="text-[11px] leading-relaxed text-tertiary">
+                      {t('The raw token is shown only once. Revoke it any time from Fleet tokens.')}
+                    </p>
+                  </div>
+                )}
+
+                {connectInfo?.repo_url && (
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+                    <a href={connectInfo.repo_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-secondary hover:text-ink hover:underline">
+                      <ArrowTopRightOnSquareIcon className="h-3 w-3" /> {connectInfo.repo}
+                    </a>
+                    <a href={connectInfo.github_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-secondary hover:text-ink hover:underline">
+                      <ArrowTopRightOnSquareIcon className="h-3 w-3" /> {t('Releases')}
+                    </a>
+                    <span className="font-mono text-tertiary">{connectInfo.docker_image}</span>
+                  </div>
+                )}
+              </section>
+            </div>
+          )}
         </div>
-      )}
+
+        <div className="flex justify-end pt-1">
+          <Button variant={pairCode || minted || localResult ? 'primary' : 'secondary'} onClick={closeModal} disabled={localBusy}>
+            {pairCode || minted || localResult ? t('Done') : t('Cancel')}
+          </Button>
+        </div>
+      </div>
     </Modal>
   );
 };

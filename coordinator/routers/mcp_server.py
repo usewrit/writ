@@ -562,17 +562,96 @@ async def _tool_expose_workflow_api(token: str, args: dict) -> dict:
     })
 
 
+# Crawl settings a saved definition accepts. One list, so the ad-hoc and save-as
+# paths cannot drift into accepting different things.
+_CRAWL_CONFIG_KEYS = (
+    "name", "extract_mode", "extract_schema", "include_paths", "exclude_paths",
+    "max_depth", "page_budget", "same_domain", "allow_subdomains", "respect_robots",
+    "render_mode", "ocr_mode", "intent", "seed_urls", "relevance_threshold",
+    "content_spec", "persona_id", "shard_size", "delay_ms", "max_concurrent_shards",
+)
+
+
+def _crawl_config_from_args(args: dict) -> dict:
+    body = {"url": args.get("url")}
+    for k in _CRAWL_CONFIG_KEYS:
+        if args.get(k) is not None:
+            body[k] = args[k]
+    return body
+
+
 async def _tool_crawl_site(token: str, args: dict) -> dict:
     url = args.get("url")
     if not url:
         raise _Upstream(400, "writ_crawl_site requires a `url` (seed).")
-    body = {"url": url}
-    for k in ("name", "extract_mode", "extract_schema", "include_paths", "exclude_paths",
-              "max_depth", "page_budget", "same_domain", "allow_subdomains", "respect_robots"):
-        if args.get(k) is not None:
-            body[k] = args[k]
-    crawl = await _call("POST", "/api/crawl", token, json_body=body)
-    return _content(crawl)
+    config = _crawl_config_from_args(args)
+
+    save_as = (args.get("save_as") or "").strip()
+    if not save_as:
+        crawl = await _call("POST", "/api/crawl", token, json_body=config)
+        return _content(crawl)
+
+    # save_as ⇒ persist these settings as a callable saved crawl, then run it
+    # through the definition so this same call also gets the freshness contract.
+    # Reusing a save_as updates that definition instead of minting a near-duplicate
+    # every time an agent repeats itself.
+    existing = await _call("GET", "/api/crawl/definitions", token, params={"limit": 200})
+    match = None
+    for d in ((existing or {}).get("definitions") or []):
+        if d.get("slug") == save_as or (d.get("name") or "") == save_as:
+            match = d
+            break
+    if match:
+        defn = await _call("PATCH", f"/api/crawl/definitions/{match['slug']}", token,
+                           json_body={"config": config})
+    else:
+        defn = await _call("POST", "/api/crawl/definitions", token,
+                           json_body={"name": save_as, "slug": save_as, "config": config})
+
+    run_body = {"max_age": _requested_max_age(args)}
+    if args.get("wait") is not None:
+        run_body["wait"] = args["wait"] is not False
+        run_body["timeout"] = int(args.get("timeout_seconds") or 120)
+    result = await _call("POST", f"/api/crawl/definitions/{defn['slug']}/run", token,
+                         json_body=run_body)
+    return _content(result)
+
+
+async def _tool_list_saved_crawls(token: str, args: dict) -> dict:
+    res = await _call("GET", "/api/crawl/definitions", token,
+                      params={"limit": int(args.get("limit") or 50)})
+    out = []
+    for d in ((res or {}).get("definitions") or []):
+        out.append({
+            "id": d.get("id"), "slug": d.get("slug"), "name": d.get("name"),
+            "seed_url": d.get("seed_url"), "last_run_at": d.get("last_run_at"),
+            "default_max_age_seconds": d.get("default_max_age_seconds"),
+            "run_url": d.get("run_url"),
+        })
+    return _content({"saved_crawls": out, "total": len(out)})
+
+
+async def _tool_run_saved_crawl(token: str, args: dict) -> dict:
+    ref = args.get("crawl") or args.get("slug") or args.get("definition_id")
+    if not ref:
+        raise _Upstream(400, "writ_run_saved_crawl requires `crawl` (a saved crawl slug, name or id).")
+    body = {
+        "max_age": _requested_max_age(args),
+        "wait": args.get("wait") is True,
+        "timeout": int(args.get("timeout_seconds") or 120),
+        "limit": int(args.get("limit") or 50),
+    }
+    res = await _call("POST", f"/api/crawl/definitions/{ref}/run", token, json_body=body)
+    return _content(res)
+
+
+async def _tool_saved_crawl_data(token: str, args: dict) -> dict:
+    ref = args.get("crawl") or args.get("slug") or args.get("definition_id")
+    if not ref:
+        raise _Upstream(400, "writ_saved_crawl_data requires `crawl` (a saved crawl slug, name or id).")
+    res = await _call("GET", f"/api/crawl/definitions/{ref}/data", token,
+                      params={"limit": int(args.get("limit") or 50)})
+    return _content(res)
 
 
 async def _tool_crawl_status(token: str, args: dict) -> dict:
@@ -935,7 +1014,12 @@ _STATIC_TOOLS: list[dict] = [
     },
     {
         "name": "writ_crawl_site",
-        "description": "Start a Dragnet distributed crawl of a website across your self-hosted agent fleet. Returns a crawl id; results land as a workflow dataset. No AI required.",
+        "description": (
+            "Start a Dragnet distributed crawl of a website across your self-hosted agent fleet. "
+            "Returns a crawl id; results land as a workflow dataset. No AI required. Pass `save_as` "
+            "to also SAVE these settings as a reusable, callable crawl — then later runs can reuse "
+            "recent data via `max_age` instead of crawling the site again."
+        ),
         "inputSchema": {"type": "object", "properties": {
             "url": {"type": "string", "description": "Seed URL (required)."},
             "name": {"type": "string"},
@@ -944,8 +1028,64 @@ _STATIC_TOOLS: list[dict] = [
             "max_depth": {"type": "integer"}, "page_budget": {"type": "integer"},
             "include_paths": {"type": "array", "items": {"type": "string"}},
             "exclude_paths": {"type": "array", "items": {"type": "string"}},
-            "same_domain": {"type": "boolean"}, "allow_subdomains": {"type": "boolean"}}, "required": ["url"]},
+            "same_domain": {"type": "boolean"}, "allow_subdomains": {"type": "boolean"},
+            "render_mode": {"type": "string", "description": "auto (default) | http | browser"},
+            "ocr_mode": {"type": "string", "description": "auto (default) | off | force"},
+            "intent": {"type": "string", "description": "Plain-English goal; scopes the crawl to matching pages."},
+            "save_as": {"type": "string", "description": (
+                "Save these settings under this name so the crawl becomes callable by API and "
+                "re-runnable. Reusing the same name updates that saved crawl instead of "
+                "creating a duplicate.")},
+            FRESHNESS_ARG: {"type": "integer", "minimum": 0, "description": (
+                "Only meaningful with `save_as`: if that saved crawl already completed within this "
+                "many seconds, return its collected data instead of crawling again. 0 always crawls.")},
+            "wait": {"type": "boolean", "description": (
+                "With `save_as`: block until the crawl converges. A whole-site crawl usually "
+                "outlives an HTTP call, so the default returns a crawl id to poll.")},
+            "timeout_seconds": {"type": "integer", "description": "Max seconds to wait when wait=true."},
+        }, "required": ["url"]},
         "_handler": _tool_crawl_site,
+    },
+    {
+        "name": "writ_saved_crawls",
+        "description": (
+            "List saved, re-runnable crawls — each is callable by API and can return already-collected "
+            "data. Check here BEFORE crawling a site again: a saved crawl with recent data answers "
+            "instantly and costs nothing."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "limit": {"type": "integer", "description": "Max saved crawls to return (default 50)."}}},
+        "_handler": _tool_list_saved_crawls,
+    },
+    {
+        "name": "writ_run_saved_crawl",
+        "description": (
+            "Run a saved crawl with its stored settings. Pass `max_age` to get the data it already "
+            "collected if that run is recent enough — the cheap path. Otherwise it re-crawls. The "
+            "response carries `_cache.hit` and `_cache.age_seconds` so you can tell which happened."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "crawl": {"type": "string", "description": "Saved crawl slug, name, or id (from writ_saved_crawls)."},
+            FRESHNESS_ARG: {"type": "integer", "minimum": 0, "description": (
+                "Reuse the last completed crawl if it finished within this many seconds. "
+                "0 (default) always re-crawls.")},
+            "wait": {"type": "boolean", "description": "Block until the crawl converges (default false — a crawl is slow)."},
+            "timeout_seconds": {"type": "integer", "description": "Max seconds to wait when wait=true."},
+            "limit": {"type": "integer", "description": "Rows of collected data to include (default 50)."},
+        }, "required": ["crawl"]},
+        "_handler": _tool_run_saved_crawl,
+    },
+    {
+        "name": "writ_saved_crawl_data",
+        "description": (
+            "Read the data a saved crawl already collected on its most recent completed run. Never "
+            "starts a crawl — use this when you want what is already there, at any age."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "crawl": {"type": "string", "description": "Saved crawl slug, name, or id."},
+            "limit": {"type": "integer", "description": "Rows to return (default 50)."},
+        }, "required": ["crawl"]},
+        "_handler": _tool_saved_crawl_data,
     },
     {
         "name": "writ_crawl_status",

@@ -69,7 +69,41 @@ def test_binary_command_carries_the_lane(doc_settings, monkeypatch):
     assert "DOC_EXTRACT_URL=http://127.0.0.1:8092" in binary
     assert "DOC_EXTRACT_SECRET=s3cret-value" in binary
     # The env must precede the binary, or the shell treats it as an argument.
-    assert binary.index("DOC_EXTRACT_URL") < binary.index("./writ-agent start")
+    assert binary.index("DOC_EXTRACT_URL") < binary.index(fleet.AGENT_INSTALL_PATH)
+
+
+def test_binary_command_matches_the_binary_the_installer_produces(monkeypatch):
+    """The run command must fit `writ-agent-fleet`, which is env-only.
+
+    The download step above it installs `writ-agent-fleet` via /agent.sh, and
+    that binary has no `config` / `start` subcommands — those belong to the
+    DESKTOP `writ-agent`. Emitting them handed the operator two lines that could
+    not run against the binary the line above had just downloaded.
+    """
+    monkeypatch.setattr(settings, "writ_public_url", "https://writ.example.com", raising=False)
+    monkeypatch.setattr(settings, "doc_extract_url", "", raising=False)
+    binary = fleet._build_connect_commands("tok-123")["connect_command"]
+
+    assert "config set" not in binary
+    assert "start --headless" not in binary
+    assert "WRIT_COORDINATOR_URL=https://writ.example.com" in binary
+    assert binary.endswith(fleet.AGENT_INSTALL_PATH)
+    # One line: it is copied out of a modal with a copy button.
+    assert "\n" not in binary
+
+
+def test_binary_command_opts_in_to_plaintext_only_off_loopback(monkeypatch):
+    """The agent refuses a bearer over plaintext http to a non-loopback host."""
+    monkeypatch.setattr(settings, "doc_extract_url", "", raising=False)
+
+    monkeypatch.setattr(settings, "writ_public_url", "http://writ.example.com", raising=False)
+    assert "WRIT_FLEET_ALLOW_INSECURE=1" in fleet._build_connect_commands("t")["connect_command"]
+
+    monkeypatch.setattr(settings, "writ_public_url", "http://localhost:8000", raising=False)
+    assert "WRIT_FLEET_ALLOW_INSECURE" not in fleet._build_connect_commands("t")["connect_command"]
+
+    monkeypatch.setattr(settings, "writ_public_url", "https://writ.example.com", raising=False)
+    assert "WRIT_FLEET_ALLOW_INSECURE" not in fleet._build_connect_commands("t")["connect_command"]
 
 
 def test_docker_command_rewrites_loopback_for_the_container(doc_settings, monkeypatch):

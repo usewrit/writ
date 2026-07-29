@@ -447,3 +447,71 @@ textarea,
 .writ-wm .wx-t { display: inline-block; margin-left: 0.015em; height: 0.76em; width: 0.34em; vertical-align: baseline; }
 .writ-wm .wx-bar { display: inline-block; width: 0.15em; height: 0.53em; background: var(--writ-signal, #E23A14); margin-left: 0.12em; }
 :root { --writ-signal: #E23A14; } /* Signal on light grounds; the only brand accent */
+
+/* ── Scribe's mascot — the Signal, with eyes (components/brand/ScribeMark) ──
+   The AI surfaces used to be marked with a generic sparkle; they carry the
+   mascot now. It idles: the eyes glance around and blink, which is the whole
+   point — a still face on a "thinking" affordance reads as a dead icon.
+
+   Two cycles, deliberately non-harmonic (7.3s glance / 6.5s blink), so the
+   pair never resynchronises into a loop the eye can catch and start reading as
+   a spinner. `transform-box: fill-box` is required for the blink: without it
+   the ellipse would scale about the SVG viewBox origin and fly off-screen
+   rather than closing its lid. The instance-level animation-delay that breaks
+   lockstep between co-visible mascots is set inline by the component. */
+.scribe-mark .sm-look {
+  animation: scribe-glance 7.3s cubic-bezier(0.3, 0.9, 0.25, 1) infinite;
+}
+.scribe-mark .sm-eye,
+.scribe-mark-wake .sm-eye {
+  /* Without fill-box the ellipse would scale about the viewBox origin and fly
+     off-screen instead of closing a lid. Declared for the woken variant too,
+     so it is already in place before the animation is ever attached. */
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.scribe-mark .sm-eye {
+  animation: scribe-blink 6.5s ease-in-out infinite;
+}
+/* Woken variant — the mascot is a nav affordance here, so it holds perfectly
+   still and comes alive only under the pointer (or keyboard focus, which must
+   reach the same state). No keyframes are attached at rest, rather than paused
+   ones: a paused animation freezes wherever its delay dropped it, which for a
+   blink means a permanent squint. */
+.group:hover .scribe-mark-wake .sm-look,
+.group:focus-visible .scribe-mark-wake .sm-look {
+  animation: scribe-glance 7.3s cubic-bezier(0.3, 0.9, 0.25, 1) infinite;
+}
+.group:hover .scribe-mark-wake .sm-eye,
+.group:focus-visible .scribe-mark-wake .sm-eye {
+  animation: scribe-blink 6.5s ease-in-out infinite;
+}
+/* Long holds, short travel — a saccade is fast and the gaze then rests. An
+   evenly-spaced ease would read as a drifting float instead of as looking. */
+@keyframes scribe-glance {
+  0%, 20%   { transform: translate(0, 0); }
+  26%, 40%  { transform: translate(4px, 1px); }
+  46%, 57%  { transform: translate(0, 0); }
+  63%, 74%  { transform: translate(-4px, 1px); }
+  80%, 89%  { transform: translate(0, -3px); }  /* up = thinking */
+  95%, 100% { transform: translate(0, 0); }
+}
+/* One single blink, then a double — the irregularity is what stops it reading
+   as a pulsing status dot. Lids never fully close (0.08, not 0) so the eye
+   stays a shape rather than vanishing for a frame at 14px. */
+@keyframes scribe-blink {
+  0%, 40%      { transform: scaleY(1); }
+  42%, 43.5%   { transform: scaleY(0.08); }
+  45%, 88%     { transform: scaleY(1); }
+  89.5%, 90.5% { transform: scaleY(0.08); }
+  92%, 94.5%   { transform: scaleY(1); }
+  96%, 97%     { transform: scaleY(0.08); }
+  98.5%, 100%  { transform: scaleY(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scribe-mark .sm-look, .scribe-mark .sm-eye,
+  .group:hover .scribe-mark-wake .sm-look, .group:hover .scribe-mark-wake .sm-eye,
+  .group:focus-visible .scribe-mark-wake .sm-look, .group:focus-visible .scribe-mark-wake .sm-eye {
+    animation: none;
+  }
+}

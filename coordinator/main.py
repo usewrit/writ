@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from config import settings, should_expose_openapi
 from database import init_db, close_db, engine
+from services import agent_installer
 
 # --- Surviving routers --------------------------------------------------------
 from routers.auth import router as auth_router
@@ -36,6 +37,7 @@ from routers.settings_extra import router as settings_extra_router
 from routers.fleet import router as fleet_router
 from routers.triggers import router as triggers_router
 from routers.webhooks import router as webhooks_router
+from routers.webhooks import custom_path_router as webhooks_custom_path_router
 from routers.oauth import router as oauth_router
 from routers.notifications_inbox import router as notifications_inbox_router
 from routers.notification_preferences import router as notification_preferences_router
@@ -178,9 +180,16 @@ async def lifespan(app: FastAPI):
     # showing the saved hostname while the running process rejected it.
     try:
         from database import AsyncSessionLocal
-        from services.coordinator_settings import restore_network_from_db
+        from services.coordinator_settings import (
+            restore_network_from_db,
+            restore_security_from_db,
+        )
         async with AsyncSessionLocal() as db:
             await restore_network_from_db(db)
+            # Session TTLs are pushed into the (synchronous) token minter the same
+            # way; without this a restart reverts to the built-in 15min/7d while
+            # the UI keeps showing the operator's saved values.
+            await restore_security_from_db(db)
         from security import trusted_hosts as _th
         logger.info(
             "Network settings applied — public_url=%s trusted_hosts=%s (enforced=%s)",
@@ -654,6 +663,10 @@ app.include_router(oauth_router, prefix="/api")               # OAuth 2.0 + agen
 app.include_router(automation_router, prefix="/api")          # Workflows + tasks
 app.include_router(triggers_router, prefix="/api")            # Trigger rules
 app.include_router(webhooks_router, prefix="/api")            # Webhook triggers
+# POST /api/v1/webhooks/{custom_path} — the readable twin of /api/webhooks/hook/{token},
+# and the shape WebhookTrigger.custom_path has always advertised. A separate,
+# self-prefixed router because the path sits outside the `/webhooks` prefix above.
+app.include_router(webhooks_custom_path_router)                # /api/v1/webhooks/* (self-prefixed)
 app.include_router(notifications_router, prefix="/api")       # Notification providers
 app.include_router(notifications_inbox_router, prefix="/api") # In-app inbox
 app.include_router(notification_preferences_router, prefix="/api")  # Owner platform-notification matrix
@@ -864,152 +877,15 @@ _UI_RESERVED_EXACT = {
 
 
 
-# The installer served at /agent.sh. POSIX sh (not bash) so it runs under dash
-# on Debian/Ubuntu images. @@BASE@@ / @@REPO@@ are substituted per request.
-_AGENT_BOOTSTRAP = r"""#!/bin/sh
-# Writ agent installer.
-#   curl -fsSL @@BASE@@/agent.sh | sh -s -- WRIT-XXXX-XXX
-#
-# Installs the writ-agent binary for this platform, exchanges your pairing code
-# for its credentials, and starts it. Nothing else to configure — the code is
-# single-use and expires, and every setting comes from the coordinator.
-set -eu
+# The installer served at /agent.sh. It lives in services/agent_installer.py
+# because it is no longer only served: "run one on this machine" (Fleet →
+# Connect agent) executes the same script in --download-only mode, so asset
+# naming, checksum verification and whole-payload extraction have exactly one
+# implementation instead of a Python copy free to drift from this one.
+# Re-exported under its historical name — it is referenced as
+# main._AGENT_BOOTSTRAP by the tests that guard what a public script may say.
+_AGENT_BOOTSTRAP = agent_installer.AGENT_BOOTSTRAP
 
-COORDINATOR="@@BASE@@"
-REPO="@@REPO@@"
-CODE="${1:-}"
-
-die() { printf '\033[1;31merror\033[0m %s\n' "$*" >&2; exit 1; }
-say() { printf '\033[1;34m::\033[0m %s\n' "$*"; }
-
-[ -n "$CODE" ] || die "Usage: curl -fsSL $COORDINATOR/agent.sh | sh -s -- <pairing-code>"
-command -v curl >/dev/null 2>&1 || die "curl is required."
-
-# --- 1. Redeem the pairing code ---------------------------------------------
-# Done FIRST: a bad or expired code should fail in a second, before downloading
-# tens of megabytes.
-say "Redeeming pairing code..."
-RESP="$(curl -fsS -X POST "$COORDINATOR/api/fleet/pair-code/exchange" \
-  -H 'Content-Type: application/json' \
-  -d "{\"code\":\"$CODE\"}" 2>/dev/null)" \
-  || die "That pairing code is invalid, already used, or expired. Generate a new one in Fleet."
-
-# Extract one JSON string field without needing jq (which is not everywhere).
-jsonstr() {
-  printf '%s' "$RESP" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
-}
-TOKEN="$(jsonstr token)"
-[ -n "$TOKEN" ] || die "The coordinator did not return a token. Check its logs."
-DOC_URL="$(jsonstr DOC_EXTRACT_URL)"
-DOC_SECRET="$(jsonstr DOC_EXTRACT_SECRET)"
-
-# --- 2. Resolve this platform's release asset -------------------------------
-# These are the RELEASE ASSET INFIXES (os-arch), not Rust target triples. The
-# assets are named `writ-agent-fleet-<os>-<arch>.tar.gz`; matching on a triple
-# like `aarch64-apple-darwin` finds nothing and fails naming a string that
-# appears nowhere in the release.
-case "$(uname -s)-$(uname -m)" in
-  Darwin-arm64)              TARGET=macos-arm64 ;;
-  Darwin-x86_64)             TARGET=macos-x86_64 ;;
-  Linux-x86_64)              TARGET=linux-x86_64 ;;
-  Linux-aarch64|Linux-arm64) TARGET=linux-aarch64 ;;
-  *) die "No prebuilt agent for $(uname -sm). Build from source: https://github.com/$REPO" ;;
-esac
-
-WRIT_DIR="${WRIT_HOME:-$HOME/.writ}"
-mkdir -p "$WRIT_DIR"
-BIN="$WRIT_DIR/writ-agent-fleet"
-
-if [ -x "$BIN" ] && [ "${WRIT_FORCE_DOWNLOAD:-0}" != "1" ]; then
-  say "Using the agent already at $BIN"
-else
-  say "Finding the $TARGET build..."
-  URLS="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-    | grep -o "\"browser_download_url\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
-    | cut -d'"' -f4)"
-  # Every archive has a `.sha256` sibling whose name also contains the infix, so
-  # filter those out before picking — otherwise the checksum file can win.
-  ASSET="$(printf '%s\n' "$URLS" | grep -- "-${TARGET}\." | grep -v '\.sha256$' | head -1)"
-  [ -n "$ASSET" ] || die "No published release asset for $TARGET yet. Build from source: https://github.com/$REPO"
-  SUMS="$(printf '%s\n' "$URLS" | grep -- "-${TARGET}\." | grep '\.sha256$' | head -1)"
-
-  say "Downloading $(basename "$ASSET")..."
-  TMP="$(mktemp -d)"
-  trap 'rm -rf "$TMP"' EXIT
-  curl -fL# "$ASSET" -o "$TMP/asset" || die "Download failed."
-
-  # Verify the checksum when the release publishes one. This is a
-  # `curl | sh` installer fetching a 60 MB binary it is about to run, so a
-  # corrupted or substituted download should stop here rather than later.
-  if [ -n "$SUMS" ]; then
-    EXPECTED="$(curl -fsSL "$SUMS" 2>/dev/null | awk '{print $1}' | head -1)"
-    if [ -n "$EXPECTED" ]; then
-      if command -v sha256sum >/dev/null 2>&1; then
-        ACTUAL="$(sha256sum "$TMP/asset" | awk '{print $1}')"
-      elif command -v shasum >/dev/null 2>&1; then
-        ACTUAL="$(shasum -a 256 "$TMP/asset" | awk '{print $1}')"
-      fi
-      if [ -n "${ACTUAL:-}" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
-        die "Checksum mismatch for $(basename "$ASSET").
-     expected $EXPECTED
-     got      $ACTUAL
-   Refusing to run it. Try again, or build from source."
-      fi
-      [ -n "${ACTUAL:-}" ] && say "Checksum verified."
-    fi
-  fi
-
-  # Releases ship archives (the binary needs its Playwright driver alongside it),
-  # but tolerate a bare binary so an older or hand-cut release still installs.
-  case "$ASSET" in
-    *.tar.gz|*.tgz) tar -xzf "$TMP/asset" -C "$TMP" ;;
-    *.zip)          command -v unzip >/dev/null 2>&1 || die "unzip is required for this asset."
-                    unzip -q "$TMP/asset" -d "$TMP" ;;
-    *)              mv "$TMP/asset" "$TMP/writ-agent-fleet" ;;
-  esac
-
-  FOUND="$(find "$TMP" -type f -name 'writ-agent-fleet*' ! -name '*.d' | head -1)"
-  [ -n "$FOUND" ] || die "The release archive contained no writ-agent-fleet binary."
-  # Copy the whole payload directory: the Playwright driver ships beside the
-  # binary and the agent cannot launch a browser without it.
-  PAYLOAD="$(dirname "$FOUND")"
-  [ "$PAYLOAD" = "$TMP" ] || cp -R "$PAYLOAD"/. "$WRIT_DIR"/
-  [ -f "$BIN" ] || cp "$FOUND" "$BIN"
-  chmod +x "$BIN"
-fi
-
-# --- 3. Start it -------------------------------------------------------------
-# writ-agent-fleet is configured ENTIRELY BY ENVIRONMENT — it has no `config`
-# subcommand (that belongs to the desktop `writ-agent` binary). So the
-# coordinator URL travels as WRIT_COORDINATOR_URL; there is no config file to
-# write and nothing to go stale.
-say "Starting the agent..."
-ALLOW_INSECURE=""
-case "$COORDINATOR" in
-  https://*) ;;
-  http://localhost*|http://127.0.0.1*|"http://[::1]"*) ;;
-  # The agent refuses to send its bearer over plaintext to a non-loopback host
-  # unless this is set. Only reached when the operator chose a plaintext URL.
-  http://*) ALLOW_INSECURE=1 ;;
-esac
-
-WRIT_SERVICE_TOKEN="$TOKEN" \
-WRIT_COORDINATOR_URL="$COORDINATOR" \
-WRIT_FLEET_ALLOW_INSECURE="$ALLOW_INSECURE" \
-DOC_EXTRACT_URL="$DOC_URL" \
-DOC_EXTRACT_SECRET="$DOC_SECRET" \
-WRIT_HOME="$WRIT_DIR" \
-nohup "$BIN" >"$WRIT_DIR/agent.log" 2>&1 &
-
-sleep 3
-if kill -0 $! 2>/dev/null; then
-  printf '\033[1;32mok\033[0m  Agent running (pid %s). Logs: %s\n' "$!" "$WRIT_DIR/agent.log"
-  printf '    It should appear in Fleet at %s within a few seconds.\n' "$COORDINATOR"
-else
-  die "The agent exited immediately. Last lines of $WRIT_DIR/agent.log:
-$(tail -20 "$WRIT_DIR/agent.log" 2>/dev/null)"
-fi
-"""
 
 # ── One-line agent enrolment ────────────────────────────────────────────────
 # Registered HERE, above the SPA history fallback, or `/{full_path:path}` would
@@ -1028,7 +904,7 @@ async def agent_bootstrap_script(request: Request):
 
     base = (settings.writ_public_url or "").strip().rstrip("/") or str(request.base_url).rstrip("/")
     repo = (os.getenv("WRIT_AGENT_REPO") or "usewrit/writ-agent").strip().strip("/")
-    script = _AGENT_BOOTSTRAP.replace("@@BASE@@", base).replace("@@REPO@@", repo)
+    script = agent_installer.render(base, repo)
     return PlainTextResponse(
         script,
         media_type="text/x-shellscript",

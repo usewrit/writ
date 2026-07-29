@@ -4,14 +4,25 @@ import toast from 'react-hot-toast';
 import { CheckCircleIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import { SectionHead } from '../common/SectionHead';
 import { Button } from '../ui/Button';
-import { NumberInput, Switch } from '../ui';
+import { NumberInput } from '../ui';
 import { apiErrorMessage } from '../../api/client';
 import { getSecuritySettings, updateSecuritySettings, type SecuritySettings } from '../../api/settings';
 
 /**
- * Security — session / JWT policy (access + refresh TTL), idle timeout, and a
- * require-MFA-to-sign-in switch (opt-in, off by default). Also surfaces a
- * read-only encryption-key status indicator (never the key itself).
+ * Security — session policy for the owner account, plus a read-only
+ * encryption-key indicator (never the key itself).
+ *
+ * The two TTLs here were, until recently, rendered and read by NOTHING: token
+ * minting used module constants, so editing them changed no lifetime at all —
+ * and the form defaulted the refresh TTL to 30 days while the coordinator
+ * actually issued 7. They are now applied to every token minted after a save.
+ *
+ * Two more fields are gone rather than reworded. `idle_timeout_min` needs
+ * client-side activity tracking that does not exist. `require_mfa` was worse: it
+ * told the operator to "enable only after enrolling a TOTP authenticator on the
+ * Account tab", and self-host has no enrolment path anywhere — no router, no UI.
+ * A switch promising a second factor that nothing enforces is the one kind of
+ * dead control that is actively dangerous.
  */
 export const SecuritySection: React.FC = () => {
   const { t } = useTranslation();
@@ -24,7 +35,7 @@ export const SecuritySection: React.FC = () => {
       .then(setData)
       .catch(() => toast.error(t('Failed to load security settings')))
       .finally(() => setLoading(false));
-  }, []);
+  }, [t]);
 
   const set = <K extends keyof SecuritySettings>(key: K, value: SecuritySettings[K]) => {
     setData((d) => (d ? { ...d, [key]: value } : d));
@@ -37,8 +48,6 @@ export const SecuritySection: React.FC = () => {
       const next = await updateSecuritySettings({
         session_ttl_min: data.session_ttl_min,
         refresh_ttl_days: data.refresh_ttl_days,
-        idle_timeout_min: data.idle_timeout_min,
-        require_mfa: data.require_mfa,
       });
       setData(next);
       toast.success(t('Security settings saved'));
@@ -65,23 +74,13 @@ export const SecuritySection: React.FC = () => {
           </div>
           <div>
             <label className="block text-[13px] font-medium text-ink mb-1">{t('Refresh token TTL (days)')}</label>
-            <NumberInput min={1} max={3650} value={data.refresh_ttl_days} onChange={(v) => set('refresh_ttl_days', v ?? 30)} />
+            <NumberInput min={1} max={3650} value={data.refresh_ttl_days} onChange={(v) => set('refresh_ttl_days', v ?? 7)} />
           </div>
         </div>
 
-        <div>
-          <label className="block text-[13px] font-medium text-ink mb-1">{t('Idle timeout (minutes)')}</label>
-          <NumberInput min={0} value={data.idle_timeout_min} onChange={(v) => set('idle_timeout_min', v ?? 0)} />
-          <p className="text-xs text-tertiary mt-1">{t('0 disables the idle timeout.')}</p>
-        </div>
-
-        <Switch
-          checked={data.require_mfa}
-          onChange={(next) => set('require_mfa', next)}
-          label={t('Require MFA to sign in')}
-          description={t('Off by default. Enable only after enrolling a TOTP authenticator on the Account tab.')}
-          reverse
-        />
+        <p className="text-xs text-tertiary">
+          {t('Applies to tokens minted from now on. A shorter lifetime takes effect as sessions renew — use “Sign out everywhere” on the Account tab to end current sessions immediately.')}
+        </p>
 
         <div className="flex justify-end">
           <Button onClick={handleSave} loading={saving}>{t('Save')}</Button>

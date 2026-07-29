@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 86" width="60" height="86" role="img" aria-label="Scribe">
+  <title>Scribe</title>
+  <!--
+    Scribe's mascot — "the Signal": the brand bar from the writ glyph, given
+    eyes. Self-contained and animated; the CSS runs even when this file is
+    loaded through an <img> tag (SVG-in-img allows declarative CSS animation,
+    which is why the motion is CSS and not script).
+
+    The eyes are punched out with a mask rather than painted, so they take the
+    colour of whatever the file is placed on — light eyes on a light page,
+    dark eyes on a dark one — with no light/dark variants to keep in sync.
+  -->
+  <style>
+    .sm-look { animation: scribe-glance 7.3s cubic-bezier(.3,.9,.25,1) infinite; }
+    .sm-eye  { transform-box: fill-box; transform-origin: center;
+               animation: scribe-blink 6.5s ease-in-out infinite; }
+    @keyframes scribe-glance {
+      0%,20%   { transform: translate(0,0); }
+      26%,40%  { transform: translate(4px,1px); }
+      46%,57%  { transform: translate(0,0); }
+      63%,74%  { transform: translate(-4px,1px); }
+      80%,89%  { transform: translate(0,-3px); }
+      95%,100% { transform: translate(0,0); }
+    }
+    @keyframes scribe-blink {
+      0%,40%      { transform: scaleY(1); }
+      42%,43.5%   { transform: scaleY(.08); }
+      45%,88%     { transform: scaleY(1); }
+      89.5%,90.5% { transform: scaleY(.08); }
+      92%,94.5%   { transform: scaleY(1); }
+      96%,97%     { transform: scaleY(.08); }
+      98.5%,100%  { transform: scaleY(1); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .sm-look, .sm-eye { animation: none; }
+    }
+  </style>
+  <mask id="scribe-eyes">
+    <path d="M21 0 H39 A21 21 0 0 1 60 21 V65 A21 21 0 0 1 39 86 H21 A21 21 0 0 1 0 65 V21 A21 21 0 0 1 21 0 Z" fill="#fff"/>
+    <g class="sm-look">
+      <ellipse class="sm-eye" cx="17" cy="34" rx="9" ry="9.5" fill="#000"/>
+      <ellipse class="sm-eye" cx="43" cy="34" rx="9" ry="9.5" fill="#000"/>
+    </g>
+  </mask>
+  <path d="M21 0 H39 A21 21 0 0 1 60 21 V65 A21 21 0 0 1 39 86 H21 A21 21 0 0 1 0 65 V21 A21 21 0 0 1 21 0 Z"
+        fill="#E23A14" mask="url(#scribe-eyes)"/>
+</svg>

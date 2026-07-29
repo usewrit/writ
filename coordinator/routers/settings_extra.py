@@ -34,12 +34,12 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 # ============================================================
 class RuntimeSettings(BaseModel):
     # All optional so PUT is a partial merge; omitted keys are left unchanged.
+    #
+    # Only the knob that governs something this process actually does. The other
+    # five mirrored the desktop daemon (browser headless-ness, its RSS watermark,
+    # a fg/bg run split, monitor interval floors) and were read by nothing — the
+    # coordinator launches no browsers. See coordinator_settings.RUNTIME_DEFAULTS.
     max_concurrent_runs: Optional[int] = None
-    max_background_runs: Optional[int] = None
-    rss_soft_watermark_mb: Optional[int] = None
-    browser_headless: Optional[bool] = None
-    min_content_check_interval_s: Optional[int] = None
-    min_browser_check_interval_s: Optional[int] = None
 
 
 @router.get("/runtime")
@@ -92,10 +92,12 @@ async def update_network_settings(
 # Security (session/JWT policy + active sessions)
 # ============================================================
 class SecuritySettings(BaseModel):
+    # `idle_timeout_min` and `require_mfa` are gone: neither was ever enforced,
+    # and self-host has no MFA enrolment path for the latter to demand — a toggle
+    # promising a second factor could only lock the sole owner out or (as it did)
+    # do nothing. See coordinator_settings.SECURITY_DEFAULTS.
     session_ttl_min: Optional[int] = None
     refresh_ttl_days: Optional[int] = None
-    idle_timeout_min: Optional[int] = None
-    require_mfa: Optional[bool] = None
 
 
 @router.get("/security")

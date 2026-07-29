@@ -177,6 +177,7 @@ fill these into `.env`. Never commit the filled-in `.env`.
 | --- | --- |
 | 🎬 **Record** | Click through the task in a real browser — logins, forms, navigation, extractions — and save it as a replayable workflow. |
 | 🧩 **Edit as steps** | Every recording is an editable step list, not an opaque blob. Fix a selector, add a wait, branch on a condition. |
+| <img src="./assets/scribe.svg" height="17" alt=""> **AI assistant** | Stuck on a page? Hand it to the assistant docked in the recorder. It reads the live page, drives the browser to find what you asked for, and writes the extractor — in *Assist* mode it asks before anything that changes the page. This is the "once" in "AI once, at record time". |
 | 🔐 **Personas** | Store a site's login once as a persona: credentials and TOTP seeds Fernet-encrypted at rest, and a warm cookie/localStorage session reused across every workflow that needs it. Handles 2FA (TOTP, email OTP, SMS). |
 
 **Then run it, on your terms**
@@ -235,6 +236,13 @@ checkout flow costs tokens on run 1 and the same again on run 10,000. Writ
 spends the AI once — while you record — and every replay after that is your own
 machine executing a saved step list. A daily monitor costs nothing to keep
 running.
+
+<img src="./assets/scribe.svg" height="34" align="left" hspace="10" alt="">
+
+That single spend has a face. The assistant in the recorder is the only place
+Writ reasons about a page — it browses, finds the thing you described, and
+leaves behind a step list. After that it goes quiet, and your fleet takes over.
+<br clear="left"/>
 
 The determinism line is the one that wakes you at 3am. Re-deciding the page each
 run means a run can silently do something *different* from yesterday's. A
@@ -321,18 +329,26 @@ claude mcp add writ-selfhost -e WRIT_API_KEY=<YOUR_API_KEY> -- npx -y writ-mcp -
 > (which registers as `writ`). The server identifies itself to the AI as *"Writ Self-Host
 > Coordinator"* — never confused with the desktop app.
 
-**The tools your assistant gets** — 25 of them, plus a `run_<name>` tool per saved workflow:
+**The tools your assistant gets** — 28 of them, plus a `run_<name>` tool per saved workflow:
 
 | Family | Tools |
 | --- | --- |
 | **Operate** | `writ_list_workflows` · `writ_run_workflow` · `writ_workflow_data` · `writ_search_data` · `writ_export_data` · `writ_workflow_runs` |
 | **Automate** | `writ_set_schedule` · `writ_expose_workflow_api` · `writ_create_automation` · `writ_create_monitor` · `writ_wire_monitor` |
-| **Crawl** | `writ_crawl_site` · `writ_crawl_status` |
+| **Crawl** | `writ_crawl_site` · `writ_crawl_status` · `writ_saved_crawls` · `writ_run_saved_crawl` · `writ_saved_crawl_data` |
 | **Build** (un-guided) | `writ_record_start` · `writ_record_act` · `writ_record_context` · `writ_record_network` · `writ_record_save` · `writ_record_cancel` |
 | **Drive a browser** | `writ_browser_use` · `writ_browser_act` · `writ_browser_context` · `writ_browser_network` · `writ_browser_save` · `writ_browser_cancel` |
 
 Building is **un-guided**: the AI drives a live record session on your fleet, and asks
 you for clarifications directly in the chat.
+
+> **Saved crawls save real money.** A whole-site crawl is slow, so the worst thing an
+> assistant can do is re-crawl a site to answer a question it already has the pages
+> for. Pass `save_as` to `writ_crawl_site` once and the crawl becomes a *saved crawl*:
+> callable over REST at `POST /api/crawl/definitions/{slug}/run`, and re-runnable with
+> `max_age` — "give me the pages you collected, unless they are older than N seconds,
+> in which case crawl again." Assistants should check `writ_saved_crawls` **before**
+> starting a new crawl of a site.
 
 > **Give the key the `mcp:execute` scope.** API keys are scoped, and the MCP
 > endpoint checks for that one specifically — without it every call returns

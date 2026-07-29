@@ -1312,9 +1312,20 @@ class ApiRecordedWorkflowCreate(BaseModel):
     custom_path_prefix: Optional[str] = Field(None, description="Prefix for custom paths, e.g. 'myapp' -> /api/v1/webhooks/myapp/functionName")
 
 
+class ApiRecordedWorkflowResponse(WorkflowResponse):
+    """A created api_recorded workflow, plus the endpoints minted for it.
+
+    `endpoints` is ADDITIVE (optional) so existing clients reading the plain workflow
+    fields are unaffected. It exists because the per-function webhook endpoints were
+    being built and then dropped on the floor: the caller asked for callable functions
+    and got back no way to call them.
+    """
+    endpoints: Optional[List[dict]] = None
+
+
 @router.post(
     "/workflows/api-recorded",
-    response_model=WorkflowResponse,
+    response_model=ApiRecordedWorkflowResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create API-Recorded Workflow",
     description="Create a workflow from recorded HTTP API calls with named functions.",
@@ -1385,10 +1396,19 @@ async def create_api_recorded_workflow(
     # Auto-create webhook triggers per function
     created_triggers = []
     if request.create_webhooks:
+        import secrets as secrets_mod
+        from security.encryption import SecretEncryption
+
         prefix = request.custom_path_prefix or request.name.lower().replace(" ", "-")
-        # Clean prefix
+        # Clean prefix. `/` is stripped too: the path is built as `{prefix}/{func}`
+        # below, so a slash inside the prefix would produce a deeper path than the
+        # stored-value pattern allows (and than the caller was told about).
         import re as re_mod
         prefix = re_mod.sub(r'[^a-z0-9_-]', '', prefix)
+        if not prefix:
+            # An all-punctuation name would otherwise yield paths like "/getUser",
+            # which no lookup can match (stored paths never start with a slash).
+            prefix = f"api-{workflow.id}"
 
         for func_name, func_def in request.functions.items():
             custom_path = f"{prefix}/{func_name}"
@@ -1398,12 +1418,27 @@ async def create_api_recorded_workflow(
                 action="run_workflow",
                 function_name=func_name,
                 custom_path=custom_path,
+                # Mint a signing secret like every other trigger-creating path does
+                # (webhooks.create_webhook_trigger). Without one these triggers were
+                # unusable over `/api/webhooks/hook/{token}` at all: _process_webhook
+                # fails closed on a secret-less trigger, so the token URL 401'd while
+                # the custom path had no route — the endpoints reported back to the
+                # caller here could not be called by ANY means.
+                secret=SecretEncryption.encrypt_secret(secrets_mod.token_urlsafe(32)),
                 wait_for_result=True,
                 wait_timeout=120,
                 enabled=True,
             )
             db.add(trigger)
-            created_triggers.append({"function": func_name, "custom_path": custom_path})
+            created_triggers.append({
+                "function": func_name,
+                "custom_path": custom_path,
+                # The callable URL, not just the path fragment: the caller has no way
+                # to know what to prefix `custom_path` with, and the two webhook routes
+                # authenticate differently.
+                "url": f"/api/v1/webhooks/{custom_path}",
+                "method": "POST",
+            })
 
     await db.commit()
     await db.refresh(workflow)
@@ -1413,7 +1448,11 @@ async def create_api_recorded_workflow(
         f"with {len(steps)} functions, {len(created_triggers)} webhook triggers"
     )
 
-    return workflow_to_response(workflow)
+    response = ApiRecordedWorkflowResponse(
+        **workflow_to_response(workflow).model_dump(),
+        endpoints=created_triggers or None,
+    )
+    return response
 
 
 @router.get("/workflows/{workflow_id}", response_model=WorkflowResponse)

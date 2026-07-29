@@ -12,12 +12,14 @@ import client from './client';
 
 // ── Runtime (local execution governor) ─────────────────────────────────────
 export interface RuntimeSettings {
+  /**
+   * Scheduled workflow runs dispatched concurrently. The only runtime knob that
+   * governs something the COORDINATOR does — the five that used to sit beside it
+   * (background-run split, RSS watermark, headless toggle, monitor interval
+   * floors) described the desktop daemon and were read by nothing here: this
+   * process launches no browsers.
+   */
   max_concurrent_runs: number;
-  max_background_runs: number;
-  rss_soft_watermark_mb: number; // 0 = off
-  browser_headless: boolean;
-  min_content_check_interval_s: number;
-  min_browser_check_interval_s: number;
 }
 
 export const getRuntimeSettings = async (): Promise<RuntimeSettings> => {
@@ -71,10 +73,11 @@ export const updateNetworkSettings = async (patch: {
 
 // ── Security (session / JWT policy) ─────────────────────────────────────────
 export interface SecuritySettings {
+  /** Access-token lifetime. Applied to tokens minted after a save. */
   session_ttl_min: number;
+  /** Refresh-token lifetime. */
   refresh_ttl_days: number;
-  idle_timeout_min: number; // 0 = no idle timeout
-  require_mfa: boolean;
+  /** Read-only: whether SECRET_ENCRYPTION_KEY is set. Never the key itself. */
   encryption_key_configured: boolean;
 }
 
@@ -86,8 +89,6 @@ export const getSecuritySettings = async (): Promise<SecuritySettings> => {
 export const updateSecuritySettings = async (patch: {
   session_ttl_min?: number;
   refresh_ttl_days?: number;
-  idle_timeout_min?: number;
-  require_mfa?: boolean;
 }): Promise<SecuritySettings> => {
   const r = await client.put('/settings/security', patch);
   return r.data;

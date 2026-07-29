@@ -82,7 +82,17 @@ class WebhookTriggerCreate(BaseModel):
     conditions: Optional[Dict[str, Any]] = None
     wait_for_result: bool = False
     wait_timeout: int = 120
-    custom_path: Optional[str] = Field(None, max_length=64, pattern=r'^[a-zA-Z0-9_-]+$')
+    # Segments joined by `/`, matching the column (String(100)) and what the
+    # API-recorder writes (`{prefix}/{function_name}`). The old single-segment
+    # pattern (max 64, no `/`) could not express the paths this coordinator mints
+    # itself, so a user could not create — or repair — one through the API.
+    #
+    # The regex is the traversal guard: no `.`, no empty segment, no leading or
+    # trailing slash. `{custom_path:path}` on the route captures greedily, so the
+    # stored value is the only thing keeping a path from being ambiguous.
+    custom_path: Optional[str] = Field(
+        None, max_length=100, pattern=r'^[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)*$'
+    )
 
 
 class WebhookTriggerUpdate(BaseModel):
@@ -96,7 +106,17 @@ class WebhookTriggerUpdate(BaseModel):
     conditions: Optional[Dict[str, Any]] = None
     wait_for_result: Optional[bool] = None
     wait_timeout: Optional[int] = None
-    custom_path: Optional[str] = Field(None, max_length=64, pattern=r'^[a-zA-Z0-9_-]+$')
+    # Segments joined by `/`, matching the column (String(100)) and what the
+    # API-recorder writes (`{prefix}/{function_name}`). The old single-segment
+    # pattern (max 64, no `/`) could not express the paths this coordinator mints
+    # itself, so a user could not create — or repair — one through the API.
+    #
+    # The regex is the traversal guard: no `.`, no empty segment, no leading or
+    # trailing slash. `{custom_path:path}` on the route captures greedily, so the
+    # stored value is the only thing keeping a path from being ambiguous.
+    custom_path: Optional[str] = Field(
+        None, max_length=100, pattern=r'^[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)*$'
+    )
 
 
 # ============================================
@@ -783,49 +803,171 @@ async def handle_incoming_webhook(
     return result
 
 
-async def _process_webhook(
-    trigger,
+# ---------------------------------------------------------------------------
+# Custom-path webhooks: POST /api/v1/webhooks/{custom_path}
+#
+# A SECOND router, because this path does not live under this module's `/webhooks`
+# prefix — the shape `/api/v1/webhooks/...` is what `WebhookTrigger.custom_path`
+# has always documented and what the API-recorder hands back to callers. Until now
+# no route served it, so every custom_path URL this coordinator minted 404'd.
+#
+# Auth differs from `/hook/{token}` on purpose. A token is unguessable, so an HMAC
+# signature can carry that route. A custom_path is HUMAN-CHOSEN and guessable
+# ("myapp/getUser"), so it cannot be its own credential: this route requires an API
+# key with `workflows:execute` and fails closed without one. A signature remains
+# optional here and is still verified when presented.
+# ---------------------------------------------------------------------------
+
+# Self-prefixed with the ABSOLUTE path, matching the house convention for the /api/v1
+# surface (routers/files.py `v1_router`, routers/local_workflows.py) — mounted with no
+# prefix in main.py. Absolute so that grepping "/api/v1/webhooks" finds the route.
+custom_path_router = APIRouter(tags=["webhooks"])
+
+
+@custom_path_router.post("/api/v1/webhooks/{custom_path:path}")
+async def handle_incoming_webhook_by_custom_path(
+    custom_path: str,
     request: Request,
-    db: AsyncSession,
-    x_writ_signature: Optional[str],
-    x_hub_signature_256: Optional[str],
+    db: AsyncSession = Depends(get_db),
+    api_key=Depends(get_current_api_key),
+    x_writ_signature: Optional[str] = Header(None),
+    x_hub_signature_256: Optional[str] = Header(None),
+    wait: Optional[bool] = Query(None, description="Wait for workflow completion and return extracted data"),
+    timeout: Optional[int] = Query(None, ge=10, le=300, description="Max wait time in seconds (default 120)"),
 ):
-    """Process an incoming webhook request."""
-    from models.automation_workflow import AutomationWorkflow
-    from models.automation_task import AutomationTask
+    """Run the workflow behind a webhook trigger's custom path.
 
-    if not trigger.enabled:
-        raise HTTPException(status_code=403, detail="Webhook trigger is disabled")
+    The friendly twin of ``POST /api/webhooks/hook/{token}``: same execution path
+    (``_process_webhook``), addressed by the readable path the trigger was created
+    with instead of an opaque token.
 
-    # Get raw body for signature verification
-    body = await request.body()
+    ``?wait=true`` blocks for the workflow's extracted data (default from the
+    trigger's own ``wait_for_result``); ``&timeout=`` bounds that wait.
+    """
+    from models.webhook_trigger import WebhookTrigger
+    from security.dependencies import check_api_key_scope
 
-    # SECURITY (#7): fail closed. These inbound routes are UNAUTHENTICATED and
-    # the trigger is reachable by an enumerable integer id (/trigger/{id}) or an
-    # unguessable token (/hook/{token}). Signature verification is the ONLY thing
-    # standing between an anonymous caller and the owner's automations, so a
-    # trigger with no secret configured must never execute — refuse rather than
-    # run an unsigned request. All write paths that mint webhook triggers now
-    # always generate a secret, so a secret-less trigger is a stale/legacy row.
+    # Check the FIRING scope before we disclose whether a path exists — otherwise a
+    # read-scoped key could enumerate the owner's endpoints by watching 404 vs 403.
+    # `triggers:execute` matches the sibling `/api/webhooks/trigger/{id}` route; the
+    # per-workflow pin and run budgets are enforced below, once the target is known.
+    if isinstance(api_key, dict):
+        check_api_key_scope(api_key, "triggers", "execute")
+
+    # Normalize: tolerate a leading/trailing slash from a hand-typed URL, since
+    # `{custom_path:path}` captures them verbatim and stored paths carry neither.
+    lookup = (custom_path or "").strip("/")
+    if not lookup:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    trigger = (
+        await db.execute(
+            select(WebhookTrigger).where(WebhookTrigger.custom_path == lookup)
+        )
+    ).scalar_one_or_none()
+    if not trigger:
+        raise HTTPException(status_code=404, detail=f"Webhook '{lookup}' not found")
+
+    # Rate limit per PATH, mirroring the token route's 30/min. Keyed by the resolved
+    # trigger id rather than the raw path so two spellings of the same endpoint
+    # (trailing slash, different case in a query) share one budget.
+    try:
+        from security.rate_limit import RateLimiter
+        _redis = get_redis()  # shared pooled client (do not close)
+        limiter = RateLimiter(_redis, max_requests=30, window_seconds=60, prefix="webhook_rl")
+        allowed, info = await limiter.is_allowed(f"custom:{trigger.id}")
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Webhook rate limit exceeded. Retry after {info.get('reset_at', 60)}s",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Webhook rate limit check failed: {e}")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+
+    # Per-key authorization + run budgets, exactly as the direct run endpoint applies
+    # them. Without this the custom-path webhook would be a way to run a workflow the
+    # key is not scoped to, and to run it past the key's own execution limit.
+    key_obj = api_key.get("obj") if isinstance(api_key, dict) else None
+    if key_obj is not None and trigger.workflow_id:
+        from services.api_key_scope_resolver import key_can_run_workflow, enforce_key_run_limits
+        if not await key_can_run_workflow(db, key_obj, trigger.workflow_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="API key cannot run this workflow",
+            )
+        await enforce_key_run_limits(db, key_obj)
+
+    result = await _process_webhook(
+        trigger, request, db, x_writ_signature, x_hub_signature_256,
+        # The API key above IS the authentication for this route; a signature is
+        # optional here (and still verified when one is sent).
+        require_signature=False,
+    )
+
+    should_wait = wait if wait is not None else getattr(trigger, "wait_for_result", False)
+
+    if should_wait and result.get("triggered") and result.get("data", {}).get("task_id"):
+        task_id = result["data"]["task_id"]
+        wait_timeout = timeout or getattr(trigger, "wait_timeout", 120) or 120
+
+        import asyncio
+        from models.automation_task import AutomationTask
+
+        elapsed = 0
+        poll_interval = 2
+        while elapsed < wait_timeout:
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+            # The run converges in a DIFFERENT session (the dispatch worker), so the
+            # identity map has to be dropped or this loop re-reads its own stale row
+            # forever and never observes the task finishing.
+            db.expire_all()
+            task = (
+                await db.execute(select(AutomationTask).where(AutomationTask.id == task_id))
+            ).scalar_one_or_none()
+
+            if task and task.status in ("success", "failed", "cancelled"):
+                result["status"] = task.status
+                result["success"] = task.success
+                result["result_data"] = task.result_data
+                result["extracted_data"] = (task.result_data or {}).get("extracted_data")
+                result["error"] = task.error_message
+                result["duration_ms"] = task.duration_ms
+                return result
+
+        result["status"] = "timeout"
+        result["error"] = f"Task did not complete within {wait_timeout}s"
+
+    return result
+
+
+def _verify_webhook_signature(trigger, request: Request, body: bytes, signature: str) -> None:
+    """Verify a presented HMAC signature, or raise 401.
+
+    SECURITY (#19): replay protection is MANDATORY. The sender must include a signed
+    ``X-Writ-Timestamp`` header; it must be fresh (±5 min) and is bound into the HMAC
+    (see :func:`verify_signature`) so a captured body-only signature cannot be replayed
+    forever. A missing timestamp is rejected (fail closed) rather than falling back to
+    body-only verification.
+    """
     if not trigger.secret:
+        # A signed request we cannot check is not "probably fine" — it is a caller
+        # believing they are authenticated when nothing verified them.
         logger.warning(
-            f"Webhook trigger {trigger.id} has no secret configured; refusing unsigned execution"
+            f"Webhook trigger {trigger.id} received a signature but has no secret to verify it"
         )
         raise HTTPException(
             status_code=401,
-            detail="Webhook trigger is not configured for signed delivery",
+            detail="Webhook trigger has no signing secret configured",
         )
-
     try:
         decrypted_secret = SecretEncryption.decrypt_secret(trigger.secret)
     except Exception:
         decrypted_secret = trigger.secret
-    signature = x_writ_signature or x_hub_signature_256
-    # SECURITY (#19): replay protection is MANDATORY. The sender must include a
-    # signed X-Writ-Timestamp header; it must be fresh (±5 min) and is bound into
-    # the HMAC (see verify_signature) so a captured body-only signature cannot be
-    # replayed forever. A missing timestamp is rejected (fail closed) rather than
-    # falling back to body-only verification.
+
     timestamp = request.headers.get("X-Writ-Timestamp", "")
     if not timestamp:
         raise HTTPException(status_code=401, detail="Missing X-Writ-Timestamp header")
@@ -838,6 +980,62 @@ async def _process_webhook(
     if not verify_signature(body, signature, decrypted_secret, timestamp):
         logger.warning(f"Invalid webhook signature for trigger {trigger.id}")
         raise HTTPException(status_code=401, detail="Invalid signature")
+
+
+async def _process_webhook(
+    trigger,
+    request: Request,
+    db: AsyncSession,
+    x_writ_signature: Optional[str],
+    x_hub_signature_256: Optional[str],
+    *,
+    require_signature: bool = True,
+):
+    """Process an incoming webhook request.
+
+    ``require_signature`` states, per route, whether the HMAC IS the authentication:
+
+    * ``True`` (default — ``/hook/{token}``, ``/trigger/{id}``): those routes are
+      UNAUTHENTICATED, so the signature is the only thing between an anonymous caller
+      and the owner's automations. Fail closed: a trigger with no secret must never
+      execute.
+    * ``False`` (``/v1/webhooks/{custom_path}``): that route already required a valid
+      API key with ``workflows:execute``, so the caller IS authenticated and a
+      signature is optional belt-and-braces. It is still VERIFIED when presented —
+      accepting a bad signature just because a key was valid would make the header
+      meaningless.
+
+    Defaulting to ``True`` keeps the fail-closed behaviour for anything that forgets to
+    say: a new unauthenticated route cannot accidentally opt out of signing.
+    """
+    from models.automation_workflow import AutomationWorkflow
+    from models.automation_task import AutomationTask
+
+    if not trigger.enabled:
+        raise HTTPException(status_code=403, detail="Webhook trigger is disabled")
+
+    # Get raw body for signature verification
+    body = await request.body()
+
+    signature = x_writ_signature or x_hub_signature_256
+
+    if require_signature:
+        # SECURITY (#7): fail closed. The trigger is reachable by an enumerable integer
+        # id (/trigger/{id}) or an unguessable token (/hook/{token}) with no credential,
+        # so a trigger with no secret configured must never execute. All write paths that
+        # mint webhook triggers now always generate a secret, so a secret-less trigger is
+        # a stale/legacy row.
+        if not trigger.secret:
+            logger.warning(
+                f"Webhook trigger {trigger.id} has no secret configured; refusing unsigned execution"
+            )
+            raise HTTPException(
+                status_code=401,
+                detail="Webhook trigger is not configured for signed delivery",
+            )
+        _verify_webhook_signature(trigger, request, body, signature)
+    elif signature:
+        _verify_webhook_signature(trigger, request, body, signature)
 
     # Parse payload
     try:

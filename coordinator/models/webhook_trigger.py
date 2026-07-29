@@ -103,4 +103,12 @@ class WebhookTrigger(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             # Generate webhook URL using token for security
             "webhook_path": f"/api/webhooks/hook/{self.token}",
+            # The readable twin, when a custom path was set. Emitted so a client can
+            # DISCOVER the callable URL: the path alone was already in this payload,
+            # but nothing told a caller what to prefix it with, and the two routes
+            # authenticate differently (token + HMAC vs API key). None when unset, so
+            # a client can render one affordance or the other without guessing.
+            "custom_webhook_path": (
+                f"/api/v1/webhooks/{self.custom_path}" if self.custom_path else None
+            ),
         }

@@ -168,6 +168,38 @@ session costs two full runs and two waits. Every workflow tool takes an optional
 A reused answer carries `_cache: {hit: true, age_seconds: N}` so the assistant can
 tell how current it is.
 
+`max_age` works identically against Writ Cloud and a self-hosted coordinator, and on
+a workflow's own generated tool as well as `writ_run_workflow`.
+
+### Calling a saved crawl (`writ_run_saved_crawl`)
+
+A whole-site crawl is slow and metered, so re-crawling to answer the same question is
+the most expensive mistake an assistant can make. A **saved crawl** is a stored crawl
+configuration with a stable name, and the same `max_age` contract applies to it:
+
+```jsonc
+{ "name": "writ_run_saved_crawl", "arguments": { "crawl": "docs", "max_age": 86400 } }
+```
+
+- **hit** — the pages that crawl already collected come back inline, instantly, with
+  nothing crawled and nothing metered.
+- **miss** — the site is crawled again with the *saved* settings, and you get a crawl
+  id to poll with `writ_crawl_status` (a crawl outlives a single tool call).
+
+Three tools cover the surface:
+
+| Tool | What it does |
+|------|--------------|
+| `writ_saved_crawls` | List saved crawls. **Check here before crawling a site again.** |
+| `writ_run_saved_crawl` | Run one, reusing recent data when `max_age` allows. |
+| `writ_saved_crawl_data` | Read what one already collected, at any age. Never crawls. |
+
+To create one, pass `save_as` to `writ_crawl_site` — that saves the settings *and*
+runs them, so the crawl becomes callable by REST as well. Re-using the same `save_as`
+updates that saved crawl instead of piling up duplicates. Saving needs an
+`admin`-scoped credential (it creates reusable, callable configuration); running one
+needs only `run`.
+
 ### If a tool call times out
 
 It comes back as `status: "running"` with `retryable: true`. The run was **not**

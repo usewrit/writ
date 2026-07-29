@@ -1,57 +1,46 @@
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
-import { InformationCircleIcon } from '@heroicons/react/24/outline';
 import { SectionHead } from '../common/SectionHead';
 import { Button } from '../ui/Button';
-import { NumberInput, Switch } from '../ui';
+import { NumberInput } from '../ui';
 import { apiErrorMessage } from '../../api/client';
 import { getRuntimeSettings, updateRuntimeSettings, type RuntimeSettings } from '../../api/settings';
 
 /**
- * Runtime — the coordinator-local execution governor. Only relevant because the
- * coordinator can also run browsers directly; remote fleet agents carry their
- * own runtime. Governor knobs (concurrency / RAM / headless) are boot-fixed →
- * a restart-to-apply banner shows when they change; monitor floors apply live.
+ * Runtime — how many scheduled runs the coordinator dispatches at once.
+ *
+ * This section used to carry five more knobs (max background runs, a soft RAM
+ * watermark, a headless toggle, and two monitor interval floors) under the
+ * premise that "the coordinator can also run browsers directly". It cannot — the
+ * coordinator launches no browser, ever; agents do. All five were persisted,
+ * rendered, and read by nothing, so they are gone rather than reworded.
+ *
+ * The one that survived was ALSO dead, for a subtler reason: the scheduler looked
+ * for a top-level Config row literally keyed `max_concurrent_runs`, while this
+ * form writes the whole section as one JSON row under `coordinator_runtime`. It
+ * now reads the section, so the number here finally governs dispatch — and it
+ * does so live, per scheduler tick, which is why the old "applies after a
+ * restart" banner is gone too.
  */
-const GOVERNOR_KEYS: (keyof RuntimeSettings)[] = [
-  'max_concurrent_runs',
-  'max_background_runs',
-  'rss_soft_watermark_mb',
-  'browser_headless',
-];
-
 export const RuntimeSection: React.FC = () => {
   const { t } = useTranslation();
   const [data, setData] = useState<RuntimeSettings | null>(null);
-  const [saved, setSaved] = useState<RuntimeSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     getRuntimeSettings()
-      .then((r) => {
-        setData(r);
-        setSaved(r);
-      })
+      .then(setData)
       .catch(() => toast.error(t('Failed to load runtime settings')))
       .finally(() => setLoading(false));
-  }, []);
-
-  const set = <K extends keyof RuntimeSettings>(key: K, value: RuntimeSettings[K]) => {
-    setData((d) => (d ? { ...d, [key]: value } : d));
-  };
-
-  const governorChanged =
-    !!data && !!saved && GOVERNOR_KEYS.some((k) => data[k] !== saved[k]);
+  }, [t]);
 
   const handleSave = async () => {
     if (!data) return;
     setSaving(true);
     try {
-      const next = await updateRuntimeSettings(data);
-      setData(next);
-      setSaved(next);
+      setData(await updateRuntimeSettings(data));
       toast.success(t('Runtime settings saved'));
     } catch (e) {
       toast.error(apiErrorMessage(e, t('Failed to save runtime settings')));
@@ -68,59 +57,19 @@ export const RuntimeSection: React.FC = () => {
     <div className="space-y-6">
       <SectionHead
         title={t('Runtime')}
-        description={t('Execution limits for browsers the coordinator runs directly. Remote fleet agents use their own runtime.')}
+        description={t('How much scheduled work this coordinator dispatches at once. The browsers themselves run on your agents — set each agent’s capacity in Fleet.')}
       />
 
-      {governorChanged && (
-        <div className="flex items-start gap-2 rounded-lg border border-amber-300/60 bg-amber-50 px-4 py-3 text-[13px] text-amber-800">
-          <InformationCircleIcon className="w-4 h-4 mt-0.5 shrink-0" />
-          <span>{t('Concurrency, RAM watermark and headless mode apply after a coordinator restart.')}</span>
-        </div>
-      )}
-
       <div className="border-t border-border pt-4 space-y-5">
-        {/* Concurrency governor. Floors only — this IS the operator's own governor,
-            so an upper bound here would just be the app second-guessing the person
-            who owns the hardware. The RAM watermark below is the real safety net. */}
-        <div className="grid @pair/stage:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-[13px] font-medium text-ink mb-1">{t('Max concurrent runs')}</label>
-            <NumberInput min={1} value={data.max_concurrent_runs} onChange={(v) => set('max_concurrent_runs', v ?? 1)} />
-          </div>
-          <div>
-            <label className="block text-[13px] font-medium text-ink mb-1">{t('Max background runs')}</label>
-            <NumberInput min={0} value={data.max_background_runs} onChange={(v) => set('max_background_runs', v ?? 0)} />
-          </div>
-        </div>
-
         <div>
-          <label className="block text-[13px] font-medium text-ink mb-1">{t('Soft RAM watermark (MB)')}</label>
-          <NumberInput min={0} step={128} value={data.rss_soft_watermark_mb} onChange={(v) => set('rss_soft_watermark_mb', v ?? 0)} />
-          <p className="text-xs text-tertiary mt-1">{t('0 disables the watermark. When exceeded, new runs wait for headroom.')}</p>
-        </div>
-
-        <Switch
-          checked={data.browser_headless}
-          onChange={(next) => set('browser_headless', next)}
-          label={t('Run browsers headless')}
-          description={t('Off shows a visible browser window (only useful for local debugging).')}
-          reverse
-        />
-
-        <div className="border-t border-border pt-5">
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-tertiary mb-3">{t('Check interval floors (apply live)')}</p>
-          <div className="grid @pair/stage:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-[13px] font-medium text-ink mb-1">{t('Min content-check interval (s)')}</label>
-              <NumberInput min={30} step={10} value={data.min_content_check_interval_s} onChange={(v) => set('min_content_check_interval_s', v ?? 30)} />
-              <p className="text-xs text-tertiary mt-1">{t('Hard floor: 30s.')}</p>
-            </div>
-            <div>
-              <label className="block text-[13px] font-medium text-ink mb-1">{t('Min browser-check interval (s)')}</label>
-              <NumberInput min={60} step={30} value={data.min_browser_check_interval_s} onChange={(v) => set('min_browser_check_interval_s', v ?? 60)} />
-              <p className="text-xs text-tertiary mt-1">{t('Hard floor: 60s.')}</p>
-            </div>
-          </div>
+          <label className="block text-[13px] font-medium text-ink mb-1">{t('Max concurrent runs')}</label>
+          {/* Floor only. This IS the operator's own governor, so an upper bound
+              would just be the app second-guessing the person who owns the fleet;
+              real backpressure comes from live agent capacity. */}
+          <NumberInput min={1} value={data.max_concurrent_runs} onChange={(v) => setData({ ...data, max_concurrent_runs: v ?? 1 })} />
+          <p className="text-xs text-tertiary mt-1">
+            {t('Scheduled workflows dispatched at the same time. Applies immediately — runs already in flight are unaffected.')}
+          </p>
         </div>
 
         <div className="flex justify-end">

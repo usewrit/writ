@@ -304,6 +304,13 @@ export function useRecorderSelection(args: UseRecorderSelectionArgs): UseRecorde
     (data: any): boolean => {
       switch (data?.type) {
         case 'element_info':
+          // Ours ONLY while the click picker is armed. The host also sends
+          // `get_element_info` for its own affordances — the recorder's Extract mode
+          // and "pick a selector for this step" — and consuming those responses
+          // unconditionally swallowed them before the host's own handler ran: the
+          // hover outline tracked the cursor (a `highlight` frame is not consumed)
+          // while the click produced no extract step and filled no selector field.
+          if (modeRef.current !== 'click') return false;
           if (data.selector) {
             flashRect(data.rect);
             onElementClickRef.current?.({
@@ -319,6 +326,8 @@ export function useRecorderSelection(args: UseRecorderSelectionArgs): UseRecorde
           }
           return true;
         case 'elements_in_region':
+          // Same rule as above: only the area picker asked for this.
+          if (modeRef.current !== 'area') return false;
           if (Array.isArray(data.elements) && data.elements.length > 0) {
             onElementsFoundRef.current?.(data.elements as ElementInfo[]);
           } else {

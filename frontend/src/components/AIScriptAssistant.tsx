@@ -1,12 +1,12 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  SparklesIcon,
   XMarkIcon,
   PaperAirplaneIcon,
   ClipboardDocumentCheckIcon,
   PlayIcon,
   ArrowPathIcon,
 } from '@heroicons/react/24/outline';
+import { ScribeMark } from './brand/ScribeMark';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
@@ -315,7 +315,7 @@ export const AIScriptAssistant: React.FC<AIScriptAssistantProps> = ({
     <div className="flex flex-col h-full bg-zinc-900 border-l border-zinc-700/50">
       {/* Header */}
       <div className="flex items-center gap-2 px-3 h-9 border-b border-zinc-700/50 shrink-0">
-        <SparklesIcon className="w-3.5 h-3.5 text-zinc-300" />
+        <ScribeMark className="w-4 h-4 shrink-0" />
         <span className="text-[12px] font-medium text-zinc-200 flex-1">{t('AI Script Assistant')}</span>
         <button onClick={onClose} className="p-0.5 text-zinc-500 hover:text-zinc-300 transition-colors">
           <XMarkIcon className="w-3.5 h-3.5" />
@@ -326,7 +326,7 @@ export const AIScriptAssistant: React.FC<AIScriptAssistantProps> = ({
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-2 space-y-2 min-h-0">
         {messages.length === 0 && (
           <div className="flex flex-col items-center justify-center py-6 text-center">
-            <SparklesIcon className="w-6 h-6 text-zinc-700 mb-2" />
+            <ScribeMark className="w-7 h-7 mb-2" />
             <p className="text-[11px] text-zinc-400">{t('Describe what your script should do.')}</p>
             <p className="text-[10px] text-zinc-600 mt-1 max-w-[220px]">{t('AI sees the page, generates a handler script, and auto-applies it. Keep chatting to iterate.')}</p>
           </div>

@@ -42,8 +42,54 @@ if not (JWT_SECRET_KEY or "").strip():
     )
 
 JWT_ALGORITHM = "HS256"
+# Built-in defaults. The OPERATOR's values live in the `coordinator_security`
+# settings section and are applied over these by `set_session_policy` — see below.
 ACCESS_TOKEN_EXPIRE_MINUTES = 15
 REFRESH_TOKEN_EXPIRE_DAYS = 7
+
+# ============================================================================
+# Session policy (Settings → Security)
+# ============================================================================
+# The two TTLs were rendered as editable fields and read by NOTHING: token
+# minting used the module constants above, so changing "Session lifetime" in the
+# UI had no effect whatsoever. Worse, the settings section defaulted
+# `refresh_ttl_days` to 30 while the real constant was 7, so the UI actively
+# reported a lifetime the coordinator did not honour.
+#
+# Token creation is synchronous and on the hot path, so it cannot read the DB.
+# The values are instead pushed into these module-level slots — at boot from the
+# persisted section, and again whenever the owner saves — which is the same
+# live-apply contract `security.trusted_hosts` uses for the Host allowlist.
+_access_ttl_minutes: int = ACCESS_TOKEN_EXPIRE_MINUTES
+_refresh_ttl_days: int = REFRESH_TOKEN_EXPIRE_DAYS
+
+
+def set_session_policy(access_ttl_minutes: int, refresh_ttl_days: int) -> None:
+    """Apply the operator's session TTLs to all subsequently minted tokens.
+
+    Existing tokens keep the lifetime they were signed with — a JWT's `exp` is in
+    the token. Shortening the TTL therefore takes effect as sessions renew, not
+    retroactively; use "Sign out everywhere" to cut current sessions immediately.
+    """
+    global _access_ttl_minutes, _refresh_ttl_days
+    # Clamp defensively even though the settings layer coerces: this is called
+    # with whatever is in the DB, including rows written by an older build.
+    _access_ttl_minutes = max(1, min(int(access_ttl_minutes), 1_440))
+    _refresh_ttl_days = max(1, min(int(refresh_ttl_days), 3_650))
+    logger.info(
+        "Session policy applied: access=%dmin refresh=%dd",
+        _access_ttl_minutes, _refresh_ttl_days,
+    )
+
+
+def access_ttl_minutes() -> int:
+    """Access-token lifetime currently in force."""
+    return _access_ttl_minutes
+
+
+def refresh_ttl_days() -> int:
+    """Refresh-token lifetime currently in force."""
+    return _refresh_ttl_days
 
 
 # ============================================================================
@@ -59,10 +105,14 @@ def set_redis_client(redis):
     _redis_client = redis
 
 
-async def blacklist_token(jti: str, expires_in_seconds: int = ACCESS_TOKEN_EXPIRE_MINUTES * 60):
+async def blacklist_token(jti: str, expires_in_seconds: Optional[int] = None):
     """Add a token JTI to the blacklist. Token auto-expires from Redis when it would naturally expire."""
     if not _redis_client:
         return
+    if expires_in_seconds is None:
+        # Follow the LIVE access TTL: a blacklist entry that expires before the
+        # token it revokes would let a revoked token work again.
+        expires_in_seconds = access_ttl_minutes() * 60
     try:
         await _redis_client.setex(f"jwt_blacklist:{jti}", expires_in_seconds, "1")
     except Exception as e:
@@ -83,7 +133,7 @@ async def blacklist_decoded_token(payload: Dict[str, Any]) -> None:
     if isinstance(exp, datetime):
         exp = int(exp.timestamp())
     now = int(datetime.now(timezone.utc).timestamp())
-    ttl = max(1, int(exp) - now) if exp else ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    ttl = max(1, int(exp) - now) if exp else access_ttl_minutes() * 60
     await blacklist_token(jti, expires_in_seconds=ttl)
 
 
@@ -101,7 +151,12 @@ async def blacklist_user_tokens(user_id: str):
         now = int(datetime.now(timezone.utc).timestamp())
         await _redis_client.setex(
             f"jwt_user_invalidated:{user_id}",
-            REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+            # Must outlive the longest token it invalidates. Pinned to the LIVE
+            # refresh TTL, not the build-time constant: once that TTL became
+            # operator-configurable, an owner raising it to 30 days would have
+            # had this marker expire after 7 — resurrecting refresh tokens that a
+            # password change or "sign out everywhere" had already revoked.
+            refresh_ttl_days() * 86400,
             str(now),
         )
     except Exception as e:
@@ -250,7 +305,7 @@ def create_access_token(
     is_platform_admin: bool = False,
 ) -> str:
     """Create a JWT access token for web UI authentication."""
-    expires = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expires = datetime.now(timezone.utc) + timedelta(minutes=access_ttl_minutes())
     payload = {
         "sub": str(user_id),
         "org_id": str(org_id),
@@ -301,7 +356,7 @@ async def decode_mfa_challenge_token(token: str) -> Optional[Dict[str, Any]]:
 
 def create_refresh_token(user_id: str) -> str:
     """Create a JWT refresh token for token renewal."""
-    expires = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    expires = datetime.now(timezone.utc) + timedelta(days=refresh_ttl_days())
     payload = {
         "sub": str(user_id),
         "type": "refresh",

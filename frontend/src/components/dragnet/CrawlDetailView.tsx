@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { DatasetApiModal } from '../data/DatasetApiModal';
+import { CrawlApiModal } from './CrawlApiModal';
 import { safeHref } from '../data/Markdown';
 import toast from 'react-hot-toast';
 import {
@@ -29,6 +30,7 @@ import {
   isCrawlCancellable,
   isCrawlTerminal,
   type CrawlView,
+  type CrawlDefinition,
   type MapUrlItem,
 } from '../../api/crawl';
 import { workflowDataApi, type DataRow } from '../../api/workflowData';
@@ -503,6 +505,13 @@ export const CrawlDetailView: React.FC<{
   // first got data called MORE hooks than the loading render before it — React
   // error #310, which blanked the whole crawl page.
   const [apiModalOpen, setApiModalOpen] = useState(false);
+  // "Call this crawl" — the CRAWL's own callable API (saved settings + max_age),
+  // distinct from `apiModalOpen` above which exposes the collected DATASET's read
+  // API. Two different questions: "re-run this crawl by API" vs "read these rows".
+  // Same hook-placement rule: declared here with the other hooks, never beside its
+  // button, because the early returns below would change the hook count per render.
+  const [callModalOpen, setCallModalOpen] = useState(false);
+  const [savedDefinition, setSavedDefinition] = useState<CrawlDefinition | null>(null);
   const doDelete = async () => {
     if (!crawl || deleting) return;
     setDeleting(true);
@@ -653,6 +662,10 @@ export const CrawlDetailView: React.FC<{
                     {t('Get via API')}
                   </Button>
                 )}
+                <Button variant="secondary" size="sm" onClick={() => setCallModalOpen(true)}>
+                  <BoltIcon className="h-4 w-4" />
+                  {savedDefinition ? t('Callable') : t('Call this crawl')}
+                </Button>
                 {terminal && (
                   <Button variant="secondary" size="sm" onClick={crawlAgain}>
                     <ArrowPathIcon className="h-4 w-4" />
@@ -862,6 +875,18 @@ export const CrawlDetailView: React.FC<{
           datasetId={crawl.data_workflow_id}
         />
       )}
+
+      {/* The CRAWL's own callable API: save these settings, then call them with a
+          key — with `max_age` deciding whether a call reuses the collected data or
+          re-crawls. Not gated on `terminal`: making a crawl callable is a decision
+          about its CONFIG, which is just as valid mid-crawl. */}
+      <CrawlApiModal
+        isOpen={callModalOpen}
+        onClose={() => setCallModalOpen(false)}
+        crawl={crawl}
+        existing={savedDefinition}
+        onSaved={setSavedDefinition}
+      />
     </div>
   );
 };

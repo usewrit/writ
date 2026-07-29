@@ -12,6 +12,54 @@ Initial public release.
 
 ### Added
 
+- **Custom-path webhook URLs now work.** `WebhookTrigger.custom_path` had always
+  documented `POST /api/v1/webhooks/{custom_path}` and the API-recorder minted one path
+  per recorded function — but **no route served it**, so every custom-path URL this
+  coordinator produced 404'd. Three defects stacked in one path:
+
+  1. the route did not exist (now added, self-prefixed alongside the other `/api/v1`
+     routers);
+  2. the recorder created those triggers with **no signing secret**, so they were also
+     refused on `/api/webhooks/hook/{token}` — `_process_webhook` fails closed on a
+     secret-less trigger — meaning the endpoints it reported as created were callable by
+     no means at all (it now mints a secret like every other trigger-creating path);
+  3. the list of created endpoints was assembled and then **discarded**, so the caller
+     was never told they existed (now returned as an additive `endpoints` field carrying
+     the full callable URL).
+
+  Credential model: a custom path is human-chosen and therefore guessable, so unlike the
+  unguessable token it cannot be its own credential. The route requires an API key with
+  `triggers:execute` — the same scope as its sibling `POST /api/webhooks/trigger/{id}` —
+  re-checks that the key is scoped to the target workflow, and enforces the key's run
+  budgets exactly as the direct run endpoint does. An HMAC signature is optional there
+  (the key is the authentication) but is still verified when presented. The
+  unauthenticated token route is unchanged and still demands one.
+
+  Also: `custom_path` validation accepted only a single segment (max 64 chars) while the
+  column is 100 and the recorder writes `{prefix}/{function}` — so a user could not
+  create, or repair, the paths the coordinator mints itself. Widened to slash-joined
+  segments with traversal shapes (`..`, `.`, empty segments, edge slashes) still refused,
+  and `custom_webhook_path` is now returned from the trigger API so the URL is
+  discoverable.
+- **Saved crawls — call a crawl like a workflow, and reuse its data.** A crawl row is
+  one RUN whose id dies with that run, so a crawl had no stable handle to expose as an
+  API. New `crawl_definitions` (migration `0014_crawl_definitions`) stores the
+  configuration under a slug; `crawl_jobs.definition_id` makes runs its history.
+
+  `POST /api/crawl/definitions/{ref}/run` takes **`max_age`** — a freshness contract,
+  not a cache flag: within the window the pages that crawl already collected come back
+  with nothing crawled, otherwise the saved settings are re-crawled. Accepts
+  `Cache-Control: max-age=N`, `?max_age=N`, or a body field, and stamps every answer
+  with `_cache.hit` / `_cache.age_seconds`. Only a `completed` run with at least one
+  fetched page qualifies, so a fully-blocked host cannot pin an empty answer.
+
+  Scoped with the existing `crawl:execute` / `crawl:read` / `crawl:delete` key scopes,
+  exposed to assistants as `writ_saved_crawls` / `writ_run_saved_crawl` /
+  `writ_saved_crawl_data` (plus `save_as` on `writ_crawl_site`), and surfaced in the app
+  as a *Call this crawl* panel on the crawl page.
+
+### Added
+
 - **Coordinator** — FastAPI + a single SQLite file; no external database or
   cache services. Serves the built web UI and the REST API from one process.
 - **Document + OCR extraction** — a `doc-extract` service ships alongside the

@@ -72,9 +72,14 @@ export interface FleetConnectInfo {
 
 /** GET/POST /api/fleet/local-agent — an agent run on the coordinator's own host. */
 export interface LocalAgentStatus {
-  /** False when this host can't run one (unknown platform, containerised). */
+  /**
+   * False when this host can't run one: no published build, a containerised
+   * coordinator, a missing installer dependency, or Windows (the installer is a
+   * POSIX shell script — `blockers` points at the PowerShell route instead).
+   */
   supported: boolean;
   blockers: string[];
+  /** Release-asset infix for this host, e.g. `macos-arm64`. Null when unsupported. */
   target: string | null;
   platform: string;
   running: boolean;
@@ -142,12 +147,14 @@ export interface MintedFleetToken {
   token: string;
   channel_key: string | null;
   /**
-   * Runnable invocation for the stock `writ-agent` binary. Multi-line: the URL
-   * is a CONFIG value, not an env var, so it is set first and the token is then
-   * passed in the environment —
-   *   ./writ-agent config set saas.url <coordinator>
-   *   WRIT_SERVICE_TOKEN=<raw> ./writ-agent start --headless
-   * (There is no `--token` flag and the binary does not read WRIT_COORDINATOR_URL.)
+   * Runnable invocation for the `writ-agent-fleet` binary the installer above
+   * produces. ONE line: that binary is configured ENTIRELY BY ENVIRONMENT —
+   *   WRIT_SERVICE_TOKEN=<raw> WRIT_COORDINATOR_URL=<coordinator> ~/.writ/writ-agent-fleet
+   * with WRIT_FLEET_ALLOW_INSECURE=1 added only for a plaintext, non-loopback
+   * coordinator. There is no `--token` flag, and `config set` / `start
+   * --headless` belong to the DESKTOP `writ-agent` binary, which is a different
+   * program — issuing them against this one is why the pasted command used to be
+   * unrunnable.
    */
   connect_command: string;
   /** Docker variant using the published image's WRIT_SERVICE_TOKEN env. */
@@ -233,9 +240,14 @@ export const fleetApi = {
    * containerised coordinator cannot launch an agent on the host itself. The
    * code moves all of that server-side: the installer fetches it by exchanging
    * the code, so the operator handles one short line.
+   *
+   * `name` is the operator's label for the machine. The agent never learns it —
+   * nothing on the wire carries a name — so the coordinator keeps it against the
+   * minted token and resolves it back when listing the fleet. Omit it and the
+   * agent lists under its own id rather than a generated placeholder.
    */
-  async mintPairCode(): Promise<PairCode> {
-    const r = await client.post('/fleet/pair-code');
+  async mintPairCode(name?: string): Promise<PairCode> {
+    const r = await client.post('/fleet/pair-code', name ? { name } : {});
     return r.data;
   },
   /** Can this coordinator run an agent on its own host, and is one running? */

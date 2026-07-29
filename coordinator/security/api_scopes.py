@@ -429,6 +429,19 @@ _ROUTE_RULES: tuple[tuple[str, str, str], ...] = (
     ("PATCH",  "/api/schedule/*",                             "monitors:write"),
     ("DELETE", "/api/schedule/*",                             "monitors:delete"),
 
+    # ── custom-path webhooks ──
+    #
+    # POST /api/v1/webhooks/{custom_path} FIRES a webhook trigger, so it takes the same
+    # scope as its sibling `POST /api/webhooks/trigger/*` — one vocabulary for one act,
+    # rather than a second spelling for the same thing.
+    #
+    # This is only the outer gate. The handler additionally requires the key to be
+    # scoped to the TARGET workflow (`key_can_run_workflow`, which pins on
+    # `workflows:read` for that id) and enforces the key's own run budgets, exactly as
+    # the direct run endpoint does — so `triggers:execute` alone cannot run a workflow
+    # the key was never given.
+    ("POST",   "/api/v1/webhooks/*",                          "triggers:execute"),
+
     # ── crawl / scrape ──
     #
     # /api/crawl/scrape and /api/crawl/map are one-shot fetches, not crawls, and
@@ -437,6 +450,14 @@ _ROUTE_RULES: tuple[tuple[str, str, str], ...] = (
     ("POST",   "/api/crawl/scrape",                           "scrape:execute"),
     ("POST",   "/api/crawl/map",                              "scrape:execute"),
     ("POST",   "/api/crawl/preview",                          "scrape:execute"),
+    # Saved crawls (the callable surface). Running one dispatches a real crawl,
+    # so it needs crawl:execute — the same authority as POST /api/crawl. Saving
+    # or editing a definition carries that authority in deferred form (it decides
+    # what a later run does), so it is deliberately NOT a weaker scope. Declared
+    # ABOVE the generic crawl rules: first match wins.
+    ("POST",   "/api/crawl/definitions/{}/run",               "crawl:execute"),
+    ("POST",   "/api/crawl/definitions",                      "crawl:execute"),
+    ("PATCH",  "/api/crawl/definitions/{}",                   "crawl:execute"),
     ("POST",   "/api/crawl/{}/cancel",                        "crawl:execute"),
     ("POST",   "/api/crawl",                                  "crawl:execute"),
     ("GET",    "/api/crawl/*",                                "crawl:read"),

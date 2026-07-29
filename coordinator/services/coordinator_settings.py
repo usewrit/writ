@@ -38,20 +38,44 @@ KEY_DATA = "coordinator_data"
 # ---------------------------------------------------------------------------
 # Defaults — mirror the desktop daemon's runtime shape / plan spec
 # ---------------------------------------------------------------------------
+# Runtime governor.
+#
+# This section used to mirror the DESKTOP DAEMON's runtime shape, and most of it
+# was meaningless here: the coordinator launches no browsers — agents do. Five of
+# the six knobs were persisted, rendered, and read by absolutely nothing:
+#
+#   max_background_runs         the coordinator has no foreground/background split
+#   rss_soft_watermark_mb       watches the daemon's own RSS; this process holds
+#                               no browsers, so its RSS is irrelevant
+#   browser_headless            the AGENT decides headless-ness, not the coordinator
+#   min_content_check_interval_s   anti-detection floors that belong where the
+#   min_browser_check_interval_s   browsing happens; nothing here clamps an interval
+#
+# They are gone rather than wired, because there is no honest place to wire them
+# to. What remains is the one knob that governs something this process actually
+# does — how many scheduled runs the scheduler dispatches at once.
 RUNTIME_DEFAULTS: Dict[str, Any] = {
     "max_concurrent_runs": 4,
-    "max_background_runs": 2,
-    "rss_soft_watermark_mb": 1536,   # 0 = off
-    "browser_headless": True,
-    "min_content_check_interval_s": 60,
-    "min_browser_check_interval_s": 300,
 }
 
+# Session policy.
+#
+# `idle_timeout_min` and `require_mfa` used to live here and were also read by
+# nothing. Both are removed rather than wired:
+#
+#   idle_timeout_min   needs client-side activity tracking that does not exist;
+#                      a server-side approximation would log people out mid-run.
+#   require_mfa        self-host has NO MFA enrolment path — the `mfa_enabled` /
+#                      `totp_secret` columns came along in the carve, but there is
+#                      no router and no UI to enrol with. A toggle demanding a
+#                      second factor could only ever lock the sole owner out, or
+#                      (as it did) silently do nothing. That is the worst kind of
+#                      dead control: one that reads as a security guarantee.
+#
+# The two that remain are real and are now applied when tokens are minted.
 SECURITY_DEFAULTS: Dict[str, Any] = {
-    "session_ttl_min": 15,        # access-token TTL (informational; module const today)
-    "refresh_ttl_days": 30,
-    "idle_timeout_min": 0,        # 0 = no idle timeout
-    "require_mfa": False,
+    "session_ttl_min": 15,        # access-token TTL
+    "refresh_ttl_days": 7,        # refresh-token TTL
 }
 
 PREFERENCES_DEFAULTS: Dict[str, Any] = {
@@ -155,12 +179,6 @@ async def set_runtime(db: AsyncSession, updates: Dict[str, Any]) -> Dict[str, An
         current[k] = v
     coerced = {
         "max_concurrent_runs": _int(current["max_concurrent_runs"], 4, 1, 64),
-        "max_background_runs": _int(current["max_background_runs"], 2, 0, 64),
-        "rss_soft_watermark_mb": _int(current["rss_soft_watermark_mb"], 1536, 0, 1_048_576),
-        "browser_headless": _bool(current["browser_headless"], True),
-        # Hard anti-detection floors from the daemon: content >= 30s, browser >= 60s.
-        "min_content_check_interval_s": _int(current["min_content_check_interval_s"], 60, 30, 86_400),
-        "min_browser_check_interval_s": _int(current["min_browser_check_interval_s"], 300, 60, 86_400),
     }
     await set_section(db, KEY_RUNTIME, coerced)
     return coerced
@@ -173,6 +191,31 @@ async def get_security(db: AsyncSession) -> Dict[str, Any]:
     return await get_section(db, KEY_SECURITY, SECURITY_DEFAULTS)
 
 
+def apply_security_to_runtime(section: Dict[str, Any]) -> None:
+    """Push the session policy into the live token minter.
+
+    `create_access_token` / `create_refresh_token` are synchronous and on the hot
+    path, so they cannot read the DB — the values are pushed to them instead. Same
+    live-apply contract as the Host allowlist in `apply_network_to_runtime`.
+    """
+    from security.jwt import set_session_policy
+
+    set_session_policy(
+        int(section.get("session_ttl_min") or SECURITY_DEFAULTS["session_ttl_min"]),
+        int(section.get("refresh_ttl_days") or SECURITY_DEFAULTS["refresh_ttl_days"]),
+    )
+
+
+async def restore_security_from_db(db: AsyncSession) -> None:
+    """Re-apply the persisted session policy at boot.
+
+    Without this a restart silently reverts to the built-in 15min/7d while the UI
+    kept showing the operator's saved values — the same "shown but not enforced"
+    trap the whole section was in before it was wired at all.
+    """
+    apply_security_to_runtime(await get_security(db))
+
+
 async def set_security(db: AsyncSession, updates: Dict[str, Any]) -> Dict[str, Any]:
     current = await get_security(db)
     for k, v in updates.items():
@@ -181,11 +224,12 @@ async def set_security(db: AsyncSession, updates: Dict[str, Any]) -> Dict[str, A
         current[k] = v
     coerced = {
         "session_ttl_min": _int(current["session_ttl_min"], 15, 1, 1_440),
-        "refresh_ttl_days": _int(current["refresh_ttl_days"], 30, 1, 3_650),
-        "idle_timeout_min": _int(current["idle_timeout_min"], 0, 0, 10_080),
-        "require_mfa": _bool(current["require_mfa"], False),
+        "refresh_ttl_days": _int(current["refresh_ttl_days"], 7, 1, 3_650),
     }
     await set_section(db, KEY_SECURITY, coerced)
+    # Live-apply, so the new lifetimes govern the very next token minted rather
+    # than waiting for a restart.
+    apply_security_to_runtime(coerced)
     return coerced
 
 

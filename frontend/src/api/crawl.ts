@@ -254,6 +254,84 @@ function invalidateCrawls() {
   useQueryCache.getState().invalidate(Q.crawls());
 }
 
+
+/**
+ * A SAVED crawl — a stored configuration with a stable slug.
+ *
+ * A CrawlView is one RUN; its id dies with that run, so a crawl had no stable
+ * handle to expose as an API. A definition owns the settings, so it can be
+ * called with a minted key and re-run with exactly those settings — and, with
+ * `max_age`, answered from the data it already collected.
+ */
+export interface CrawlDefinition {
+  id: number;
+  slug: string;
+  name: string;
+  description?: string | null;
+  seed_url: string;
+  /** The saved StartCrawlRequest payload. PATCH it back verbatim to edit. */
+  config: Partial<StartCrawlRequest> & { url?: string };
+  /** Freshness applied when a caller omits max_age (null = always re-crawl). */
+  default_max_age_seconds?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  last_run_at?: string | null;
+  run_url?: string;
+  data_url?: string;
+}
+
+/** The canonical freshness stamp every surface returns (body, not headers — an
+ *  MCP tool or SDK client never sees a header). */
+export interface CacheStamp {
+  hit: boolean;
+  age_seconds?: number;
+  source_crawl_id?: number;
+}
+
+/** One page of a crawl's collected rows, in the Workflow Data API's shape. */
+export interface CrawlDataTable {
+  columns?: string[];
+  rows?: Array<Record<string, unknown>>;
+  total?: number;
+  truncated?: boolean;
+}
+
+export interface RunSavedCrawlResponse {
+  /** True when this answered from already-collected data — nothing was crawled. */
+  cached: boolean;
+  _cache?: CacheStamp;
+  definition: CrawlDefinition;
+  crawl: CrawlView;
+  status_url?: string | null;
+  data_url?: string | null;
+  /** Present on a freshness hit (and after wait=true); absent on a cold dispatch. */
+  data?: CrawlDataTable | null;
+}
+
+export interface SavedCrawlDataResponse {
+  definition: CrawlDefinition;
+  crawl: CrawlView | null;
+  age_seconds?: number | null;
+  data_url?: string | null;
+  data?: CrawlDataTable | null;
+}
+
+/** Delivery controls for a saved-crawl run. Never crawl settings — those are saved. */
+export interface RunSavedCrawlOptions {
+  max_age?: number;
+  wait?: boolean;
+  timeout?: number;
+  limit?: number;
+}
+
+/** Human label for a freshness window, for the picker + the copy snippets. */
+export const FRESHNESS_PRESETS: ReadonlyArray<{ seconds: number; label: string }> = [
+  { seconds: 0, label: 'Always re-crawl' },
+  { seconds: 3600, label: '1 hour' },
+  { seconds: 86400, label: '24 hours' },
+  { seconds: 604800, label: '7 days' },
+];
+
 export const crawlApi = {
   /** Every crawl, newest first (coordinator ordering). Wrapped as `{ crawls: [...] }`. */
   list: async (limit = 50): Promise<CrawlView[]> => {
@@ -304,5 +382,77 @@ export const crawlApi = {
   remove: async (id: number | string): Promise<void> => {
     await client.delete(`/crawl/${id}`);
     invalidateCrawls();
+  },
+
+  // ── Saved crawls (the callable crawl API) ─────────────────────────────────
+
+  /** Every saved crawl, newest first. */
+  listDefinitions: async (limit = 50): Promise<CrawlDefinition[]> => {
+    const response = await client.get('/crawl/definitions', { params: { limit } });
+    return response.data?.definitions ?? [];
+  },
+
+  getDefinition: async (ref: number | string): Promise<CrawlDefinition> => {
+    const response = await client.get(`/crawl/definitions/${ref}`);
+    return response.data;
+  },
+
+  /**
+   * Save a crawl configuration so it becomes callable by API and re-runnable.
+   *
+   * Pass EITHER `config` or `from_crawl_id`. Prefer `from_crawl_id` when saving an
+   * existing crawl: a crawl's status view does not echo every knob it ran with
+   * (politeness, shard sizing, path filters), so a config rebuilt on the client
+   * would silently substitute defaults and save a crawl that behaves differently.
+   */
+  saveDefinition: async (body: {
+    name?: string;
+    slug?: string;
+    description?: string;
+    default_max_age_seconds?: number | null;
+    config?: StartCrawlRequest;
+    from_crawl_id?: number;
+  }): Promise<CrawlDefinition> => {
+    const response = await client.post('/crawl/definitions', body);
+    return response.data;
+  },
+
+  updateDefinition: async (
+    ref: number | string,
+    body: {
+      name?: string;
+      description?: string;
+      default_max_age_seconds?: number | null;
+      config?: StartCrawlRequest;
+    },
+  ): Promise<CrawlDefinition> => {
+    const response = await client.patch(`/crawl/definitions/${ref}`, body);
+    return response.data;
+  },
+
+  removeDefinition: async (ref: number | string): Promise<void> => {
+    await client.delete(`/crawl/definitions/${ref}`);
+  },
+
+  /**
+   * Run a saved crawl. With `max_age`, a recent completed run's data comes back
+   * immediately (`cached: true`) and nothing is crawled; otherwise the saved
+   * settings are re-crawled and a handle is returned (HTTP 202).
+   */
+  runDefinition: async (
+    ref: number | string,
+    opts: RunSavedCrawlOptions = {},
+  ): Promise<RunSavedCrawlResponse> => {
+    const response = await client.post(`/crawl/definitions/${ref}/run`, opts);
+    return response.data;
+  },
+
+  /** Data already collected by a saved crawl's latest completed run. Never crawls. */
+  definitionData: async (
+    ref: number | string,
+    limit = 50,
+  ): Promise<SavedCrawlDataResponse> => {
+    const response = await client.get(`/crawl/definitions/${ref}/data`, { params: { limit } });
+    return response.data;
   },
 };

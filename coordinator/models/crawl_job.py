@@ -147,6 +147,19 @@ class CrawlJob(Base):
         comment="AI session that launched this crawl (Scribe), if any",
     )
 
+    # --- Saved-definition lineage -------------------------------------------
+    # Set when this run was launched from a saved CrawlDefinition (the callable
+    # API surface). NULL for ad-hoc crawls started from the wizard, so every
+    # pre-existing row stays valid. SET NULL rather than CASCADE: deleting the
+    # saved config must not destroy the data its runs collected.
+    definition_id = Column(
+        Integer,
+        ForeignKey("crawl_definitions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="Saved CrawlDefinition this run was launched from (NULL = ad-hoc)",
+    )
+
     # --- Lifecycle + live counters ------------------------------------------
     status = Column(String(20), nullable=False, default="queued", index=True)
     pages_discovered = Column(Integer, nullable=False, default=0)
@@ -209,6 +222,7 @@ class CrawlJob(Base):
             "render_mode": self.render_mode,
             "ocr_mode": self.ocr_mode,
             "workflow_id": self.workflow_id,
+            "definition_id": self.definition_id,
             "pages_discovered": self.pages_discovered,
             "pages_done": self.pages_done,
             "pages_failed": self.pages_failed,

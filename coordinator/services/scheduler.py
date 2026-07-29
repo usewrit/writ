@@ -220,23 +220,45 @@ async def staleness_sweep_tick() -> None:
 # Job 3 — scheduled workflows
 # ---------------------------------------------------------------------------
 async def _max_concurrent_runs(db) -> int:
-    """Governor ceiling: live Config-KV override "max_concurrent_runs" first,
-    else settings default."""
+    """Governor ceiling for scheduled dispatch.
+
+    Reads, in order: the operator's **Settings → Runtime** value, a legacy
+    standalone `max_concurrent_runs` Config row, then the env default.
+
+    The first source is the fix for a dead control: Settings → Runtime writes the
+    whole section as one JSON row under `coordinator_runtime`
+    (`services.coordinator_settings.KEY_RUNTIME`), while this function only ever
+    looked for a *top-level* Config row literally keyed `max_concurrent_runs`.
+    Nothing has ever written that key from the UI, so the number the operator set
+    was silently ignored and the scheduler always used the env default. The legacy
+    key is still honoured second, since an older build or a manual insert may have
+    populated it.
+    """
     from config import settings
     from models.config import Config
-    row = (await db.execute(
-        select(Config).where(Config.key == "max_concurrent_runs")
-    )).scalar_one_or_none()
-    val = None
-    if row is not None:
-        raw = row.value
+    from services.coordinator_settings import KEY_RUNTIME
+
+    def _as_int(raw) -> int | None:
         if isinstance(raw, dict):
             raw = raw.get("value")
         try:
-            val = int(raw)
+            n = int(raw)
         except (TypeError, ValueError):
-            val = None
-    if val is None or val < 1:
+            return None
+        return n if n >= 1 else None
+
+    rows = (await db.execute(
+        select(Config).where(Config.key.in_([KEY_RUNTIME, "max_concurrent_runs"]))
+    )).scalars().all()
+    by_key = {r.key: r.value for r in rows}
+
+    val = None
+    section = by_key.get(KEY_RUNTIME)
+    if isinstance(section, dict):
+        val = _as_int(section.get("max_concurrent_runs"))
+    if val is None and "max_concurrent_runs" in by_key:
+        val = _as_int(by_key["max_concurrent_runs"])
+    if val is None:
         val = int(getattr(settings, "max_concurrent_runs", 5) or 5)
     return max(1, val)
 

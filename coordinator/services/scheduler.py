@@ -24,6 +24,11 @@ Jobs
 5. crawl_sweep (~30s) — Dragnet distributed-crawl crash-safety: reconcile
    in-flight shard counts from real task state and re-pump / finalize stalled
    crawls (services.crawl_orchestrator.sweep_crawls).
+6. capacity_reconcile (~60s) — free agent capacity slots whose task already
+   reached a terminal state. `active_sessions` is coordinator-owned and moves only
+   on reserve/release, so a completion path that skips the release leaks that slot
+   permanently and the agent is reported busy forever
+   (routers.user_recorder_ws.reconcile_agent_slots).
 
 Call ``build_scheduler()`` to construct the (not-yet-started) scheduler with all
 jobs registered; ``main.lifespan`` starts/stops it.
@@ -46,6 +51,7 @@ JOB_STALENESS_SWEEP = "monitor_staleness_sweep"
 JOB_SCHEDULED_WORKFLOWS = "scheduled_workflows"
 JOB_HOUSEKEEPING = "housekeeping"
 JOB_CRAWL_SWEEP = "crawl_sweep"
+JOB_CAPACITY_RECONCILE = "capacity_reconcile"
 
 # Intervals (seconds).
 MONITOR_DISPATCH_INTERVAL_S = 20
@@ -55,6 +61,10 @@ HOUSEKEEPING_INTERVAL_S = 24 * 3600
 # Dragnet crawl crash-safety sweep — reconcile in-flight shard counts from real
 # task state and re-pump / finalize stalled crawls (services.crawl_orchestrator).
 CRAWL_SWEEP_INTERVAL_S = 30
+# Slot reconciliation is a SAFETY NET, not the release path — releases happen
+# inline on completion. 60s is frequent enough that a leaked slot cannot wedge a
+# fleet for long, and rare enough to stay off the hot path.
+CAPACITY_RECONCILE_INTERVAL_S = 60
 
 # Module-level reconcile fingerprint: the last (assignment-inputs, connected-agent
 # set) signature the monitor-dispatch job acted on. A tick that sees the same
@@ -428,6 +438,22 @@ async def _sweep_stored_files(now: datetime) -> int:
 # ---------------------------------------------------------------------------
 # Job 5 — Dragnet crawl crash-safety sweep
 # ---------------------------------------------------------------------------
+async def capacity_reconcile_tick() -> None:
+    """Free agent capacity slots whose task is no longer running.
+
+    `active_sessions` is coordinator-owned in-memory state adjusted only by
+    reserve/release. A completion path that stamps a task terminal without
+    releasing leaks that slot FOREVER — the agent is reported busier than it is and,
+    at max_sessions, silently stops receiving work. This derives the truth from the
+    task table instead of trusting the counter, so the fleet self-heals.
+    """
+    from database import AsyncSessionLocal
+    from routers.user_recorder_ws import reconcile_agent_slots
+
+    async with AsyncSessionLocal() as db:
+        await reconcile_agent_slots(db)
+
+
 async def crawl_sweep_tick() -> None:
     """Reconcile non-terminal Dragnet crawls against real shard-task state and
     re-pump / finalize any that stalled (a shard died/expired without routing
@@ -489,6 +515,15 @@ def build_scheduler():
         id=JOB_HOUSEKEEPING,
         name="Retention housekeeping",
         next_run_time=_soon(HOUSEKEEPING_INTERVAL_S),
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        capacity_reconcile_tick,
+        trigger="interval",
+        seconds=CAPACITY_RECONCILE_INTERVAL_S,
+        id=JOB_CAPACITY_RECONCILE,
+        name="Agent capacity reconcile",
+        next_run_time=_soon(CAPACITY_RECONCILE_INTERVAL_S),
         replace_existing=True,
     )
     scheduler.add_job(

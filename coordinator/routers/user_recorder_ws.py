@@ -285,6 +285,11 @@ _REPLY_AWAITED_TYPES = (
 # released when the task reaches a terminal state. task_id keying makes reserve/
 # release idempotent and symmetric across the direct-run and queue-drain paths.
 _reserved_slots: Dict[str, str] = {}  # task_id -> agent_id
+# When each reservation was made, so the reconciler below can leave FRESH ones
+# alone: a slot is reserved under the pick lock, which can run before the task row
+# is visible to another session, and freeing it in that window would hand the same
+# capacity out twice.
+_reserved_at: Dict[str, float] = {}  # task_id -> monotonic seconds
 
 
 def reserve_agent_slot(agent_id: str, task_id) -> None:
@@ -300,6 +305,7 @@ def reserve_agent_slot(agent_id: str, task_id) -> None:
     if m is not None:
         m["active_sessions"] = int(m.get("active_sessions", 0)) + 1
         _reserved_slots[tid] = agent_id
+        _reserved_at[tid] = time.monotonic()
 
 
 def release_agent_slot(task_id) -> None:
@@ -309,6 +315,7 @@ def release_agent_slot(task_id) -> None:
     disconnected — its meta, and thus its count, was dropped)."""
     tid = str(task_id)
     agent_id = _reserved_slots.pop(tid, None)
+    _reserved_at.pop(tid, None)
     if agent_id is None:
         return
     m = _agent_meta.get(agent_id)
@@ -322,6 +329,72 @@ def purge_agent_reservations(agent_id: str) -> None:
     leaking stale task ids (whose in-flight runs are lost with the socket)."""
     for tid in [t for t, a in _reserved_slots.items() if a == agent_id]:
         _reserved_slots.pop(tid, None)
+        _reserved_at.pop(tid, None)
+
+
+# Grace period before a reservation is eligible for reconciliation. Comfortably
+# longer than the dispatch window between reserving a slot and the task row being
+# committed + visible.
+_RESERVATION_GRACE_S = 120
+
+
+async def reconcile_agent_slots(db) -> int:
+    """Free reservations whose task is no longer running. Returns the count freed.
+
+    `active_sessions` is coordinator-owned and adjusted ONLY by reserve/release, so
+    a completion path that forgets to release leaks capacity PERMANENTLY — the count
+    never falls, the agent is reported busy forever, and once it reaches max_sessions
+    that agent silently stops receiving work (crawl shards, workflows, monitor checks
+    alike) until it reconnects or the coordinator restarts. Two paths did exactly
+    that: the crawl THIN completion and the stale-shard reaper, both of which stamp
+    tasks terminal with a direct UPDATE.
+
+    Those are fixed, but an in-memory counter with no ground truth will drift again
+    the next time a terminal path is added. So derive it: any reservation whose task
+    is terminal or gone is released. Reservations younger than the grace window are
+    skipped so this can never race a dispatch that has not committed its row yet.
+    """
+    from sqlalchemy import select as _select
+    from models.automation_task import AutomationTask as _Task
+
+    now = time.monotonic()
+    candidates = [
+        tid for tid, at in list(_reserved_at.items())
+        if now - at >= _RESERVATION_GRACE_S
+    ]
+    # A reservation with no timestamp predates this bookkeeping (or was restored
+    # oddly); treat it as eligible rather than letting it live forever.
+    candidates += [t for t in list(_reserved_slots) if t not in _reserved_at]
+    if not candidates:
+        return 0
+
+    numeric = []
+    for t in candidates:
+        try:
+            numeric.append(int(t))
+        except (TypeError, ValueError):
+            continue
+    live: set = set()
+    if numeric:
+        rows = await db.execute(
+            _select(_Task.id).where(
+                _Task.id.in_(numeric),
+                _Task.status.notin_(("success", "failed", "timeout", "cancelled")),
+            )
+        )
+        live = {str(r) for r in rows.scalars().all()}
+
+    freed = 0
+    for tid in candidates:
+        if tid not in live:
+            release_agent_slot(tid)
+            freed += 1
+    if freed:
+        logger.warning(
+            "[capacity] reconciled %d stale slot reservation(s) — a completion path "
+            "did not release them; agents were reported busier than they were", freed
+        )
+    return freed
 
 
 async def push_to_recorder(agent_id: str, message: dict) -> Optional[dict]:

@@ -954,6 +954,22 @@ async def complete_shard_task(
         return False
 
     (tc,) = claimed
+
+    # FREE THE CAPACITY SLOT. Dispatch reserves one against the executing agent
+    # (reserve_agent_slot, from the direct-run pick or the queue drainer), and the
+    # ONLY release lives in _process_task_completion — which this THIN path
+    # deliberately bypasses. So every shard that completed here leaked its slot:
+    # the agent's coordinator-side `active_sessions` only ever climbed, it was
+    # reported busy forever, and once the count reached its max NOTHING could be
+    # dispatched to it again — crawls, workflows and monitor checks alike.
+    # Idempotent and keyed by task id, so it is safe here even though the reaper
+    # below may also release the same id.
+    try:
+        from routers.user_recorder_ws import release_agent_slot
+        release_agent_slot(task_id)
+    except Exception:  # noqa: BLE001 — never let capacity bookkeeping break completion
+        pass
+
     # Realtime: clear this shard from the runs feed instantly. The crawl-level
     # live card updates flow from on_shard_complete's _emit_crawl_run_event.
     try:
@@ -1400,6 +1416,17 @@ async def sweep_crawls() -> None:
                     .values(status="failed",
                             error_message="shard reaped by sweep; urls requeued"))
                 await db.commit()
+                # Same leak as the thin completion path: this stamps tasks terminal
+                # with a direct UPDATE, so nothing releases the capacity slot the
+                # dispatcher reserved. A reaped shard is precisely the case where the
+                # agent is already wedged, so leaving its slot held is how a stuck
+                # crawl permanently shrinks the fleet. Idempotent per task id.
+                try:
+                    from routers.user_recorder_ws import release_agent_slot
+                    for _tid, _ in stale:
+                        release_agent_slot(_tid)
+                except Exception:  # noqa: BLE001 — bookkeeping must not break the sweep
+                    pass
                 logger.warning(
                     f"[{DRAGNET_NAME}] reaped {len(stale)} stale crawl shard(s) "
                     f"(> {_SHARD_STALE_AFTER_S}s), requeued {requeued} url(s)")

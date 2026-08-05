@@ -684,6 +684,82 @@ class UnifiedTriggerService:
         await self.db.commit()
         return executions
 
+    async def process_scheduled_automation(
+        self,
+        rule: TriggerRule,
+    ) -> Optional[TriggerExecution]:
+        """Fire a standalone SCHEDULED automation on its recurrence.
+
+        Unlike the event-driven paths, a scheduled-root automation (root event
+        block blockType == "scheduled") has no incoming trigger to pull it — the
+        scheduler's scheduled-automation lane periodically finds it DUE
+        (next_scheduled_at <= now) and calls this to fire once. The firing itself
+        reuses the SAME `_dispatch_actions` → block-chain → dispatch path the
+        event-driven `process_*` methods use, so everything that path enforces
+        applies unchanged. Mirrors the cloud method minus its tenant/plan gates
+        (single-owner coordinator).
+
+        Firing guardrails (cooldown / max_fires from the rule's `conditions`) are
+        enforced via `_check_guardrails` so a scheduled automation can't spam
+        actions. Returns the TriggerExecution (or None when a guardrail suppressed
+        the fire). The caller (scheduler) has ALREADY advanced next_scheduled_at +
+        last_triggered_at and committed, so a slow or failing fire here cannot
+        leave the rule perpetually due.
+        """
+        # Guardrails apply to scheduled fires too (a bare scheduled event with a
+        # cooldown / fire-limit in `conditions` must honor them).
+        ok, reason = self._check_guardrails(rule, rule.conditions or {})
+        if not ok:
+            logger.info(
+                f"[UnifiedTrigger] Scheduled automation {rule.id} ({rule.name}): {reason}"
+            )
+            # A max_fires guardrail may have auto-disabled the rule — persist it.
+            await self.db.commit()
+            return None
+
+        now = datetime.now(timezone.utc)
+        eval_context = {
+            "event": "scheduled",
+            "event_type": "scheduled",
+            "trigger_id": rule.id,
+            "trigger_name": rule.name,
+            # Timestamp placeholders (parity with the other event contexts).
+            "now": now.isoformat(),
+            "now_date": now.strftime("%Y-%m-%d"),
+            "now_time": now.strftime("%H:%M:%S"),
+            "now_datetime": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "now_timestamp": int(now.timestamp()),
+        }
+
+        execution = TriggerExecution(
+            trigger_rule_id=rule.id,
+            status="pending",
+            trigger_context={
+                "event_type": "scheduled",
+                "trigger_rule_id": rule.id,
+            },
+        )
+        self.db.add(execution)
+
+        try:
+            action_results = await self._dispatch_actions(rule, eval_context, execution)
+            execution.action_results = action_results
+            execution.status = "completed"
+            execution.completed_at = datetime.now(timezone.utc)
+            rule.trigger_count = (rule.trigger_count or 0) + 1
+            rule.last_triggered_at = datetime.now(timezone.utc)
+        except Exception as e:
+            logger.error(
+                f"[UnifiedTrigger] Error dispatching scheduled automation "
+                f"{rule.id} ({rule.name}): {e}"
+            )
+            execution.status = "failed"
+            execution.error_message = str(e)
+            execution.completed_at = datetime.now(timezone.utc)
+
+        await self.db.commit()
+        return execution
+
     async def process_crawl_event(
         self,
         event_type: str,  # 'crawl_started' | 'crawl_completed' | 'crawl_failed'

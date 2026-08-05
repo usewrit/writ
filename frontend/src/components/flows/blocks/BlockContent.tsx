@@ -24,7 +24,8 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
-import { useFlowBuilder, getAncestorChain } from '../FlowBuilderContext';
+import { useFlowActions, useFlowState, useFlowStore, getAncestorChain } from '../FlowBuilderContext';
+import { shallow } from 'zustand/shallow';
 import { PersonaPicker } from '../../workflows/PersonaPicker';
 import { FilePicker } from './FilePicker';
 import { DataTablePicker } from './DataTablePicker';
@@ -56,9 +57,15 @@ const boundInputClass = (v: unknown): string =>
 
 export const BlockContent: React.FC<BlockContentProps> = ({ block }) => {
   const { t } = useTranslation();
-  const { state, updateBlockConfig } = useFlowBuilder();
-  const { blocks, workflows, sessions: availableSessions, recipients: availableRecipients, expandedAdvancedBlocks } = state;
-  const { dispatch } = useFlowBuilder();
+  const { updateBlockConfig } = useFlowActions();
+  // Slice subscriptions: reference-data loads no longer re-render every block, and
+  // this component stops depending on unrelated parts of the flow state.
+  const blocks = useFlowState((s) => s.blocks, shallow);
+  const workflows = useFlowState((s) => s.workflows, shallow);
+  const availableSessions = useFlowState((s) => s.sessions, shallow);
+  const availableRecipients = useFlowState((s) => s.recipients, shallow);
+  const expandedAdvancedBlocks = useFlowState((s) => s.expandedAdvancedBlocks, shallow);
+  const { dispatch } = useFlowActions();
   const [copiedWebhookToken, setCopiedWebhookToken] = React.useState<string | null>(null);
 
   const isFirstBlock = !block.parentId;
@@ -186,10 +193,11 @@ export const BlockContent: React.FC<BlockContentProps> = ({ block }) => {
 
 // Full ContentMonitorPanel embedded via WizardBridge for source blocks
 function ContentMonitorEmbed({ block }: { block: FlowBlock }) {
-  const { updateBlockConfig, dispatch, state } = useFlowBuilder();
+  const { updateBlockConfig, dispatch } = useFlowActions();
+  const name = useFlowState((s) => s.name);
 
   const initialConfig: Partial<WizardState['config']> = {
-    name: state.name || '',
+    name: name || '',
     url: block.config.url || '',
     selectors: block.config.wizardSelectors || [],
     checkPeriodMs: block.config.check_period_ms || 60000,
@@ -204,10 +212,10 @@ function ContentMonitorEmbed({ block }: { block: FlowBlock }) {
       check_period_ms: updates.checkPeriodMs,
       requires_playwright: updates.requiresPlaywright,
     });
-    if (updates.name && updates.name !== state.name) {
+    if (updates.name && updates.name !== name) {
       dispatch({ type: 'SET_META', name: updates.name });
     }
-  }, [block.id, block.config, updateBlockConfig, dispatch, state.name]);
+  }, [block.id, block.config, updateBlockConfig, dispatch, name]);
 
   return (
     <>
@@ -226,20 +234,20 @@ function ContentMonitorEmbed({ block }: { block: FlowBlock }) {
 // (e.g. restock auto-buy) from re-firing on every poll.
 function GuardrailsSection({ block }: { block: FlowBlock }) {
   const { t } = useTranslation();
-  const { updateBlockConfig } = useFlowBuilder();
+  const { updateBlockConfig } = useFlowActions();
   const runOnce = Number(block.config.max_fires) === 1;
   const cooldown = block.config.cooldown_minutes ?? '';
 
   return (
     <div className="px-5 py-4 border-t border-border space-y-3">
-      <div className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">{t('Guardrails')}</div>
+      <div className="text-[10px] font-medium uppercase tracking-wider text-tertiary">{t('Guardrails')}</div>
       <Checkbox
         checked={runOnce}
         onChange={(e) => updateBlockConfig(block.id, { ...block.config, max_fires: e.target.checked ? 1 : undefined })}
-        label={<>{t('Run once, then stop')} <span className="text-[11px] text-zinc-400">{t('— act a single time, then auto-disable')}</span></>}
+        label={<>{t('Run once, then stop')} <span className="text-[11px] text-tertiary">{t('— act a single time, then auto-disable')}</span></>}
       />
       <div className="flex items-center gap-2">
-        <label className="text-sm text-zinc-700">{t('Cooldown')}</label>
+        <label className="text-sm text-ink">{t('Cooldown')}</label>
         <NumberInput
           min={0}
           value={cooldown === '' ? null : Number(cooldown)}
@@ -248,7 +256,7 @@ function GuardrailsSection({ block }: { block: FlowBlock }) {
           className="w-24"
           placeholder="0"
         />
-        <span className="text-[11px] text-zinc-400">{t('minutes between fires')}</span>
+        <span className="text-[11px] text-tertiary">{t('minutes between fires')}</span>
       </div>
     </div>
   );
@@ -259,8 +267,9 @@ function GuardrailsSection({ block }: { block: FlowBlock }) {
 // chooses which selector to watch and the firing guardrails.
 function ExistingMonitorSourceConfig({ block }: { block: FlowBlock }) {
   const { t } = useTranslation();
-  const { state, updateBlockConfig } = useFlowBuilder();
-  const target = (state.targets || []).find((tg: any) => tg.id === block.config.target_id);
+  const { updateBlockConfig } = useFlowActions();
+  const targets = useFlowState((s) => s.targets, shallow);
+  const target = (targets || []).find((tg: any) => tg.id === block.config.target_id);
   // Selectors are stored WITH the target they were fetched for, so "still loading"
   // is derived during render instead of written by the effect (which would cost an
   // extra render pass and briefly show the previous target's list).
@@ -312,8 +321,8 @@ function ExistingMonitorSourceConfig({ block }: { block: FlowBlock }) {
 // monitor, a plain-language description of the event, and the firing guardrails.
 function MonitorHealthSourceConfig({ block }: { block: FlowBlock }) {
   const { t } = useTranslation();
-  const { state } = useFlowBuilder();
-  const target = (state.targets || []).find((tg: any) => tg.id === block.config.target_id);
+  const targets = useFlowState((s) => s.targets, shallow);
+  const target = (targets || []).find((tg: any) => tg.id === block.config.target_id);
   const blurb: Record<string, string> = {
     monitor_down: t('Fires once when this monitor becomes unreachable (the check fails or the page can’t be reached).'),
     monitor_stale: t('Fires once when this monitor stops updating well past its expected check interval.'),
@@ -391,7 +400,7 @@ function ContentChangedSelectorPicker({ block, blocks, updateBlockConfig }: any)
             className={clsx(
               'px-3 py-1.5 rounded-lg text-xs font-medium border transition-all',
               !block.config.selector_id
-                ? 'bg-zinc-100 text-ink border-border ring-1 ring-ink/20'
+                ? 'bg-hover text-ink border-border ring-1 ring-ink/20'
                 : 'bg-canvas text-secondary border-border hover:border-secondary'
             )}
           >
@@ -405,7 +414,7 @@ function ContentChangedSelectorPicker({ block, blocks, updateBlockConfig }: any)
               className={clsx(
                 'px-3 py-1.5 rounded-lg text-xs font-medium border transition-all',
                 block.config.selector_id === s.id
-                  ? 'bg-zinc-100 text-ink border-border ring-1 ring-ink/20'
+                  ? 'bg-hover text-ink border-border ring-1 ring-ink/20'
                   : 'bg-canvas text-secondary border-border hover:border-secondary'
               )}
             >
@@ -420,7 +429,8 @@ function ContentChangedSelectorPicker({ block, blocks, updateBlockConfig }: any)
 
 function SessionFilterConfig({ block, sessions, updateBlockConfig }: any) {
   const { t } = useTranslation();
-  const { dispatch, state } = useFlowBuilder();
+  const { dispatch } = useFlowActions();
+  const blocks = useFlowState((s) => s.blocks, shallow);
 
   const currentEvent = block.blockType === 'ai_session_started' ? 'started'
     : block.config.status_condition === 'error' ? 'error'
@@ -438,7 +448,7 @@ function SessionFilterConfig({ block, sessions, updateBlockConfig }: any) {
     } else {
       newBlockType = 'ai_session_completed';
     }
-    const newBlocks = state.blocks.map(b =>
+    const newBlocks = blocks.map(b =>
       b.id === block.id ? { ...b, blockType: newBlockType, config: newConfig } : b
     );
     dispatch({ type: 'SET_BLOCKS', blocks: newBlocks });
@@ -447,7 +457,7 @@ function SessionFilterConfig({ block, sessions, updateBlockConfig }: any) {
   return (
     <div className="space-y-3 px-5 py-4">
       <div>
-        <label className="block text-xs font-medium text-zinc-500 mb-1.5">{t('Event')}</label>
+        <label className="block text-xs font-medium text-secondary mb-1.5">{t('Event')}</label>
         <div className="flex gap-1.5">
           {[
             { key: 'started', label: t('Started') },
@@ -489,7 +499,8 @@ function SessionFilterConfig({ block, sessions, updateBlockConfig }: any) {
 
 function WorkflowFilterConfig({ block, workflows, updateBlockConfig }: any) {
   const { t } = useTranslation();
-  const { dispatch, state } = useFlowBuilder();
+  const { dispatch } = useFlowActions();
+  const blocks = useFlowState((s) => s.blocks, shallow);
 
   const currentEvent = block.blockType === 'workflow_started' ? 'started'
     : block.config.status_condition === 'error' ? 'error'
@@ -507,7 +518,7 @@ function WorkflowFilterConfig({ block, workflows, updateBlockConfig }: any) {
     } else {
       newBlockType = 'workflow_completed';
     }
-    const newBlocks = state.blocks.map(b =>
+    const newBlocks = blocks.map(b =>
       b.id === block.id ? { ...b, blockType: newBlockType, config: newConfig } : b
     );
     dispatch({ type: 'SET_BLOCKS', blocks: newBlocks });
@@ -516,7 +527,7 @@ function WorkflowFilterConfig({ block, workflows, updateBlockConfig }: any) {
   return (
     <div className="space-y-3 px-5 py-4">
       <div>
-        <label className="block text-xs font-medium text-zinc-500 mb-1.5">{t('Event')}</label>
+        <label className="block text-xs font-medium text-secondary mb-1.5">{t('Event')}</label>
         <div className="flex gap-1.5">
           {[
             { key: 'started', label: t('Started') },
@@ -580,24 +591,24 @@ function WebhookReceivedConfig({ block, copiedWebhookToken, copyWebhookUrl }: an
       {hasToken ? (
         <div className="space-y-4">
           {/* Plain-language intro */}
-          <div className="px-4 py-3 bg-canvas rounded-lg border border-zinc-200">
-            <p className="text-xs text-zinc-600 leading-relaxed">
-              {t('Send a')} <span className="font-semibold text-zinc-800">POST</span> {t('request to this URL from your other tool (Zapier, your app, a script…) to start this automation. Anything you send as JSON becomes available to the steps below.')}
+          <div className="px-4 py-3 bg-canvas rounded-lg border border-border">
+            <p className="text-xs text-secondary leading-relaxed">
+              {t('Send a')} <span className="font-semibold text-ink">POST</span> {t('request to this URL from your other tool (Zapier, your app, a script…) to start this automation. Anything you send as JSON becomes available to the steps below.')}
             </p>
           </div>
 
           {/* Webhook URL */}
           <div className="space-y-1.5">
-            <div className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">{t('Your webhook URL')}</div>
+            <div className="text-[10px] font-medium uppercase tracking-wider text-tertiary">{t('Your webhook URL')}</div>
             <div className="flex items-center gap-2">
-              <code className="flex-1 text-xs text-zinc-800 bg-canvas px-3 py-2.5 rounded-lg border border-zinc-200 truncate font-mono">
+              <code className="flex-1 text-xs text-ink bg-canvas px-3 py-2.5 rounded-lg border border-border truncate font-mono">
                 {url}
               </code>
-              <button type="button" onClick={() => copyWebhookUrl(token)} className="p-2 hover:bg-zinc-100 rounded-lg transition-colors shrink-0" title={t('Copy URL')}>
+              <button type="button" onClick={() => copyWebhookUrl(token)} className="p-2 hover:bg-hover rounded-lg transition-colors shrink-0" title={t('Copy URL')}>
                 {copiedWebhookToken === token ? (
-                  <ClipboardDocumentCheckIcon className="h-4 w-4 text-zinc-700" />
+                  <ClipboardDocumentCheckIcon className="h-4 w-4 text-ink" />
                 ) : (
-                  <ClipboardIcon className="h-4 w-4 text-zinc-400" />
+                  <ClipboardIcon className="h-4 w-4 text-tertiary" />
                 )}
               </button>
             </div>
@@ -605,66 +616,66 @@ function WebhookReceivedConfig({ block, copiedWebhookToken, copyWebhookUrl }: an
 
           {/* Blocking mode (?wait=true) */}
           <div className="space-y-1.5">
-            <div className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">{t('Wait for the result')}</div>
+            <div className="text-[10px] font-medium uppercase tracking-wider text-tertiary">{t('Wait for the result')}</div>
             <div className="flex items-center gap-2">
-              <code className="flex-1 text-xs text-zinc-800 bg-canvas px-3 py-2.5 rounded-lg border border-zinc-200 truncate font-mono">
+              <code className="flex-1 text-xs text-ink bg-canvas px-3 py-2.5 rounded-lg border border-border truncate font-mono">
                 {waitUrl}
               </code>
-              <button type="button" onClick={() => copyText(waitUrl, 'wait', t('URL'))} className="p-2 hover:bg-zinc-100 rounded-lg transition-colors shrink-0" title={t('Copy URL')}>
+              <button type="button" onClick={() => copyText(waitUrl, 'wait', t('URL'))} className="p-2 hover:bg-hover rounded-lg transition-colors shrink-0" title={t('Copy URL')}>
                 {copiedField === 'wait' ? (
-                  <ClipboardDocumentCheckIcon className="h-4 w-4 text-zinc-700" />
+                  <ClipboardDocumentCheckIcon className="h-4 w-4 text-ink" />
                 ) : (
-                  <ClipboardIcon className="h-4 w-4 text-zinc-400" />
+                  <ClipboardIcon className="h-4 w-4 text-tertiary" />
                 )}
               </button>
             </div>
-            <p className="text-[10px] text-zinc-400 leading-relaxed">
-              {t('Add')} <code className="bg-zinc-100 px-1 py-0.5 rounded text-zinc-600 font-mono">?wait=true</code> {t('if you want the request to stay open until the automation finishes and return its result. Without it, the request returns immediately and the automation runs in the background.')}
+            <p className="text-[10px] text-tertiary leading-relaxed">
+              {t('Add')} <code className="bg-hover px-1 py-0.5 rounded text-secondary font-mono">?wait=true</code> {t('if you want the request to stay open until the automation finishes and return its result. Without it, the request returns immediately and the automation runs in the background.')}
             </p>
           </div>
 
           {/* Example request to test manually */}
           <div className="space-y-1.5">
-            <div className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">{t('Try it — example request')}</div>
+            <div className="text-[10px] font-medium uppercase tracking-wider text-tertiary">{t('Try it — example request')}</div>
             <div className="relative">
-              <pre className="text-[11px] text-zinc-700 bg-canvas px-3 py-2.5 pr-10 rounded-lg border border-zinc-200 overflow-x-auto font-mono leading-relaxed whitespace-pre">{exampleCurl}</pre>
-              <button type="button" onClick={() => copyText(exampleCurl, 'curl', t('command'))} className="absolute top-2 right-2 p-1.5 bg-white/80 hover:bg-zinc-100 rounded-md border border-zinc-200 transition-colors" title={t('Copy command')}>
+              <pre className="text-[11px] text-ink bg-canvas px-3 py-2.5 pr-10 rounded-lg border border-border overflow-x-auto font-mono leading-relaxed whitespace-pre">{exampleCurl}</pre>
+              <button type="button" onClick={() => copyText(exampleCurl, 'curl', t('command'))} className="absolute top-2 right-2 p-1.5 bg-surface/80 hover:bg-hover rounded-md border border-border transition-colors" title={t('Copy command')}>
                 {copiedField === 'curl' ? (
-                  <ClipboardDocumentCheckIcon className="h-3.5 w-3.5 text-zinc-700" />
+                  <ClipboardDocumentCheckIcon className="h-3.5 w-3.5 text-ink" />
                 ) : (
-                  <ClipboardIcon className="h-3.5 w-3.5 text-zinc-400" />
+                  <ClipboardIcon className="h-3.5 w-3.5 text-tertiary" />
                 )}
               </button>
             </div>
-            <p className="text-[10px] text-zinc-400 leading-relaxed">
+            <p className="text-[10px] text-tertiary leading-relaxed">
               {t('Paste this into a terminal to send a test call. Replace the JSON body with your own fields.')}
             </p>
           </div>
 
           {/* Signing / security note (secret is managed server-side, not shown here) */}
-          <div className="flex items-start gap-2 px-3 py-2.5 bg-canvas rounded-lg border border-zinc-200">
-            <Cog6ToothIcon className="h-3.5 w-3.5 text-zinc-400 mt-0.5 shrink-0" />
-            <p className="text-[10px] text-zinc-500 leading-relaxed">
+          <div className="flex items-start gap-2 px-3 py-2.5 bg-canvas rounded-lg border border-border">
+            <Cog6ToothIcon className="h-3.5 w-3.5 text-tertiary mt-0.5 shrink-0" />
+            <p className="text-[10px] text-secondary leading-relaxed">
               {t("This webhook has a signing secret for verifying that requests really came from your tool. The secret is managed here in the automation builder — set or rotate it in this block's settings.")}
             </p>
           </div>
         </div>
       ) : (
-        <div className="px-4 py-3 bg-canvas rounded-lg border border-zinc-200">
-          <p className="text-xs text-zinc-600 leading-relaxed">
+        <div className="px-4 py-3 bg-canvas rounded-lg border border-border">
+          <p className="text-xs text-secondary leading-relaxed">
             {t('A unique webhook URL is generated as soon as you save this automation. You’ll then be able to send a POST request to it from any other tool to start this automation.')}
           </p>
         </div>
       )}
 
-      <div className="text-[10px] text-zinc-400 leading-relaxed">
-        {t('Anything you send is available as')} <code className="bg-zinc-100 px-1 py-0.5 rounded text-zinc-600 font-mono">{'{{payload.field}}'}</code> {t('in the steps below.')}
+      <div className="text-[10px] text-tertiary leading-relaxed">
+        {t('Anything you send is available as')} <code className="bg-hover px-1 py-0.5 rounded text-secondary font-mono">{'{{payload.field}}'}</code> {t('in the steps below.')}
       </div>
 
       {/* Subtle link to the central registry */}
       <a
         href="/developers/endpoints"
-        className="inline-block text-[10px] text-zinc-400 hover:text-zinc-700 underline underline-offset-2 transition-colors"
+        className="inline-block text-[10px] text-tertiary hover:text-ink underline underline-offset-2 transition-colors"
       >
         {t('Manage all webhooks in Developers → Endpoints')}
       </a>
@@ -682,13 +693,13 @@ function CompletionEventAI({ block, blocks, sessions, updateBlockConfig }: any) 
   return (
     <div className="space-y-3 py-1">
       {linkedSession ? (
-        <div className="flex items-center gap-2.5 text-sm text-ink bg-zinc-100/80 px-4 py-2.5 rounded-lg border border-border">
+        <div className="flex items-center gap-2.5 text-sm text-ink bg-hover/80 px-4 py-2.5 rounded-lg border border-border">
           <CpuChipIcon className="h-4 w-4 shrink-0" />
           <span>{t('Linked to')} <strong>{linkedSession.name}</strong></span>
         </div>
       ) : (
         <div className="space-y-1.5">
-          <label className="block text-xs font-medium text-zinc-500">{t('AI Session')}</label>
+          <label className="block text-xs font-medium text-secondary">{t('AI Session')}</label>
           <Select<number>
             value={block.config.ai_session_id || 0}
             onChange={v => updateBlockConfig(block.id, { ...block.config, ai_session_id: v === 0 ? null : v })}
@@ -718,13 +729,13 @@ function CompletionEventWorkflow({ block, blocks, workflows, updateBlockConfig }
   return (
     <div className="space-y-3 py-1">
       {linkedWorkflow ? (
-        <div className="flex items-center gap-2.5 text-sm text-gray-700 bg-gray-100 px-4 py-2.5 rounded-lg border border-gray-200">
+        <div className="flex items-center gap-2.5 text-sm text-ink bg-hover px-4 py-2.5 rounded-lg border border-border">
           <Cog6ToothIcon className="h-4 w-4 shrink-0" />
           <span>{t('Linked to')} <strong>{linkedWorkflow.name}</strong></span>
         </div>
       ) : (
         <div className="space-y-1.5">
-          <label className="block text-xs font-medium text-zinc-500">{t('Workflow')}</label>
+          <label className="block text-xs font-medium text-secondary">{t('Workflow')}</label>
           <Select<number>
             value={block.config.workflow_id || 0}
             onChange={v => updateBlockConfig(block.id, { ...block.config, workflow_id: v === 0 ? null : v })}
@@ -752,14 +763,14 @@ function ScheduledConfig({ block, updateBlockConfig }: any) {
   const value = scheduleFromBlockConfig(block.config);
   return (
     <div className="p-5 space-y-3">
-      <label className="block text-xs font-medium text-zinc-500 mb-1.5">{t('Runs on this schedule')}</label>
+      <label className="block text-xs font-medium text-secondary mb-1.5">{t('Runs on this schedule')}</label>
       <SchedulePicker
         value={value}
         onChange={(next) =>
           updateBlockConfig(block.id, { ...block.config, ...scheduleToBlockConfig(next) })
         }
       />
-      <p className="text-xs text-zinc-400">
+      <p className="text-xs text-tertiary">
         {t('The automation runs on this schedule. For intervals, the minimum effective cadence is 1 minute.')}
       </p>
     </div>
@@ -774,7 +785,7 @@ function StreamingSessionSourceConfig({ block, workflows, updateBlockConfig }: a
   const { t } = useTranslation();
   return (
     <div className="space-y-2 px-5 py-4">
-      <label className="block text-xs font-medium text-zinc-500">{t('Streaming workflow')}</label>
+      <label className="block text-xs font-medium text-secondary">{t('Streaming workflow')}</label>
       <Select<number>
         value={block.config.workflow_id || 0}
         onChange={(v) => updateBlockConfig(block.id, { ...block.config, workflow_id: v === 0 ? null : v })}
@@ -786,7 +797,7 @@ function StreamingSessionSourceConfig({ block, workflows, updateBlockConfig }: a
         ]}
         className="w-full"
       />
-      <p className="text-[11px] text-zinc-400">
+      <p className="text-[11px] text-tertiary">
         {t('Fires when a live streaming session for this workflow starts or ends.')}
       </p>
     </div>
@@ -804,7 +815,7 @@ function DataExtractedSourceConfig({ block, updateBlockConfig }: any) {
         label={t('When this workflow extracts data')}
       />
       <div>
-        <label className="block text-xs font-medium text-zinc-500 mb-1.5">{t('Minimum new rows')}</label>
+        <label className="block text-xs font-medium text-secondary mb-1.5">{t('Minimum new rows')}</label>
         <NumberInput
           min={1}
           value={block.config.min_rows ?? null}
@@ -812,7 +823,7 @@ function DataExtractedSourceConfig({ block, updateBlockConfig }: any) {
           placeholder="1"
           className="w-28"
         />
-        <p className="text-[11px] text-zinc-400 mt-1">{t('Only fire when at least this many rows were produced.')}</p>
+        <p className="text-[11px] text-tertiary mt-1">{t('Only fire when at least this many rows were produced.')}</p>
       </div>
     </div>
   );
@@ -823,7 +834,7 @@ function FileUploadedSourceConfig({ block, updateBlockConfig }: any) {
   const { t } = useTranslation();
   return (
     <div className="space-y-2 px-5 py-4">
-      <label className="block text-xs font-medium text-zinc-500">{t('File source')}</label>
+      <label className="block text-xs font-medium text-secondary">{t('File source')}</label>
       <Select
         value={block.config.source || ''}
         onChange={(v) => updateBlockConfig(block.id, { ...block.config, source: v || undefined })}
@@ -837,7 +848,7 @@ function FileUploadedSourceConfig({ block, updateBlockConfig }: any) {
         ]}
         className="w-full"
       />
-      <p className="text-[11px] text-zinc-400">
+      <p className="text-[11px] text-tertiary">
         {t('Fires when a new file arrives — from an upload or the file webhook.')}
       </p>
     </div>
@@ -887,8 +898,8 @@ function DataExportConfig({ block, updateBlockConfig }: any) {
           />
         </div>
       )}
-      <p className="text-[11px] text-zinc-400">
-        {t('Exports a redacted file asset. It becomes available as')} <code className="text-zinc-900 font-mono">{'{{result.file_id}}'}</code>.
+      <p className="text-[11px] text-tertiary">
+        {t('Exports a redacted file asset. It becomes available as')} <code className="text-ink font-mono">{'{{result.file_id}}'}</code>.
       </p>
     </div>
   );
@@ -911,7 +922,7 @@ function AppendToDataConfig({ block, updateBlockConfig }: any) {
         allowClear
       />
       <div>
-        <label className="block text-xs font-medium text-zinc-500 mb-1.5">{t('Row limit (optional)')}</label>
+        <label className="block text-xs font-medium text-secondary mb-1.5">{t('Row limit (optional)')}</label>
         <NumberInput
           min={1}
           value={block.config.limit ?? null}
@@ -935,15 +946,15 @@ function SendFileConfig({ block, updateBlockConfig }: any) {
         label={t('File to send')}
       />
       <div>
-        <label className="block text-xs font-medium text-zinc-500 mb-1.5">{t('Deliver to webhook URL')}</label>
+        <label className="block text-xs font-medium text-secondary mb-1.5">{t('Deliver to webhook URL')}</label>
         <input
           type="url"
           value={block.config.recipient_id || ''}
           onChange={(e) => updateBlockConfig(block.id, { ...block.config, recipient_type: 'webhook', recipient_id: e.target.value })}
           placeholder="https://example.com/hook"
-          className="w-full px-3 py-2 rounded-lg border border-zinc-200 bg-white text-zinc-900 text-sm font-mono focus:outline-none focus:border-zinc-900"
+          className="w-full px-3 py-2 rounded-lg border border-border bg-surface text-ink text-sm font-mono focus:outline-none focus:border-ink"
         />
-        <p className="text-[11px] text-zinc-400 mt-1">
+        <p className="text-[11px] text-tertiary mt-1">
           {t('The daemon POSTs a file reference to this URL. Email delivery needs the cloud link.')}
         </p>
       </div>
@@ -957,7 +968,7 @@ function StreamingActionConfig({ block, workflows, updateBlockConfig }: any) {
   const isStart = block.blockType === 'start_streaming_session';
   return (
     <div className="space-y-2">
-      <label className="block text-xs font-medium text-zinc-500">{t('Workflow')}</label>
+      <label className="block text-xs font-medium text-secondary">{t('Workflow')}</label>
       <Select<number>
         value={block.config.workflow_id || undefined}
         onChange={(v) => updateBlockConfig(block.id, { ...block.config, workflow_id: v })}
@@ -966,7 +977,7 @@ function StreamingActionConfig({ block, workflows, updateBlockConfig }: any) {
         options={workflows.map((w: any) => ({ value: Number(w.id), label: w.name }))}
         className="w-full"
       />
-      <p className="text-[11px] text-zinc-400">
+      <p className="text-[11px] text-tertiary">
         {isStart
           ? t('Launches a live streaming session for this workflow.')
           : t('Ends the live streaming session for this workflow.')}
@@ -1007,8 +1018,8 @@ function StatusConditionPicker({ block, updateBlockConfig }: any) {
 
 function ConditionConfig({ block, blocks, updateBlockConfig }: any) {
   const { t } = useTranslation();
-  const { state } = useFlowBuilder();
-  const { workflows: allWorkflows, sessions: allSessions } = state;
+  const allWorkflows = useFlowState((s) => s.workflows, shallow);
+  const allSessions = useFlowState((s) => s.sessions, shallow);
   const [isCustomField, setIsCustomField] = React.useState(block.config._isCustom || false);
 
   // Walk ancestors to find data available at this point in the flow
@@ -1193,19 +1204,19 @@ function ConditionConfig({ block, blocks, updateBlockConfig }: any) {
               <div className="space-y-3">
                 {/* Flow outputs — prominent section at top */}
                 {flowOutputs.length > 0 && (
-                  <div className="rounded-lg border border-zinc-200 bg-canvas/50 p-2.5 space-y-2">
+                  <div className="rounded-lg border border-border bg-canvas/50 p-2.5 space-y-2">
                     <div className="flex items-center gap-1.5">
-                      <div className="w-1.5 h-1.5 rounded-full bg-zinc-100" />
-                      <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{t('Flow output data')}</span>
+                      <div className="w-1.5 h-1.5 rounded-full bg-hover" />
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-secondary">{t('Flow output data')}</span>
                     </div>
                     <div className="flex flex-wrap gap-1.5">
                       {flowOutputs.map((item, i) => {
-                        const borderColor = item.color === 'green' ? 'border-border hover:border-border'
-                          : item.color === 'purple' ? 'border-border hover:border-border'
-                          : 'border-border hover:border-border';
-                        const bgColor = item.color === 'green' ? 'bg-zinc-100'
-                          : item.color === 'purple' ? 'bg-zinc-100'
-                          : 'bg-zinc-100';
+                        const borderColor = item.color === 'green' ? 'border-border hover:border-border-strong'
+                          : item.color === 'purple' ? 'border-border hover:border-border-strong'
+                          : 'border-border hover:border-border-strong';
+                        const bgColor = item.color === 'green' ? 'bg-hover'
+                          : item.color === 'purple' ? 'bg-hover'
+                          : 'bg-hover';
                         const codeColor = item.color === 'green' ? 'text-ink'
                           : item.color === 'purple' ? 'text-ink'
                           : 'text-ink';
@@ -1218,7 +1229,7 @@ function ConditionConfig({ block, blocks, updateBlockConfig }: any) {
                             title={t('from {{source}}', { source: item.source })}
                           >
                             <code className={clsx('text-[11px] font-semibold', codeColor)}>{item.field}</code>
-                            <span className="text-zinc-500 ml-1.5">{t(item.label)}</span>
+                            <span className="text-secondary ml-1.5">{t(item.label)}</span>
                           </button>
                         );
                       })}
@@ -1230,7 +1241,7 @@ function ConditionConfig({ block, blocks, updateBlockConfig }: any) {
                 {systemFields.length > 0 && (
                   <div className="space-y-2">
                     {flowOutputs.length > 0 && (
-                      <div className="text-[10px] text-zinc-400 uppercase tracking-wider font-medium">{t('System fields')}</div>
+                      <div className="text-[10px] text-tertiary uppercase tracking-wider font-medium">{t('System fields')}</div>
                     )}
                     {systemFields.map((group, gi) => (
                       <div key={gi}>
@@ -1663,13 +1674,13 @@ function RecipientsSelector({ block, selectedChannels, selectedRecipients, recip
           <UserGroupIcon className="h-4 w-4 text-secondary" />
           {t('Recipients')}
           {selectedRecipients.length > 0 && (
-            <span className="px-1.5 py-0.5 rounded-full bg-zinc-100 text-ink text-[10px]">{t('{{n}} selected', { n: selectedRecipients.length })}</span>
+            <span className="px-1.5 py-0.5 rounded-full bg-hover text-ink text-[10px]">{t('{{n}} selected', { n: selectedRecipients.length })}</span>
           )}
         </label>
         <button type="button" onClick={() => {
           const all = recipients.filter((r: any) => selectedChannels.includes(r.provider)).map((r: any) => `${r.provider}:${r.id}`);
           updateBlockConfig(block.id, { ...block.config, recipients: all });
-        }} className="text-[10px] text-ink hover:text-ink">{t('Select All ({{n}})', { n: totalAvailable })}</button>
+        }} className="text-[10px] text-ink">{t('Select All ({{n}})', { n: totalAvailable })}</button>
       </div>
 
       {channelsWithRecipients.length === 0 ? (
@@ -1734,7 +1745,7 @@ function AISessionConfig({ block, blocks, sessions: _sessions, updateBlockConfig
 
       <div>
         <div className="mb-1 flex items-center justify-between">
-          <label className="block text-xs font-medium text-zinc-500">{t('Goal')}</label>
+          <label className="block text-xs font-medium text-secondary">{t('Goal')}</label>
           <FieldRef
             blockId={block.id}
             onInsert={token => updateBlockConfig(block.id, { ...block.config, goal: `${block.config.goal || ''}${token}` })}
@@ -1744,34 +1755,34 @@ function AISessionConfig({ block, blocks, sessions: _sessions, updateBlockConfig
           value={block.config.goal || ''}
           onChange={e => updateBlockConfig(block.id, { ...block.config, goal: e.target.value })}
           placeholder={t('What should the agent accomplish? e.g. Find the cheapest plan and record the steps.')}
-          className={`w-full px-3 py-2 bg-white border border-zinc-200 rounded-lg text-sm text-zinc-900 resize-none focus:border-zinc-400 outline-none transition-colors${boundInputClass(block.config.goal)}`}
+          className={`w-full px-3 py-2 bg-surface border border-border rounded-lg text-sm text-ink resize-none focus:border-border-strong outline-none transition-colors${boundInputClass(block.config.goal)}`}
           rows={2}
         />
       </div>
 
       <div>
-        <label className="mb-1 block text-xs font-medium text-zinc-500">{t('Start URL (optional)')}</label>
+        <label className="mb-1 block text-xs font-medium text-secondary">{t('Start URL (optional)')}</label>
         <input
           type="text"
           value={block.config.entry_url || ''}
           onChange={e => updateBlockConfig(block.id, { ...block.config, entry_url: e.target.value })}
           placeholder="https://..."
-          className={`w-full px-3 py-2 bg-white border border-zinc-200 rounded-lg text-sm text-zinc-900 focus:border-zinc-400 outline-none transition-colors${boundInputClass(block.config.entry_url)}`}
+          className={`w-full px-3 py-2 bg-surface border border-border rounded-lg text-sm text-ink focus:border-border-strong outline-none transition-colors${boundInputClass(block.config.entry_url)}`}
         />
       </div>
 
       <div className="flex items-center gap-3">
         <div className="flex-1">
-          <label className="mb-1 block text-xs font-medium text-zinc-500">{t('Max steps')}</label>
+          <label className="mb-1 block text-xs font-medium text-secondary">{t('Max steps')}</label>
           <input
             type="number"
             min={1}
             value={block.config.max_steps ?? 20}
             onChange={e => updateBlockConfig(block.id, { ...block.config, max_steps: Number(e.target.value) || 20 })}
-            className="w-full px-3 py-2 bg-white border border-zinc-200 rounded-lg text-sm text-zinc-900 focus:border-zinc-400 outline-none transition-colors"
+            className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-sm text-ink focus:border-border-strong outline-none transition-colors"
           />
         </div>
-        <label className="mt-4 flex flex-1 items-center gap-2 text-xs text-zinc-600">
+        <label className="mt-4 flex flex-1 items-center gap-2 text-xs text-secondary">
           <input
             type="checkbox"
             checked={block.config.generate_workflow !== false}
@@ -1781,7 +1792,7 @@ function AISessionConfig({ block, blocks, sessions: _sessions, updateBlockConfig
         </label>
       </div>
 
-      <div className="flex items-center gap-1.5 text-[11px] text-zinc-400">
+      <div className="flex items-center gap-1.5 text-[11px] text-tertiary">
         <CpuChipIcon className="h-3 w-3" />
         <span>{t('Runs on a connected fleet agent with local AI. It is picked automatically.')}</span>
       </div>
@@ -1790,7 +1801,7 @@ function AISessionConfig({ block, blocks, sessions: _sessions, updateBlockConfig
       {hasGoal && (
         <div>
           <div className="flex items-center justify-between mb-1">
-            <label className="block text-xs font-medium text-zinc-500">{t('Context override')}</label>
+            <label className="block text-xs font-medium text-secondary">{t('Context override')}</label>
             <FieldRef
               blockId={block.id}
               onInsert={token => updateBlockConfig(block.id, { ...block.config, user_context: `${block.config.user_context || ''}${token}` })}
@@ -1800,7 +1811,7 @@ function AISessionConfig({ block, blocks, sessions: _sessions, updateBlockConfig
             value={block.config.user_context || ''}
             onChange={e => updateBlockConfig(block.id, { ...block.config, user_context: e.target.value })}
             placeholder={hasChangeDetected ? t('e.g., Price changed to {{ph}}', { ph: '{{extracted.price}}' }) : t('Extra context for AI (optional)')}
-            className={`w-full px-3 py-2 bg-white border border-zinc-200 rounded-lg text-sm text-zinc-900 resize-none focus:border-zinc-400 outline-none transition-colors${boundInputClass(block.config.user_context)}`}
+            className={`w-full px-3 py-2 bg-surface border border-border rounded-lg text-sm text-ink resize-none focus:border-border-strong outline-none transition-colors${boundInputClass(block.config.user_context)}`}
             rows={2}
           />
         </div>
@@ -1809,7 +1820,7 @@ function AISessionConfig({ block, blocks, sessions: _sessions, updateBlockConfig
       {/* Form Data */}
       {hasGoal && (
         <div>
-          <label className="block text-xs font-medium text-zinc-500 mb-1">{t('Form Data')}</label>
+          <label className="block text-xs font-medium text-secondary mb-1">{t('Form Data')}</label>
           <div className="space-y-1">
             {Object.entries(block.config.form_data || {}).map(([key, value], i) => (
               <div key={i} className="flex gap-1">
@@ -1833,7 +1844,7 @@ function AISessionConfig({ block, blocks, sessions: _sessions, updateBlockConfig
             <button type="button" onClick={() => {
               const d = { ...block.config.form_data, [`field_${Object.keys(block.config.form_data || {}).length + 1}`]: '' };
               updateBlockConfig(block.id, { ...block.config, form_data: d });
-            }} className="text-xs text-ink hover:text-ink flex items-center gap-1">
+            }} className="text-xs text-ink flex items-center gap-1">
               <PlusIcon className="h-3 w-3" /> {t('Add Field')}
             </button>
           </div>
@@ -1848,7 +1859,9 @@ function WorkflowConfig({ block, blocks, workflows, updateBlockConfig }: any) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
-  const { state } = useFlowBuilder();
+  // Non-reactive: the draft payload is read at click time, so this component
+  // must not subscribe to the flow meta just to be able to save it.
+  const store = useFlowStore();
 
   const selectedWorkflow = block.config.workflow_id
     ? workflows.find((w: any) => w.id === block.config.workflow_id)
@@ -1893,18 +1906,15 @@ function WorkflowConfig({ block, blocks, workflows, updateBlockConfig }: any) {
       returnTo: location.pathname,
       pendingBlockId: block.id,
       pendingField: 'workflow_id',
-      flowId: state.flowId,
-      name: state.name,
-      description: state.description,
-      enabled: state.enabled,
-      blocks: state.blocks,
+      ...(({ flowId, name, description, enabled, blocks: allBlocks }) =>
+        ({ flowId, name, description, enabled, blocks: allBlocks }))(store.getState().state),
     });
     navigate('/workflows/new?intent=automation_action');
   };
 
   return (
     <div className="space-y-3">
-      <label className="block text-xs font-medium text-zinc-500">{t('Workflow')}</label>
+      <label className="block text-xs font-medium text-secondary">{t('Workflow')}</label>
 
       {workflows.length > 0 && (
         <>
@@ -1918,15 +1928,15 @@ function WorkflowConfig({ block, blocks, workflows, updateBlockConfig }: any) {
             placeholder={t('Select workflow...')}
             options={workflows.map((w: any) => ({
               value: Number(w.id),
-              label: w.is_installed ? `🔒 ${w.name} · ${t('Installed')}` : w.name,
+              label: w.is_installed ? `${w.name} · ${t('Installed')}` : w.name,
             }))}
             className="w-full"
           />
 
           {/* Installed-recipe note — the consumer CAN automate their proxy, but it's read-only. */}
           {selectedWorkflow?.is_installed && (
-            <div className="flex items-center gap-1.5 text-[11px] text-zinc-500 bg-canvas border border-zinc-200/70 rounded-lg px-2.5 py-1.5">
-              <LockClosedIcon className="w-3 h-3 shrink-0 text-zinc-400" />
+            <div className="flex items-center gap-1.5 text-[11px] text-secondary bg-canvas border border-border/70 rounded-lg px-2.5 py-1.5">
+              <LockClosedIcon className="w-3 h-3 shrink-0 text-tertiary" />
               <span>
                 {t('Installed recipe · by {{name}}', { name: selectedWorkflow.creator_name || t('creator') })}
               </span>
@@ -1950,10 +1960,10 @@ function WorkflowConfig({ block, blocks, workflows, updateBlockConfig }: any) {
           {placeholders.length > 0 && (
             <div className="space-y-2 pt-1">
               <div className="flex items-center gap-1.5">
-                <div className="w-1.5 h-1.5 rounded-full bg-zinc-100" />
-                <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">{t('Input data ({{n}})', { n: placeholders.length })}</span>
+                <div className="w-1.5 h-1.5 rounded-full bg-hover" />
+                <span className="text-[10px] font-medium uppercase tracking-wider text-tertiary">{t('Input data ({{n}})', { n: placeholders.length })}</span>
               </div>
-              <p className="text-[11px] text-zinc-400">
+              <p className="text-[11px] text-tertiary">
                 {isWebhookFlow ? t('Pre-filled from webhook payload.') : isContentFlow ? t('Pre-filled from extracted data.') : t('Map flow data or type fixed values.')}
               </p>
               <div className="space-y-1.5">
@@ -1961,11 +1971,11 @@ function WorkflowConfig({ block, blocks, workflows, updateBlockConfig }: any) {
                   <div key={ph.key} className="flex items-center gap-2">
                     <div className="w-28 shrink-0">
                       <code className="text-[11px] text-secondary font-mono truncate block">{ph.key}</code>
-                      {ph.label !== ph.key && <div className="text-[10px] text-zinc-400 truncate">{ph.label}</div>}
+                      {ph.label !== ph.key && <div className="text-[10px] text-tertiary truncate">{ph.label}</div>}
                     </div>
-                    <span className="text-zinc-300 text-xs">=</span>
+                    <span className="text-tertiary text-xs">=</span>
                     <input type="text" value={inputMapping[ph.key] || ''} onChange={e => updateMapping(ph.key, e.target.value)}
-                      placeholder={placeholderHint} className={`flex-1 px-2 py-1.5 bg-surface border border-border rounded text-xs text-ink font-mono placeholder:text-zinc-300${isBoundValue(inputMapping[ph.key]) ? ' border-l-2 border-l-ink/30' : ''}`} />
+                      placeholder={placeholderHint} className={`flex-1 px-2 py-1.5 bg-surface border border-border rounded text-xs text-ink font-mono placeholder:text-tertiary${isBoundValue(inputMapping[ph.key]) ? ' border-l-2 border-l-ink/30' : ''}`} />
                     <FieldRef
                       blockId={block.id}
                       onInsert={token => updateMapping(ph.key, `${inputMapping[ph.key] || ''}${token}`)}
@@ -1977,22 +1987,22 @@ function WorkflowConfig({ block, blocks, workflows, updateBlockConfig }: any) {
           )}
 
           {selectedWorkflow && placeholders.length === 0 && (
-            <div className="text-[11px] text-zinc-400">{t('No input data needed.')}</div>
+            <div className="text-[11px] text-tertiary">{t('No input data needed.')}</div>
           )}
 
           {/* Output keys */}
           {(selectedWorkflow?.outputs?.length > 0) && (
             <div className="space-y-1.5 pt-1">
               <div className="flex items-center gap-1.5">
-                <div className="w-1.5 h-1.5 rounded-full bg-zinc-100" />
-                <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">{t('Output data ({{n}})', { n: selectedWorkflow.outputs.length })}</span>
+                <div className="w-1.5 h-1.5 rounded-full bg-hover" />
+                <span className="text-[10px] font-medium uppercase tracking-wider text-tertiary">{t('Output data ({{n}})', { n: selectedWorkflow.outputs.length })}</span>
               </div>
               <div className="flex flex-wrap gap-1">
                 {selectedWorkflow.outputs.map((o: any) => (
-                  <code key={o.key} className="text-[11px] px-2 py-1 bg-zinc-100 text-ink border border-border rounded font-mono">{o.key}</code>
+                  <code key={o.key} className="text-[11px] px-2 py-1 bg-hover text-ink border border-border rounded font-mono">{o.key}</code>
                 ))}
               </div>
-              <p className="text-[10px] text-zinc-400">
+              <p className="text-[10px] text-tertiary">
                 {t('Available as')} <code className="text-ink font-mono">{'{{result.<key>}}'}</code> {t('in downstream blocks.')}
               </p>
             </div>
@@ -2001,16 +2011,16 @@ function WorkflowConfig({ block, blocks, workflows, updateBlockConfig }: any) {
       )}
 
       {workflows.length === 0 && (
-        <p className="text-[11px] text-zinc-400">{t('No workflows yet')}</p>
+        <p className="text-[11px] text-tertiary">{t('No workflows yet')}</p>
       )}
 
       {/* Build a new one — leaves for the wizard and comes back with it selected. */}
       <button type="button" onClick={handleCreateNew}
-        className="w-full px-4 py-3 border-2 border-dashed border-zinc-200 rounded-lg hover:border-zinc-300 hover:bg-zinc-100 transition-all group text-center"
+        className="w-full px-4 py-3 border-2 border-dashed border-border rounded-lg hover:border-border-strong hover:bg-hover transition-all group text-center"
       >
-        <Cog6ToothIcon className="h-5 w-5 text-zinc-400 group-hover:text-ink mx-auto mb-1 transition-colors" />
-        <div className="text-sm font-medium text-zinc-600 group-hover:text-ink">{t('Create a new workflow')}</div>
-        <div className="text-[10px] text-zinc-400">{t('Opens the workflow builder, then returns here')}</div>
+        <Cog6ToothIcon className="h-5 w-5 text-tertiary group-hover:text-ink mx-auto mb-1 transition-colors" />
+        <div className="text-sm font-medium text-secondary group-hover:text-ink">{t('Create a new workflow')}</div>
+        <div className="text-[10px] text-tertiary">{t('Opens the workflow builder, then returns here')}</div>
       </button>
 
       <ErrorHandlingSection block={block} updateBlockConfig={updateBlockConfig} />
@@ -2026,9 +2036,9 @@ function ErrorHandlingSection({ block, updateBlockConfig }: any) {
   const stopOnError = block.config.on_error === 'stop';
   return (
     <div className="mt-3 pt-3 border-t border-border space-y-2">
-      <div className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">{t('Error handling')}</div>
+      <div className="text-[10px] font-medium uppercase tracking-wider text-tertiary">{t('Error handling')}</div>
       <div className="flex items-center gap-2">
-        <label className="text-xs text-zinc-600">{t('Retry on failure')}</label>
+        <label className="text-xs text-secondary">{t('Retry on failure')}</label>
         <NumberInput
           min={0}
           value={retry === '' ? null : Number(retry)}
@@ -2037,12 +2047,12 @@ function ErrorHandlingSection({ block, updateBlockConfig }: any) {
           className="w-20"
           placeholder="0"
         />
-        <span className="text-[11px] text-zinc-400">{t('extra attempts')}</span>
+        <span className="text-[11px] text-tertiary">{t('extra attempts')}</span>
       </div>
       <Checkbox
         checked={stopOnError}
         onChange={(e) => updateBlockConfig(block.id, { ...block.config, on_error: e.target.checked ? 'stop' : undefined })}
-        label={<span className="text-xs text-zinc-600">{t('Stop the rest of this chain if it still fails')}</span>}
+        label={<span className="text-xs text-secondary">{t('Stop the rest of this chain if it still fails')}</span>}
       />
     </div>
   );
@@ -2066,7 +2076,7 @@ function ForEachConfig({ block, updateBlockConfig }: any) {
         value={block.config.source || ''}
         onChange={(e) => updateBlockConfig(block.id, { ...block.config, source: e.target.value })}
         placeholder="result.rows"
-        className="w-full px-2 py-1.5 bg-white border border-zinc-200 rounded-lg text-sm text-zinc-900 focus:border-zinc-400 outline-none font-mono"
+        className="w-full px-2 py-1.5 bg-surface border border-border rounded-lg text-sm text-ink focus:border-border-strong outline-none font-mono"
       />
       <p className="text-[11px] text-tertiary">{t('Dot-path to an upstream list (e.g. result.rows, extracted.items). Blocks added below run once per item — use {{item}} / {{item.field}} and {{item_index}}.')}</p>
       <div className="flex items-center gap-2 pt-1">
@@ -2088,7 +2098,7 @@ function CreatePersonaConfig({ block, workflows, updateBlockConfig }: any) {
   const { t } = useTranslation();
   return (
     <div className="space-y-2">
-      <p className="text-[11px] text-zinc-400">
+      <p className="text-[11px] text-tertiary">
         {t('After the chosen workflow runs (e.g. an account-creation flow), save its login + session as a reusable persona.')}
       </p>
       <Select<number>
@@ -2106,7 +2116,7 @@ function CreatePersonaConfig({ block, workflows, updateBlockConfig }: any) {
         value={block.config.name || ''}
         onChange={(e) => updateBlockConfig(block.id, { ...block.config, name: e.target.value })}
         placeholder={t('Persona name (optional)')}
-        className="w-full px-3 py-2 bg-white border border-zinc-200 rounded-lg text-sm text-zinc-900 focus:border-zinc-400 outline-none transition-colors"
+        className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-sm text-ink focus:border-border-strong outline-none transition-colors"
       />
     </div>
   );
@@ -2132,30 +2142,30 @@ function ReturnDataConfig({ blocks, workflows }: { blocks: FlowBlock[]; workflow
 
   return (
     <div className="space-y-3">
-      <p className="text-xs text-zinc-500">
+      <p className="text-xs text-secondary">
         {t('Data from completed workflows will be returned to the webhook caller as JSON.')}
       </p>
       {allOutputs.length > 0 ? (
         <div className="space-y-1.5">
           <div className="flex items-center gap-1.5">
-            <div className="w-1.5 h-1.5 rounded-full bg-zinc-100" />
-            <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">
+            <div className="w-1.5 h-1.5 rounded-full bg-hover" />
+            <span className="text-[10px] font-medium uppercase tracking-wider text-tertiary">
               {t('Returned keys ({{n}})', { n: allOutputs.length })}
             </span>
           </div>
           <div className="space-y-1">
             {allOutputs.map((o, i) => (
               <div key={i} className="flex items-center gap-2">
-                <code className="text-[11px] px-2 py-1 bg-zinc-100 text-ink border border-border rounded font-mono">
+                <code className="text-[11px] px-2 py-1 bg-hover text-ink border border-border rounded font-mono">
                   {o.key}
                 </code>
-                <span className="text-[10px] text-zinc-400">{t('from {{name}}', { name: o.workflowName })}</span>
+                <span className="text-[10px] text-tertiary">{t('from {{name}}', { name: o.workflowName })}</span>
               </div>
             ))}
           </div>
         </div>
       ) : (
-        <p className="text-[11px] text-zinc-400 italic">
+        <p className="text-[11px] text-tertiary italic">
           {t('No output keys detected. Add a Run Workflow block with extract/API steps to see available data.')}
         </p>
       )}

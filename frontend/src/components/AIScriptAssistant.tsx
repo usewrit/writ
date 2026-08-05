@@ -5,11 +5,15 @@ import {
   ClipboardDocumentCheckIcon,
   PlayIcon,
   ArrowPathIcon,
+  SparklesIcon,
+  CheckIcon,
 } from '@heroicons/react/24/outline';
 import { ScribeMark } from './brand/ScribeMark';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
+import { toastIcon } from './ui/toastIcon';
 import { useTranslation } from 'react-i18next';
+import { formatMoneyMicros as formatUsd } from '../utils/money';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -268,10 +272,8 @@ export const AIScriptAssistant: React.FC<AIScriptAssistantProps> = ({
 
       if (data.credits_used) {
         toast(
-          data.credits_used === 1
-            ? t('Used 1 credit')
-            : t('Used {{n}} credits', { n: data.credits_used }),
-          { icon: '✨', duration: 2000 },
+          t('Used {{amount}}', { amount: formatUsd(data.credits_used) }),
+          { icon: toastIcon(SparklesIcon), duration: 2000 },
         );
       }
     } catch (err: any) {
@@ -396,7 +398,9 @@ export const AIScriptAssistant: React.FC<AIScriptAssistantProps> = ({
                   <span className="text-[9px] uppercase tracking-wider opacity-60">{t('Playwright actions:')}</span>
                   {r.actions.map((a: any, i: number) => (
                     <div key={i} className={clsx('mt-0.5 font-mono', a.ok ? 'text-green-300' : 'text-red-300')}>
-                      {a.ok ? '✓' : '✗'} {a.fn}({a.args?.map((x: any) => typeof x === 'string' ? `"${x}"` : x).join(', ')})
+                      {a.ok
+                        ? <CheckIcon className="inline-block h-3 w-3 align-[-1px] text-green-500" aria-hidden="true" />
+                        : <XMarkIcon className="inline-block h-3 w-3 align-[-1px] text-red-500" aria-hidden="true" />} {a.fn}({a.args?.map((x: any) => typeof x === 'string' ? `"${x}"` : x).join(', ')})
                       {a.error && <span className="text-red-400 ml-1">— {a.error}</span>}
                     </div>
                   ))}
@@ -406,7 +410,7 @@ export const AIScriptAssistant: React.FC<AIScriptAssistantProps> = ({
               {hasResponse && (
                 <div className="mt-1.5">
                   <span className="text-[9px] uppercase tracking-wider opacity-60">{t('Response to caller:')}</span>
-                  <pre className="mt-0.5 whitespace-pre-wrap break-all font-mono text-zinc-300">{JSON.stringify(r.response.data, null, 2)}</pre>
+                  <pre className="mt-0.5 whitespace-pre-wrap break-all font-mono text-tertiary">{JSON.stringify(r.response.data, null, 2)}</pre>
                 </div>
               )}
               {!hasResponse && testResult.success && r?.ok && !hasActions && (
@@ -416,7 +420,7 @@ export const AIScriptAssistant: React.FC<AIScriptAssistantProps> = ({
                 <div className="mt-1.5">
                   <span className="text-[9px] uppercase tracking-wider opacity-60">{t('Emitted events:')}</span>
                   {r.emitted.map((e: any, i: number) => (
-                    <pre key={i} className="mt-0.5 whitespace-pre-wrap break-all font-mono text-zinc-300">{e.event}: {JSON.stringify(e.data)}</pre>
+                    <pre key={i} className="mt-0.5 whitespace-pre-wrap break-all font-mono text-tertiary">{e.event}: {JSON.stringify(e.data)}</pre>
                   ))}
                 </div>
               )}
@@ -425,7 +429,7 @@ export const AIScriptAssistant: React.FC<AIScriptAssistantProps> = ({
         })()}
 
         {loading && (
-          <div className="flex items-center gap-1.5 text-[10px] text-zinc-500 py-1">
+          <div className="flex items-center gap-1.5 text-[10px] text-secondary py-1">
             <ArrowPathIcon className="w-3 h-3 animate-spin" />
             {t('AI is thinking...')}
           </div>

@@ -140,6 +140,7 @@ interface RunWorkflowModalProps {
     default_persona_id?: number | null;
     entry_url?: string;
     has_login?: boolean;
+    has_twofa?: boolean;
     file_slots?: Array<{ slot: string; label?: string | null; is_multiple?: boolean }>;
     steps?: Array<{ type?: string; config?: Record<string, any> | null }>;
     data_manifest?: DataManifest | null;
@@ -452,12 +453,19 @@ export const RunWorkflowModal: React.FC<RunWorkflowModalProps> = ({
 
         {/* Persona (auth identity) — only when the workflow logs in; forces cloud when set */}
         {(workflow.has_login || workflow.default_persona_id) && (
-          <PersonaPicker
-            value={personaId}
-            onChange={setPersonaId}
-            domain={hostOf(workflow.entry_url)}
-            allowClear
-          />
+          <>
+            <PersonaPicker
+              value={personaId}
+              onChange={setPersonaId}
+              domain={hostOf(workflow.entry_url)}
+              allowClear
+            />
+            {workflow.has_twofa && !personaId && !workflow.default_persona_id && (
+              <p className="text-[11px] text-secondary -mt-1">
+                {t('This workflow enters a 2FA code — without a persona holding the 2FA secret, unattended runs will stop at the challenge.')}
+              </p>
+            )}
+          </>
         )}
 
         {/* Execution target — disabled when a persona forces cloud */}

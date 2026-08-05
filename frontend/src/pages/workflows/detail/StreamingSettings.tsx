@@ -44,7 +44,7 @@ const TextInput: React.FC<{ value: string; onChange: (v: string) => void; placeh
     <input
       type="text" value={value} placeholder={placeholder}
       onChange={e => { onChange(e.target.value); markDirty(); }}
-      className={clsx('px-2.5 py-1 text-[12px] font-mono bg-hover border border-border rounded-lg text-ink focus:outline-none focus:ring-1 focus:ring-zinc-300', className || 'w-36')}
+      className={clsx('px-2.5 py-1 text-[12px] font-mono bg-hover border border-border rounded-lg text-ink focus:outline-none focus:ring-1 focus:ring-border', className || 'w-36')}
     />
   );
 };
@@ -255,7 +255,7 @@ export const StreamingSettings: React.FC<{ workflowId: number; workflow: any; st
                         'px-3 py-1 text-[11px] rounded-lg border transition-all',
                         contextMode === mode
                           ? 'bg-hover text-ink border-border'
-                          : 'bg-surface text-secondary border-border hover:border-zinc-300',
+                          : 'bg-surface text-secondary border-border hover:border-border-strong',
                       )}
                     >
                       {mode === 'shared' ? t('Shared') : t('Isolated')}

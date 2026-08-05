@@ -32,6 +32,11 @@ async def scraping_scheduler():
     await asyncio.sleep(15)  # Stagger startup to avoid thundering herd
     logger.info("Scraping scheduler started")
 
+    # Reclaim abandoned MCP browser sessions every Nth tick (30s * 10 = 5min). A
+    # session the connected client walked away from holds a real fleet browser
+    # open, and only an explicit close frees it — see services.mcp_record.reap_stale.
+    browser_reap_ticks = 0
+
     while True:
         try:
             await _process_due_jobs()
@@ -40,6 +45,16 @@ async def scraping_scheduler():
             raise
         except Exception as e:
             logger.error(f"Scraping scheduler error: {e}", exc_info=True)
+
+        browser_reap_ticks += 1
+        if browser_reap_ticks % 10 == 0:
+            try:
+                from services import mcp_record
+                await mcp_record.reap_stale()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — housekeeping never stops the loop
+                logger.warning(f"Browser-session reap failed: {e}")
 
         await asyncio.sleep(SCHEDULER_INTERVAL_S)
 

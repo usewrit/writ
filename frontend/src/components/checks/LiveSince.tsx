@@ -153,7 +153,7 @@ export const IntervalProgress: React.FC<IntervalProgressProps> = ({
   if (isNaN(start) || isNaN(end) || end <= start) return null;
   const pct = Math.max(0, Math.min(1, (now - start) / (end - start)));
   return (
-    <div className={clsx('h-1 w-full rounded-full bg-zinc-100 overflow-hidden', className)} aria-hidden="true">
+    <div className={clsx('h-1 w-full rounded-full bg-hover overflow-hidden', className)} aria-hidden="true">
       <div
         className={clsx('h-full rounded-full', !live && 'opacity-40', fillClassName)}
         style={{ width: `${(pct * 100).toFixed(1)}%` }}

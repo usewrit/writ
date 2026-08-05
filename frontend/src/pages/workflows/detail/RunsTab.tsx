@@ -77,15 +77,15 @@ export const RunsTab: React.FC<RunsTabProps> = ({ workflow, tasks, bare = false 
                   onClick={() => task.error_message && setExpandedRunId(expandedRunId === task.id ? null : task.id)}
                 >
                   <div className="flex items-center gap-3 min-w-0">
-                    <div className={clsx('w-2 h-2 rounded-full flex-shrink-0', STATUS_DOT[task.status] || 'bg-zinc-300')} />
+                    <div className={clsx('w-2 h-2 rounded-full flex-shrink-0', STATUS_DOT[task.status] || 'bg-active')} />
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-medium text-ink capitalize">{task.status}</span>
                         {task.engine === 'http' && (
-                          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600" title={t('Ran without a browser')}>{t('HTTP')}</span>
+                          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-hover text-secondary" title={t('Ran without a browser')}>{t('HTTP')}</span>
                         )}
                         {task.engine === 'hybrid' && (
-                          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600" title={t('Browser sign-in, then HTTP')}>{t('Hybrid')}</span>
+                          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-hover text-secondary" title={t('Browser sign-in, then HTTP')}>{t('Hybrid')}</span>
                         )}
                         {task.ai_repair_attempted && (
                           <span className="text-[10px] text-tertiary">

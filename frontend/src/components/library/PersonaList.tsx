@@ -17,7 +17,7 @@ import {
   CheckIcon,
   PlusIcon,
 } from '@heroicons/react/24/outline';
-import { Stagger, Select } from '../ui';
+import { Stagger, Select, EmptyHero } from '../ui';
 import { ScrollArea } from '../ui/ScrollArea';
 import { tintStyle } from '../../utils/tint';
 import { PersonaDetailPane } from './PersonaDetailPane';
@@ -478,36 +478,31 @@ export const PersonaList: React.FC<PersonaListProps> = ({ search, onSearchChange
 function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
   const { t } = useTranslation();
   return (
-    <div className="flex flex-1 min-h-0 w-full flex-col items-center justify-center bg-surface text-center px-6">
-      <div className="w-12 h-12 rounded-2xl bg-hover border border-border flex items-center justify-center mb-4">
-        <IdentificationIcon className="h-6 w-6 text-tertiary" />
-      </div>
-      <p className="text-sm font-medium text-ink">{t("Couldn't load personas")}</p>
-      <p className="text-xs text-secondary mt-1">{message}</p>
-      <button onClick={onRetry}
-        className="mt-4 px-4 py-2 bg-accent-strong text-accent-on text-sm font-medium rounded-lg hover:bg-accent-strong/90 transition-colors">
-        {t('Retry')}
-      </button>
-    </div>
+    <EmptyHero
+      icon={IdentificationIcon}
+      title={t("Couldn't load personas")}
+      description={message}
+      className="flex-1 min-h-0 bg-surface"
+    >
+      <Button onClick={onRetry} size="sm">{t('Retry')}</Button>
+    </EmptyHero>
   );
 }
 
 function EmptyState({ onCreate }: { onCreate?: () => void }) {
   const { t } = useTranslation();
   return (
-    <div className="flex flex-1 min-h-0 w-full flex-col items-center justify-center bg-surface text-center px-6">
-      <div className="w-12 h-12 rounded-2xl bg-hover border border-border flex items-center justify-center mb-4">
-        <IdentificationIcon className="h-6 w-6 text-tertiary" />
-      </div>
-      <p className="text-sm font-medium text-ink">{t('No personas yet')}</p>
-      <p className="text-xs text-secondary mt-1 max-w-sm">
-        {t('A persona is a reusable identity — a login plus 2FA, a consistent fingerprint, and a warm session. Attach one to a workflow and it logs in automatically on every run.')}
-      </p>
+    <EmptyHero
+      icon={IdentificationIcon}
+      title={t('No personas yet')}
+      description={t('A persona is a reusable identity — a login plus 2FA, a consistent fingerprint, and a warm session. Attach one to a workflow and it logs in automatically on every run.')}
+      className="flex-1 min-h-0 bg-surface"
+    >
       {onCreate && (
-        <Button onClick={onCreate} size="sm" className="mt-4">
+        <Button onClick={onCreate} size="sm">
           <PlusIcon className="w-3.5 h-3.5" /> {t('Create persona')}
         </Button>
       )}
-    </div>
+    </EmptyHero>
   );
 }

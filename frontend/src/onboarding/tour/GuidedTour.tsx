@@ -287,7 +287,7 @@ const TourLayer: React.FC<LayerProps> = ({ step, index, total, isLast, reduce, o
                 key={i}
                 className={clsx(
                   'h-1 rounded-full transition-all duration-200',
-                  i === index ? 'w-4 bg-ink' : 'w-1 bg-border-strong',
+                  i === index ? 'w-4 bg-ink' : 'w-1 bg-border-border-strong',
                 )}
               />
             ))}

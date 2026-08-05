@@ -1,4 +1,6 @@
-import React, { createContext, useContext, useReducer, useEffect, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useEffect, useCallback, useMemo, useRef } from 'react';
+import { createStore, type StoreApi } from 'zustand/vanilla';
+import { useStoreWithEqualityFn } from 'zustand/traditional';
 import {
   FlowBlock,
   BlockType,
@@ -489,25 +491,105 @@ export function buildNewBlock(
   };
 }
 
-// --- Context ---
+// --- Store ---
+//
+// State lives in a component-scoped Zustand store (one per FlowBuilderProvider), not
+// a plain context value. This is what makes per-block editing cheap: a config
+// keystroke changes `state` identity, but consumers can subscribe to a SLICE via
+// `useFlowState(selector)` and re-render only when THAT slice changes — so typing in
+// one block no longer re-renders every other block's config panel. The reducer is
+// left untouched; the store just wraps it (`dispatch = set(reducer(state, action))`).
 
-interface FlowBuilderContextValue {
+interface FlowStore {
   state: FlowBuilderState;
-  dispatch: React.Dispatch<Action>;
+  dispatch: (action: Action) => void;
   addBlock: (meta: { type: BlockType; blockType: string }, parentBlockId: string) => void;
   removeBlock: (blockId: string) => void;
   updateBlockConfig: (blockId: string, config: any) => void;
   updateBlockType: (blockId: string, blockType: string) => void;
+}
+
+type FlowStoreApi = StoreApi<FlowStore>;
+
+function createFlowStore(): FlowStoreApi {
+  return createStore<FlowStore>((set, get) => ({
+    state: initialState,
+    dispatch: (action) => set((s) => ({ state: reducer(s.state, action) })),
+    addBlock: (meta, parentBlockId) => {
+      const newBlock = buildNewBlock(meta, parentBlockId, get().state.blocks);
+      get().dispatch({ type: 'ADD_BLOCK', block: newBlock });
+    },
+    removeBlock: (blockId) => {
+      const blocks = get().state.blocks;
+      const block = blocks.find((b) => b.id === blockId);
+      if (!block) return;
+      if (!block.parentId && blocks.filter((b) => !b.parentId).length === 1) return;
+      get().dispatch({ type: 'REMOVE_BLOCK', blockId });
+    },
+    updateBlockConfig: (blockId, config) => get().dispatch({ type: 'UPDATE_BLOCK_CONFIG', blockId, config }),
+    updateBlockType: (blockId, blockType) => get().dispatch({ type: 'UPDATE_BLOCK_TYPE', blockId, blockType }),
+  }));
+}
+
+// --- Context (holds the store handle + the async loaders that need React hooks) ---
+
+interface FlowBuilderContextValue {
+  store: FlowStoreApi;
   loadSelectors: (targetId: number) => Promise<void>;
   loadReferenceData: () => Promise<void>;
 }
 
 const FlowBuilderContext = createContext<FlowBuilderContextValue | null>(null);
 
-export function useFlowBuilder() {
+function useFlowBuilderContext(): FlowBuilderContextValue {
   const ctx = useContext(FlowBuilderContext);
   if (!ctx) throw new Error('useFlowBuilder must be used within FlowBuilderProvider');
   return ctx;
+}
+
+/**
+ * Subscribe to a SLICE of the flow-builder state. Re-renders only when the selected
+ * value changes (Object.is by default; pass `equalityFn` — e.g. zustand `shallow` —
+ * for array/object selections like a block's children). This is the selective read
+ * that keeps an edit to one block from re-rendering the whole tree.
+ */
+export function useFlowState<T>(selector: (s: FlowBuilderState) => T, equalityFn?: (a: T, b: T) => boolean): T {
+  const { store } = useFlowBuilderContext();
+  return useStoreWithEqualityFn(store, (s) => selector(s.state), equalityFn);
+}
+
+/**
+ * The store handle — for reading a NON-reactive snapshot at event time via
+ * `store.getState().state` (e.g. a save handler that needs the full current state
+ * without subscribing the component to every change).
+ */
+export function useFlowStore(): FlowStoreApi {
+  return useFlowBuilderContext().store;
+}
+
+/**
+ * The flow-builder action handles — stable for the life of the provider. Reading
+ * them NEVER triggers a re-render, so a component that only mutates (never reads
+ * state) can subscribe to nothing.
+ */
+export function useFlowActions() {
+  const { store, loadSelectors, loadReferenceData } = useFlowBuilderContext();
+  return useMemo(() => {
+    const { dispatch, addBlock, removeBlock, updateBlockConfig, updateBlockType } = store.getState();
+    return { dispatch, addBlock, removeBlock, updateBlockConfig, updateBlockType, loadSelectors, loadReferenceData };
+  }, [store, loadSelectors, loadReferenceData]);
+}
+
+/**
+ * Back-compat hook — same shape and re-render behavior as the original context value
+ * (subscribes to the WHOLE state, so it re-renders on any change). Existing
+ * low-frequency consumers keep using this unchanged; hot-path components prefer
+ * `useFlowState` + `useFlowActions`.
+ */
+export function useFlowBuilder() {
+  const state = useFlowState((s) => s);
+  const actions = useFlowActions();
+  return { state, ...actions };
 }
 
 // --- Provider ---
@@ -520,9 +602,13 @@ interface FlowBuilderProviderProps {
 }
 
 export const FlowBuilderProvider: React.FC<FlowBuilderProviderProps> = ({ children, initialFlow, initialFlowDirty }) => {
-  const [state, dispatch] = useReducer(reducer, initialState);
+  // One store per provider instance (mirrors the old per-mount useReducer state).
+  const storeRef = useRef<FlowStoreApi | undefined>(undefined);
+  if (!storeRef.current) storeRef.current = createFlowStore();
+  const store = storeRef.current;
 
   const loadReferenceData = useCallback(async () => {
+    const { dispatch } = store.getState();
     dispatch({ type: 'SET_LOADING', loading: true });
     try {
       const [sessionsData, workflowsData, recipientsData, targetsData] = await Promise.all([
@@ -543,7 +629,7 @@ export const FlowBuilderProvider: React.FC<FlowBuilderProviderProps> = ({ childr
     } finally {
       dispatch({ type: 'SET_LOADING', loading: false });
     }
-  }, []);
+  }, [store]);
 
   useEffect(() => {
     loadReferenceData();
@@ -551,53 +637,23 @@ export const FlowBuilderProvider: React.FC<FlowBuilderProviderProps> = ({ childr
 
   useEffect(() => {
     if (initialFlow) {
-      dispatch({ type: 'LOAD_FLOW', flow: initialFlow, dirty: initialFlowDirty });
+      store.getState().dispatch({ type: 'LOAD_FLOW', flow: initialFlow, dirty: initialFlowDirty });
     }
-  }, [initialFlow, initialFlowDirty]);
-
-  const addBlock = useCallback((meta: { type: BlockType; blockType: string }, parentBlockId: string) => {
-    const newBlock = buildNewBlock(meta, parentBlockId, state.blocks);
-    dispatch({ type: 'ADD_BLOCK', block: newBlock });
-  }, [state.blocks]);
-
-  const removeBlock = useCallback((blockId: string) => {
-    const block = state.blocks.find(b => b.id === blockId);
-    if (!block) return;
-    if (!block.parentId && state.blocks.filter(b => !b.parentId).length === 1) return;
-    dispatch({ type: 'REMOVE_BLOCK', blockId });
-  }, [state.blocks]);
-
-  const updateBlockConfig = useCallback((blockId: string, config: any) => {
-    dispatch({ type: 'UPDATE_BLOCK_CONFIG', blockId, config });
-  }, []);
-
-  const updateBlockType = useCallback((blockId: string, blockType: string) => {
-    dispatch({ type: 'UPDATE_BLOCK_TYPE', blockId, blockType });
-  }, []);
+  }, [store, initialFlow, initialFlowDirty]);
 
   const loadSelectors = useCallback(async (targetId: number) => {
+    const { dispatch } = store.getState();
     try {
       const sels = await selectorsApi.listForTarget(targetId);
       dispatch({ type: 'SET_SELECTORS', selectors: sels });
     } catch {
       dispatch({ type: 'SET_SELECTORS', selectors: [] });
     }
-  }, []);
+  }, [store]);
 
-  // Memoize so consumers only re-render when `state` actually changes, not on
-  // every parent render (handlers below are all stable useCallback refs).
   const value: FlowBuilderContextValue = useMemo(
-    () => ({
-      state,
-      dispatch,
-      addBlock,
-      removeBlock,
-      updateBlockConfig,
-      updateBlockType,
-      loadSelectors,
-      loadReferenceData,
-    }),
-    [state, dispatch, addBlock, removeBlock, updateBlockConfig, updateBlockType, loadSelectors, loadReferenceData],
+    () => ({ store, loadSelectors, loadReferenceData }),
+    [store, loadSelectors, loadReferenceData],
   );
 
   return (

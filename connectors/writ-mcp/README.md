@@ -147,10 +147,14 @@ Served by the coordinator, not by this package:
 | `writ_create_automation` | Event → run-workflow / notify chains |
 | `writ_create_monitor` / `writ_wire_monitor` | Watch a page and react to changes |
 
-A self-hosted coordinator additionally exposes `writ_browser_use` and
-`writ_record_*` — drive a live browser on your own [fleet
-agent](https://github.com/usewrit/writ-agent) and save the session as a reusable
-workflow.
+Every target additionally exposes a **build** family — `writ_browser_use`,
+`writ_record_website`, `writ_build`, `writ_website_to_api`, then
+`writ_browser_act` / `_context` / `_network` / `_save` / `_cancel`. Your
+assistant opens a real browser, drives it turn by turn, and saves the session as
+a reusable workflow that afterwards replays with no model in the loop. Writ Cloud
+runs it on Writ's fleet; a self-hosted coordinator runs it on your own [fleet
+agent](https://github.com/usewrit/writ-agent). Either way your assistant is the
+brain — no second model key is involved.
 
 ### Reusing a recent result (`max_age`)
 

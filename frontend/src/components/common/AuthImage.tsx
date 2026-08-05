@@ -66,7 +66,7 @@ export const AuthImage: React.FC<{
     if (fallback !== undefined) return <>{fallback}</>;
     return (
       <div className={clsx('flex items-center justify-center', fallbackClassName)}>
-        <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-800" />
+        <div className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-zinc-800" />
       </div>
     );
   }

@@ -198,7 +198,7 @@ export const FunctionEditor: React.FC<{ workflowId: number; workflow: any; onUpd
                 <div className="flex items-center gap-3 cursor-pointer" onClick={() => setEditingIdx(editingIdx === idx ? null : idx)}>
                   <div className={clsx(
                     'w-2 h-2 rounded-full shrink-0',
-                    fn.type === 'steps' ? 'bg-zinc-400' : fn.type === 'script' ? 'bg-zinc-600' : 'bg-zinc-300',
+                    fn.type === 'steps' ? 'bg-tertiary' : fn.type === 'script' ? 'bg-zinc-600' : 'bg-active',
                   )} />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">

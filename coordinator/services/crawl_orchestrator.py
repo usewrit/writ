@@ -148,6 +148,21 @@ def _k_inflight(cid: int) -> str:
     return f"crawl:{cid}:inflight"
 
 
+def _k_shard_progress(cid: int) -> str:
+    """Hash of ``task_id -> "<done>:<failed>"`` — what each RUNNING shard has already
+    been credited toward the crawl's page counters.
+
+    A shard is the accounting unit: `on_shard_complete` credits the whole batch when
+    it returns. That is fine for the HTTP lane (sub-second pages) and useless on the
+    browser lane, where 25 URLs is over a minute during which the crawl's counters
+    cannot move at all — the run reads as frozen on page 1, which is what operators
+    cancel. Agents now report a running tally (`task_progress`), and this hash is what
+    makes crediting it IDEMPOTENT: each frame is applied as a delta over what the same
+    task was already credited, and the final result subtracts the total so no page is
+    ever counted twice."""
+    return f"crawl:{cid}:shard_progress"
+
+
 def _k_host_cooldown(reg: str) -> str:
     """A host is cooling down (recently blocked an agent) — no crawl dispatches to
     it while this key lives."""
@@ -315,7 +330,60 @@ async def _admit(crawl: CrawlJob, raw_url: str, depth: int, seed_host: str, seed
 # --------------------------------------------------------------------------- #
 # Seeding (robots + sitemap + homepage)                                       #
 # --------------------------------------------------------------------------- #
-async def _discover_sitemap_urls(seed_url: str) -> list:
+def _session_cookie_header(auth, url: str):
+    """Build a `Cookie:` header for `url` from a persona session, or None.
+
+    DISCOVERY RUNS AUTHENTICATED TOO. Seeding (robots/sitemap/homepage harvest) and
+    /crawl/map are control-plane fetches made by the COORDINATOR, not the agent — so
+    without this an authenticated crawl still derived its frontier from whatever a
+    logged-OUT visitor sees. On a site whose homepage is a login wall that means the
+    seed harvest returns the login page's links and the crawl explores nothing.
+
+    Cookies are matched the same way the agent's fetch lanes match them (host suffix
+    on a label boundary, path prefix, Secure => https only) so every fetch path agrees
+    on scope and none of them leaks a cookie off-site."""
+    if not auth:
+        return None
+    cookies = auth.get("cookies") or []
+    if not isinstance(cookies, list) or not cookies:
+        return None
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return None
+    path = parsed.path or "/"
+    pairs = []
+    for c in cookies:
+        if not isinstance(c, dict):
+            continue
+        name, value = c.get("name"), c.get("value")
+        if not isinstance(name, str) or not isinstance(value, str):
+            continue
+        domain = str(c.get("domain") or "").lstrip(".").lower()
+        if not domain:
+            continue
+        if not (host == domain or host.endswith("." + domain)):
+            continue
+        cpath = str(c.get("path") or "/")
+        if cpath not in ("", "/") and not path.startswith(cpath):
+            continue
+        if c.get("secure") and parsed.scheme != "https":
+            continue
+        pairs.append(f"{name}={value}")
+    return "; ".join(pairs) if pairs else None
+
+
+def _auth_headers_for(auth, url: str) -> dict:
+    """`safe_get(headers=...)` kwargs carrying the persona cookies for `url`."""
+    cookie = _session_cookie_header(auth, url)
+    return {"Cookie": cookie} if cookie else {}
+
+
+async def _discover_sitemap_urls(seed_url: str, *, auth=None) -> list:
     """Fetch robots.txt Sitemap: directives + /sitemap.xml and return <loc> URLs.
     Best-effort, tightly bounded — a control-plane GET of a text asset only. Never
     raises.
@@ -335,7 +403,9 @@ async def _discover_sitemap_urls(seed_url: str) -> list:
     try:
         # robots.txt Sitemap: lines
         try:
-            rb = await safe_fetch.safe_get(f"{origin}/robots.txt", timeout=8.0)
+            rb = await safe_fetch.safe_get(
+                f"{origin}/robots.txt", timeout=8.0,
+                headers=_auth_headers_for(auth, f"{origin}/robots.txt") or None)
             if rb.status_code == 200:
                 for line in rb.text.splitlines():
                     if line.lower().startswith("sitemap:"):
@@ -352,7 +422,8 @@ async def _discover_sitemap_urls(seed_url: str) -> list:
                 continue
             seen_maps.add(sm)
             try:
-                resp = await safe_fetch.safe_get(sm, timeout=8.0)
+                resp = await safe_fetch.safe_get(
+                    sm, timeout=8.0, headers=_auth_headers_for(auth, sm) or None)
                 if resp.status_code != 200:
                     continue
                 locs = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", resp.text, re.I)
@@ -363,7 +434,9 @@ async def _discover_sitemap_urls(seed_url: str) -> list:
                             continue
                         seen_maps.add(child)
                         try:
-                            cr = await safe_fetch.safe_get(child, timeout=8.0)
+                            cr = await safe_fetch.safe_get(
+                                child, timeout=8.0,
+                                headers=_auth_headers_for(auth, child) or None)
                             if cr.status_code == 200:
                                 urls.extend(re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", cr.text, re.I))
                         except Exception:
@@ -392,7 +465,7 @@ _ANCHOR_RE = re.compile(
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
-async def _harvest_seed_links(seed_url: str, *, cap: int = 200) -> list:
+async def _harvest_seed_links(seed_url: str, *, cap: int = 200, auth=None) -> list:
     """One SSRF-vetted control-plane GET of the seed page → absolute links with
     their anchor text. Best-effort, tightly bounded, never raises. Feeds both the
     scope-derivation URL sample and the /crawl/map picker."""
@@ -401,7 +474,8 @@ async def _harvest_seed_links(seed_url: str, *, cap: int = 200) -> list:
     out: list = []
     seen: set = set()
     try:
-        resp = await safe_fetch.safe_get(seed_url, timeout=8.0)
+        resp = await safe_fetch.safe_get(
+            seed_url, timeout=8.0, headers=_auth_headers_for(auth, seed_url) or None)
         if resp.status_code != 200:
             return out
         html = resp.text or ""
@@ -430,18 +504,18 @@ async def _harvest_seed_links(seed_url: str, *, cap: int = 200) -> list:
     return out
 
 
-async def _sample_site_urls(seed_url: str, *, cap: int = 150) -> list:
+async def _sample_site_urls(seed_url: str, *, cap: int = 150, auth=None) -> list:
     """A sample of the site's real URLs for scope derivation: sitemap first
     (cheap, broad), topped up with a shallow seed-page harvest when the sitemap
     is thin or absent. Never raises."""
     sample: list = []
     try:
-        sample = list(await _discover_sitemap_urls(seed_url))
+        sample = list(await _discover_sitemap_urls(seed_url, auth=auth))
     except Exception:
         sample = []
     if len(sample) < 40:
         try:
-            sample += [l["url"] for l in await _harvest_seed_links(seed_url, cap=120)]
+            sample += [l["url"] for l in await _harvest_seed_links(seed_url, cap=120, auth=auth)]
         except Exception:
             pass
     # Dedup preserving order, bounded.
@@ -455,6 +529,23 @@ async def _sample_site_urls(seed_url: str, *, cap: int = 150) -> list:
     return out
 
 
+def _session_is_usable(session) -> bool:
+    """Does this persona session carry anything that can actually authenticate?
+
+    Checks EVERY shape a session can arrive in — `cookies`, the Writ camelCase
+    `localStorage`/`sessionStorage` maps, captured auth `headers`, the HTTP-lane
+    `tokens` store, and Playwright's `origins[]`. The previous check accepted only
+    `cookies` or `origins`; a token-auth SPA whose whole session is a localStorage
+    JWT (a very common shape here) has NEITHER, so it was reported to the operator
+    as an expired login no matter how fresh it was."""
+    if not isinstance(session, dict):
+        return False
+    for key in ("cookies", "origins", "localStorage", "sessionStorage", "headers", "tokens"):
+        if session.get(key):
+            return True
+    return False
+
+
 async def _ensure_persona_session(db, crawl: CrawlJob) -> tuple:
     """Login-before-crawl guard. A crawl with a persona MUST carry a fresh warm
     session so every shard fetches logged-IN (the persona's login was established
@@ -462,31 +553,32 @@ async def _ensure_persona_session(db, crawl: CrawlJob) -> tuple:
     present + unexpired before fanning out; a stale session would otherwise silently
     crawl the logged-out site and collect garbage.
 
-    Returns (ok, error). ok=True → proceed (no persona, or a fresh session exists).
-    ok=False → the caller fails the crawl with `error` so the operator re-links the
-    login instead of getting a logged-out crawl."""
+    Returns (ok, error, session). ok=True → proceed (no persona, or a fresh session
+    exists, returned so SEEDING can run authenticated too). ok=False → the caller
+    fails the crawl with `error` so the operator re-links the login instead of
+    getting a logged-out crawl."""
     if not crawl.persona_id:
-        return True, None
+        return True, None, None
     try:
         from services.persona_service import PersonaService
         persona = await PersonaService.get_owned(db, crawl.persona_id)
         if not persona or not getattr(persona, "is_active", True):
             return False, ("The login identity for this crawl is missing or inactive. "
-                           "Re-link a persona for the site, then start the crawl.")
+                           "Re-link a persona for the site, then start the crawl."), None
         # load_session returns None when absent OR expired (see PersonaService).
         session = PersonaService.load_session(persona)
-        if session and (session.get("cookies") or session.get("origins")):
+        if _session_is_usable(session):
             logger.info(f"[{DRAGNET_NAME}] crawl {crawl.id}: authenticated — reusing "
                         f"persona {persona.id} warm session")
-            return True, None
+            return True, None, session
         return False, ("The login session for this crawl's persona has expired. "
                        "Re-link the login and start the crawl so pages behind the "
-                       "login are reachable.")
+                       "login are reachable."), None
     except Exception as e:  # noqa: BLE001 — never crash seeding on the guard
         logger.warning(f"[{DRAGNET_NAME}] persona-session guard failed for crawl {crawl.id}: {e}")
         # Fail OPEN on an unexpected guard error only when we truly can't tell —
         # better to attempt the crawl than to wrongly block it on an internal fault.
-        return True, None
+        return True, None, None
 
 
 async def _seed(crawl_id: int) -> None:
@@ -524,8 +616,11 @@ async def _seed_inner(crawl_id: int) -> None:
             return
 
         # Login-before-crawl: verify the persona's session is fresh BEFORE fanning
-        # out, so an auth'd crawl never silently runs logged-out.
-        ok, err = await _ensure_persona_session(db, crawl)
+        # out, so an auth'd crawl never silently runs logged-out. The session comes
+        # back so the sitemap/robots discovery below runs SIGNED IN — on a
+        # login-walled site an anonymous seed harvests the login page's links and
+        # the crawl explores nothing.
+        ok, err, auth_session = await _ensure_persona_session(db, crawl)
         if not ok:
             crawl.status = "failed"
             crawl.error = err
@@ -561,7 +656,7 @@ async def _seed_inner(crawl_id: int) -> None:
                     admitted += 1
             sitemap_urls = []
         else:
-            sitemap_urls = await _discover_sitemap_urls(crawl.seed_url)
+            sitemap_urls = await _discover_sitemap_urls(crawl.seed_url, auth=auth_session)
             for u in sitemap_urls:
                 if admitted >= budget:
                     break
@@ -601,6 +696,13 @@ async def _mint_shard_task(db, crawl: CrawlJob, batch: list) -> AutomationTask:
         "ocr_mode": getattr(crawl, "ocr_mode", "auto") or "auto",
         # Content-selection spec (which page ELEMENTS the markdown keeps).
         "content": getattr(crawl, "content_spec", None),
+        # AUTHENTICATED CRAWL BOUNDARY. The persona session rides separately (as
+        # config.session_state, resolved at dispatch); this is the registrable domain the
+        # agent may replay its un-domained parts to — auth headers and DOM storage carry no
+        # domain of their own, so without an anchor a crawl that follows an off-site link
+        # would hand another host the operator's bearer token. Cookies are matched by their
+        # own domain on top of this.
+        "auth_domain": _registrable(_host(crawl.seed_url)) if crawl.persona_id else None,
     }
     # Anti-affinity: if any URL in this batch was requeued after a host BLOCKED a
     # specific agent, steer this shard away from that agent so the retry lands on a
@@ -820,7 +922,8 @@ async def _finalize(db, crawl: CrawlJob, status: str) -> None:
     # Drop the crawl out of the Live-activity feed the instant it converges.
     _emit_crawl_run_event(crawl, "ended")
     r = get_redis()
-    for k in (_k_frontier(crawl.id), _k_visited(crawl.id), _k_inflight(crawl.id)):
+    for k in (_k_frontier(crawl.id), _k_visited(crawl.id), _k_inflight(crawl.id),
+              _k_shard_progress(crawl.id)):
         try:
             await r.delete(k)
         except Exception:
@@ -989,6 +1092,78 @@ async def complete_shard_task(
     return True
 
 
+def _parse_credited(raw) -> tuple[int, int]:
+    """`"<done>:<failed>"` from the shard-progress hash → `(done, failed)`.
+
+    Anything unreadable counts as nothing credited yet: under-counting here just
+    re-credits pages the completion path is about to count anyway, while a wrong
+    guess the other way would silently swallow them.
+    """
+    if not raw:
+        return 0, 0
+    try:
+        text = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+        done, _, failed = text.partition(":")
+        return max(0, int(done or 0)), max(0, int(failed or 0))
+    except Exception:
+        return 0, 0
+
+
+async def on_shard_progress(task: AutomationTask, done: int, failed: int) -> None:
+    """A crawl shard reported its RUNNING page tally. Advance the crawl's counters
+    by whatever that adds over what this task was already credited.
+
+    Only the delta is applied, and the completion path subtracts the same total, so
+    the shard's pages are counted exactly once however many frames arrive (or don't
+    — an agent that never reports still gets its full credit at completion, which is
+    what keeps this independently deployable from the agent).
+
+    Best-effort; never raises into the WS handler."""
+    ctx = task.trigger_context or {}
+    crawl_id = ctx.get(CTX_CRAWL_ID)
+    if not crawl_id:
+        return
+    done = max(0, int(done or 0))
+    failed = max(0, int(failed or 0))
+    try:
+        r = get_redis()
+        key = _k_shard_progress(int(crawl_id))
+        field = str(task.id)
+        # Same lock the completion path holds: a progress frame and the shard's own
+        # result must not interleave between reading the credited total and writing
+        # the new one, or the overlap is credited twice.
+        async with _shard_phase_lock(int(crawl_id)), AsyncSessionLocal() as db:
+            crawl = await db.get(CrawlJob, crawl_id)
+            # A cancelled/finished crawl must not be resurrected by a late frame from
+            # a shard still running on its agent.
+            if not crawl or crawl.is_terminal:
+                return
+            prev_done, prev_failed = _parse_credited(await r.hget(key, field))
+            d_done = max(0, done - prev_done)
+            d_failed = max(0, failed - prev_failed)
+            if not (d_done or d_failed):
+                return
+            await r.hset(key, field, f"{done}:{failed}")
+            await r.expire(key, _KEY_TTL)
+            fresh = (await db.execute(
+                update(CrawlJob)
+                .where(CrawlJob.id == crawl.id)
+                .values(
+                    pages_done=CrawlJob.pages_done + d_done,
+                    pages_failed=CrawlJob.pages_failed + d_failed,
+                )
+                .returning(CrawlJob.pages_done, CrawlJob.pages_failed)
+            )).first()
+            await db.commit()
+            if fresh:
+                crawl.pages_done, crawl.pages_failed = fresh
+            # Push the fresh counters at any live subscriber — this is the whole
+            # point: the detail card animates mid-shard instead of after it.
+            _emit_crawl_run_event(crawl, "updated")
+    except Exception as e:
+        logger.debug("crawl shard progress ignored for task %s: %s", task.id, e)
+
+
 async def on_shard_complete(task: AutomationTask, result_data: Optional[dict]) -> None:
     """A crawl-shard task finished. Store its pages' effect on counters, admit
     the URLs it discovered, and pump fresh shards. Uses its OWN db session so it
@@ -1037,6 +1212,20 @@ async def on_shard_complete(task: AutomationTask, result_data: Optional[dict]) -
             # UPDATE below, after the admit loop knows `newly`.
             _d_done = len(ok_pages)
             _d_failed = len(failed) + (len(pages) - len(ok_pages))
+            # Subtract what this shard's live `task_progress` frames already credited.
+            # The result stays AUTHORITATIVE (it is the full batch); progress only ever
+            # advanced the counters toward it, so the remainder is what is still owed.
+            # Clamped at zero: an agent that over-reported must not walk the counter
+            # backwards. The field is dropped either way — the shard is over.
+            try:
+                _credited_done, _credited_failed = _parse_credited(
+                    await r.hget(_k_shard_progress(int(crawl_id)), str(task.id))
+                )
+                await r.hdel(_k_shard_progress(int(crawl_id)), str(task.id))
+            except Exception:
+                _credited_done, _credited_failed = 0, 0
+            _d_done = max(0, _d_done - _credited_done)
+            _d_failed = max(0, _d_failed - _credited_failed)
 
             # Admit newly-discovered in-scope URLs one level deeper, ranked by
             # relevance to the crawl's intent (anchor text + path). Most are
@@ -1255,6 +1444,30 @@ async def start_crawl(
     if not verdict.allowed:
         raise HTTPException(400, verdict.message or "Seed URL is not allowed.")
 
+    # PERSONA OWNERSHIP + USABILITY, validated at CREATION. Without this a bad
+    # persona id was accepted, queued, and only then died in the seeder with
+    # "missing or inactive". Refusing here turns that into an immediate, actionable
+    # error, and gives the scope derivation below a session to fetch with.
+    persona_session = None
+    if persona_id:
+        from services.persona_service import PersonaService
+        _persona = await PersonaService.get_owned(db, int(persona_id))
+        if not _persona:
+            raise HTTPException(404, "persona_id does not reference one of your personas")
+        if not getattr(_persona, "is_active", True):
+            raise HTTPException(
+                409,
+                "That persona is inactive. Re-activate it (or pick another) to crawl "
+                "pages behind its login.",
+            )
+        persona_session = PersonaService.load_session(_persona)
+        if not _session_is_usable(persona_session):
+            raise HTTPException(
+                422,
+                "That persona has no live login session. Sign in once with the persona "
+                "(this captures the session the crawl replays), then start the crawl.",
+            )
+
     # Concurrency default. There is no plan ladder self-hosted, so the operator's
     # OWN fleet size is the real ceiling — and the WorkflowQueue processor already
     # gates dispatch on live agent capacity. Keep a conservative per-crawl default
@@ -1272,7 +1485,9 @@ async def start_crawl(
     intent = (intent or "").strip() or None
     derived: Optional[dict] = None
     if intent and include_paths is None and exclude_paths is None and max_depth is None:
-        sample = await _sample_site_urls(seed_url)
+        # Sampled with the persona's session when there is one: deriving scope from
+        # the logged-OUT view of a login-gated site yields paths for the login flow.
+        sample = await _sample_site_urls(seed_url, auth=persona_session)
         derived = await crawl_targeting.derive_scope(intent, sample, seed_url)
     eff = crawl_targeting.merge_scope(
         derived or {},
@@ -1338,10 +1553,11 @@ async def cancel_crawl(db, crawl: CrawlJob) -> None:
     if crawl.is_terminal:
         return
     r = get_redis()
-    try:
-        await r.delete(_k_frontier(crawl.id))
-    except Exception:
-        pass
+    for k in (_k_frontier(crawl.id), _k_shard_progress(crawl.id)):
+        try:
+            await r.delete(k)
+        except Exception:
+            pass
     # Cancel still-queued shard tasks (never dispatched → cancelling frees a real
     # fleet slot). Running/assigned shards are left to finish on their agent; their
     # completion is discarded once the crawl is terminal.

@@ -258,7 +258,7 @@ const ProviderRow: React.FC<{
           <span
             className={clsx(
               'h-1.5 w-1.5 rounded-full',
-              tone === 'on' ? 'bg-emerald-500' : tone === 'idle' ? 'bg-amber-500' : 'bg-zinc-300',
+              tone === 'on' ? 'bg-emerald-500' : tone === 'idle' ? 'bg-amber-500' : 'bg-active',
             )}
           />
           {configured ? (enabled ? t('Enabled') : t('Configured, off')) : t('Not set up')}

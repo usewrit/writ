@@ -38,7 +38,7 @@ export const ConnectAgentPanel: React.FC<ConnectAgentPanelProps> = ({ kind, capa
     return (
       <div className="absolute inset-0 flex items-center justify-center p-6 bg-surface/60 backdrop-blur-sm">
         <div className="max-w-sm w-full text-center">
-          <div className="w-12 h-12 mx-auto mb-4 rounded-lg bg-white border border-zinc-200/80 flex items-center justify-center">
+          <div className="w-12 h-12 mx-auto mb-4 rounded-lg bg-surface border border-border/80 flex items-center justify-center">
             <CloudIcon className="w-6 h-6 text-ink animate-pulse" />
           </div>
           <h3 className="text-[15px] font-semibold text-ink mb-1.5">
@@ -56,7 +56,7 @@ export const ConnectAgentPanel: React.FC<ConnectAgentPanelProps> = ({ kind, capa
     <div className="absolute inset-0 overflow-y-auto flex items-start justify-center p-6 bg-surface/70 backdrop-blur-sm">
       <div className="max-w-lg w-full my-auto">
         <div className="text-center mb-5">
-          <div className="w-12 h-12 mx-auto mb-4 rounded-lg bg-white border border-zinc-200/80 flex items-center justify-center">
+          <div className="w-12 h-12 mx-auto mb-4 rounded-lg bg-surface border border-border/80 flex items-center justify-center">
             <ComputerDesktopIcon className="w-6 h-6 text-ink" />
           </div>
           <h3 className="text-[16px] font-semibold text-ink mb-1.5">
@@ -92,7 +92,7 @@ export const ConnectAgentPanel: React.FC<ConnectAgentPanelProps> = ({ kind, capa
         {/* Live waiting indicator — auto-resolves when the agent connects */}
         <div className="mt-4 flex items-center justify-center gap-2 text-[13px] text-secondary">
           <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-zinc-400 opacity-60" />
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-tertiary opacity-60" />
             <span className="relative inline-flex rounded-full h-2 w-2 bg-canvas0" />
           </span>
           {t('Waiting for your agent to connect — recording starts automatically.')}

@@ -173,7 +173,7 @@ const ProvidersPanel: React.FC = () => {
                 key={p.id}
                 className="flex items-center gap-3 px-4 py-3 border-t border-border"
               >
-                <div className={clsx('w-2 h-2 rounded-full', p.is_active ? 'bg-ink' : 'bg-zinc-300')} />
+                <div className={clsx('w-2 h-2 rounded-full', p.is_active ? 'bg-ink' : 'bg-active')} />
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-ink capitalize">{p.provider}</span>

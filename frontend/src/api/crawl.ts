@@ -81,6 +81,8 @@ export interface CrawlView {
   render_mode?: CrawlRenderMode;
   /** OCR policy for PDF/office/image docs + DOM-empty renders. */
   ocr_mode?: CrawlOcrMode;
+  /** The login identity this crawl runs as (id only — never the session). */
+  persona_id?: number | null;
   /** For the ai executor: the per-page extraction instruction (unused on self-host). */
   extract_prompt?: string | null;
   /** Plain-English goal: derives the scope and ranks the frontier by relevance. */
@@ -359,7 +361,7 @@ export const crawlApi = {
 
   /** List a site's URLs ranked by relevance to `search`, so the operator can pick
    *  which to crawl. Creates nothing. */
-  map: async (req: { url: string; search?: string; limit?: number }): Promise<MapCrawlResponse> => {
+  map: async (req: { url: string; search?: string; limit?: number; persona_id?: number | null }): Promise<MapCrawlResponse> => {
     const response = await client.post('/crawl/map', req);
     return response.data;
   },

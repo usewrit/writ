@@ -10,7 +10,7 @@ import { triggersApi, webhookTriggersApi } from '../../api/endpoints';
 import { formatRelativeTime, formatDate, cleanTitle } from '../../utils/format';
 import { statusStyle } from '../../utils/statusStyle';
 import { Modal } from '../../components/ui/Modal';
-import { Stagger, SwapFade, Select } from '../../components/ui';
+import { Stagger, SwapFade, Select, Button, EmptyHero } from '../../components/ui';
 import { ScrollArea } from '../../components/ui/ScrollArea';
 import { tintStyle, type Tint } from '../../utils/tint';
 import {
@@ -202,11 +202,12 @@ const AutomationDetailPane: React.FC<DetailProps> = ({ f, toggling, onToggle, on
 
   if (!f) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center text-center px-6">
-        <div className="w-12 h-12 rounded-2xl bg-hover border border-border flex items-center justify-center mb-4"><BoltIcon className="h-6 w-6 text-tertiary" /></div>
-        <p className="text-sm font-medium text-ink">{t('Select an automation')}</p>
-        <p className="text-xs text-secondary mt-1 max-w-xs">{t('Pick one on the left to see its trigger, actions, and recent runs.')}</p>
-      </div>
+      <EmptyHero
+        icon={BoltIcon}
+        title={t('Select an automation')}
+        description={t('Pick one on the left to see its trigger, actions, and recent runs.')}
+        className="flex-1"
+      />
     );
   }
 
@@ -469,19 +470,23 @@ export const AutomationsListPage: React.FC = () => {
         {initialLoading ? (
           <ShelfSkeleton withSearch label={t('Loading automations')} />
         ) : loadFailed ? (
-          <div className="flex flex-1 flex-col items-center justify-center text-center px-6">
-            <div className="w-12 h-12 rounded-2xl bg-hover border border-border flex items-center justify-center mb-4"><ExclamationTriangleIcon className="h-6 w-6 text-tertiary" /></div>
-            <p className="text-sm font-medium text-ink">{t("Couldn't load automations")}</p>
-            <p className="text-xs text-secondary mt-1">{error}</p>
-            <button onClick={() => refresh()} className="mt-4 px-4 py-2 bg-accent-strong text-accent-on text-sm font-semibold rounded-lg shadow-sm hover:bg-accent-strong/90 transition-colors">{t('Retry')}</button>
-          </div>
+          <EmptyHero
+            icon={ExclamationTriangleIcon}
+            title={t("Couldn't load automations")}
+            description={error}
+            className="flex-1"
+          >
+            <Button onClick={() => refresh()} size="sm">{t('Retry')}</Button>
+          </EmptyHero>
         ) : allFlows.length === 0 ? (
-          <div className="flex flex-1 flex-col items-center justify-center text-center px-6">
-            <div className="w-12 h-12 rounded-2xl bg-hover border border-border flex items-center justify-center mb-4"><BoltIcon className="h-6 w-6 text-tertiary" /></div>
-            <p className="text-sm font-medium text-ink">{t('No automations yet')}</p>
-            <p className="text-xs text-secondary mt-1 max-w-sm">{t('Automations are created automatically when you set up actions on monitors and workflows. You can also build complex pipelines here.')}</p>
-            <button onClick={() => navigate('/automations/new')} className="mt-4 px-4 py-2 bg-accent-strong text-accent-on text-sm font-semibold rounded-lg shadow-sm hover:bg-accent-strong/90 transition-colors">{t('New Automation')}</button>
-          </div>
+          <EmptyHero
+            icon={BoltIcon}
+            title={t('No automations yet')}
+            description={t('Automations are created automatically when you set up actions on monitors and workflows. You can also build complex pipelines here.')}
+            className="flex-1"
+          >
+            <Button onClick={() => navigate('/automations/new')} size="sm">{t('New Automation')}</Button>
+          </EmptyHero>
         ) : (
           <div className={SHELF_CONTAINER}>
             {/* ── Master list ── */}

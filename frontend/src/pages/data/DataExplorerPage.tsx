@@ -8,7 +8,7 @@ import { useQuery } from '../../hooks/useQuery';
 import { Q } from '../../stores/queryKeys';
 import { workflowDataApi, type DataWorkflowSummary, type PickerLastDelta } from '../../api/workflowData';
 import { ExtractedDataTable } from '../../components/data/ExtractedDataTable';
-import { Select } from '../../components/ui';
+import { Select, EmptyHero, buttonClass } from '../../components/ui';
 import { tintStyle } from '../../utils/tint';
 import { SHELF_LIST_COL, ShelfAccentBar, shelfRowClass, shelfRowMouseDown, ShelfListSearch, ShelfSkeleton } from '../../components/library/shelf';
 import { ScrollArea } from '../../components/ui/ScrollArea';
@@ -80,20 +80,17 @@ export const DataExplorerPage: React.FC = () => {
       {loading && list.length === 0 ? (
         <ShelfSkeleton withSearch label={t('Loading data')} />
       ) : !loading && list.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
-          <TableCellsIcon className="h-7 w-7 text-tertiary" />
-          <p className="mt-3 text-[14px] font-medium text-ink">{t('No extracted data yet')}</p>
-          <p className="mt-1 max-w-md text-[12px] text-tertiary">
-            {t('Run a workflow that extracts data and it will show up here — sortable, searchable, and exportable.')}
-          </p>
-          <Link
-            to="/workflows"
-            className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-accent-strong px-3 py-1.5 text-[12px] font-medium text-accent-on hover:bg-accent-strong/90"
-          >
+        <EmptyHero
+          icon={TableCellsIcon}
+          title={t('No extracted data yet')}
+          description={t('Run a workflow that extracts data and it will show up here — sortable, searchable, and exportable.')}
+          className="flex-1"
+        >
+          <Link to="/workflows" className={buttonClass({ size: 'sm' })}>
             <CursorArrowRaysIcon className="h-3.5 w-3.5" />
             {t('Go to workflows')}
           </Link>
-        </div>
+        </EmptyHero>
       ) : (
         <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
           {/* Workflow picker — shelf master-list tone (chrome), so it recedes into

@@ -7,7 +7,7 @@ export const RUN_TYPE_LABEL: Record<string, string> = {
   check: 'Monitor check',
   ai_session: 'AI session',
   automation: 'Automation',
-  crawl: 'Crawl',
+  crawl: 'Harvest run',
 };
 
 /** Short label for a run type ("Workflow", "Monitor") — for the type pill. */
@@ -16,7 +16,7 @@ export const RUN_TYPE_SHORT: Record<string, string> = {
   check: 'Monitor',
   ai_session: 'AI session',
   automation: 'Automation',
-  crawl: 'Crawl',
+  crawl: 'Harvest',
 };
 
 // Noun used to name a URL-only entity ("Amazon monitor", "ChatGPT session").

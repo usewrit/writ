@@ -18,6 +18,7 @@ import { Select, Switch } from '../../components/ui';
 import { FleetCapacityHint } from '../../components/checks/FleetCapacityHint';
 import { useFleetCapacity } from '../../hooks/useFleetCapacity';
 import toast from 'react-hot-toast';
+import { toastIcon } from '../../components/ui/toastIcon';
 import clsx from 'clsx';
 
 function hostOf(url?: string): string | undefined {
@@ -109,7 +110,7 @@ export const CheckDetailPage: React.FC = () => {
       // cadence the current fleet can't meet (it will run slower until more agents).
       const warn = updated?.capacityWarning ?? updated?.data?.capacityWarning;
       if (key === 'period' && warn) {
-        toast(warn, { icon: '⚠️', duration: 7000 });
+        toast(warn, { icon: toastIcon(ExclamationTriangleIcon, 'text-amber-500'), duration: 7000 });
       } else {
         toast.success(t('Saved'));
       }
@@ -171,11 +172,11 @@ export const CheckDetailPage: React.FC = () => {
   const enabled = target.enabled !== false;
   const state = (target as any).state ?? (target as any).health_state;
   const health = !enabled
-    ? { label: t('Paused'), dot: 'bg-zinc-300', text: 'text-tertiary' }
+    ? { label: t('Paused'), dot: 'bg-active', text: 'text-tertiary' }
     : state === 'up' || state === 'ok' ? { label: t('Healthy'), dot: 'bg-green-500', text: 'text-emerald-600' }
     : state === 'down' ? { label: t('Down'), dot: 'bg-red-500', text: 'text-red-600' }
     : state === 'stale' ? { label: t('Stale'), dot: 'bg-amber-500', text: 'text-amber-600' }
-    : { label: t('Pending'), dot: 'bg-zinc-300', text: 'text-tertiary' };
+    : { label: t('Pending'), dot: 'bg-active', text: 'text-tertiary' };
   const lastChecked = (target as any).lastCheckedAt ?? (target as any).last_checked_at;
   const lastCheckedClock = lastChecked ? new Date(lastChecked).toLocaleTimeString(uiLocale()) : null;
   const periodMs = target.checkPeriodMs || 60000;

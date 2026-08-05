@@ -4,7 +4,7 @@ Trigger Rules API - CRUD operations for unified trigger rules.
 import logging
 import secrets
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -24,6 +24,54 @@ from security.validation import InputValidator
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/triggers", tags=["Triggers"])
+
+# Every event_type the trigger service can actually fire (see
+# UnifiedTriggerService.process_* + webhooks router). Enforced on BOTH create and
+# update — the update path used to skip it, letting an unfireable rule in.
+# Mirrors the cloud list.
+VALID_EVENT_TYPES = [
+    "change_detected", "webhook_received",
+    "ai_session_started", "ai_session_completed",
+    "workflow_started", "workflow_completed",
+    # Monitor-health edges (services.monitoring_state / dispatch_monitor_health).
+    "monitor_down", "monitor_stale", "monitor_recovered",
+    # Time-driven root (blockType == "scheduled"): fired periodically by the
+    # scheduler's scheduled-automation lane (services.scheduler), not by an
+    # incoming event. The builder has always offered this root block; the list
+    # not carrying it is what rejected every scheduled automation at create.
+    "scheduled",
+    # Dragnet crawl lifecycle (services.crawl_orchestrator._finalize/_seed →
+    # UnifiedTriggerService.process_crawl_event). A whole-site crawl converges
+    # async; these fire once on the crawl's terminal/start state (NOT per shard).
+    "crawl_started", "crawl_completed", "crawl_failed",
+]
+
+
+def _recompute_next_scheduled_at(rule: TriggerRule) -> None:
+    """Populate/clear rule.next_scheduled_at for the scheduler's due index.
+
+    A live (enabled) automation whose ROOT event block is `scheduled` gets its next
+    fire time from that block's recurrence config (compute_next_run); any other rule
+    (disabled, or an event-driven root) clears the column so it drops out of the
+    due scan. Call on create AND update, after `rule.enabled`/`rule.blocks` are
+    set. Reuses the same block-parse + next-run helpers the scheduler uses so the
+    persisted cadence and the tick agree exactly.
+    """
+    from services.scheduler import scheduled_recurrence_from_blocks
+    from services.schedule_recurrence import compute_next_run
+
+    recurrence = scheduled_recurrence_from_blocks(rule.blocks) if rule.enabled else None
+    if recurrence is None:
+        rule.next_scheduled_at = None
+        return
+    rule.next_scheduled_at = compute_next_run(
+        recurrence["kind"],
+        datetime.now(timezone.utc),
+        recurrence["interval_ms"],
+        recurrence["time"],
+        recurrence["days"],
+        recurrence["tz"],
+    )
 
 
 def _new_webhook_trigger(name: str) -> WebhookTrigger:
@@ -491,22 +539,10 @@ async def create_trigger_rule(
                 detail=f"Selector {request.target_selector_id} not found for target {request.target_id}",
             )
 
-    # Validate event_type
-    valid_event_types = [
-        "change_detected", "webhook_received",
-        "ai_session_started", "ai_session_completed",
-        "workflow_started", "workflow_completed",
-        # Monitor-health edges (services.monitoring_state / dispatch_monitor_health).
-        "monitor_down", "monitor_stale", "monitor_recovered",
-        # Dragnet crawl lifecycle (services.crawl_orchestrator._finalize/_seed →
-        # UnifiedTriggerService.process_crawl_event). A whole-site crawl converges
-        # async; these fire once on the crawl's terminal/start state (NOT per shard).
-        "crawl_started", "crawl_completed", "crawl_failed",
-    ]
-    if request.event_type not in valid_event_types:
+    if request.event_type not in VALID_EVENT_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid event_type. Must be one of: {valid_event_types}",
+            detail=f"Invalid event_type. Must be one of: {VALID_EVENT_TYPES}",
         )
 
     # ReDoS guard: reject unsafe 'matches' regex patterns before storing.
@@ -550,6 +586,10 @@ async def create_trigger_rule(
         actions=[a.model_dump() for a in request.actions],
         blocks=[b.model_dump() for b in request.blocks] if request.blocks else None,
     )
+
+    # Time-driven automations enter the scheduler's due index at create — without
+    # this stamp a scheduled-root rule would be accepted and then never fire.
+    _recompute_next_scheduled_at(rule)
 
     db.add(rule)
     await db.commit()
@@ -704,6 +744,12 @@ async def update_trigger_rule(
     if request.actions is not None:
         rule.actions = [a.model_dump() for a in request.actions]
     if request.event_type is not None:
+        # Same validation as create — skipping it here let an unfireable rule in.
+        if request.event_type not in VALID_EVENT_TYPES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid event_type. Must be one of: {VALID_EVENT_TYPES}",
+            )
         rule.event_type = request.event_type
     if request.workflow_id is not None:
         rule.workflow_id = request.workflow_id if request.workflow_id > 0 else None
@@ -732,6 +778,12 @@ async def update_trigger_rule(
                     b['config']['webhook_trigger_token'] = wh.token
                     break
         logger.info(f"Auto-created webhook endpoint {wh.id} for automation update '{rule.name}'")
+
+    # Re-stamp (or clear) the due index AFTER every field is applied: an edit can
+    # change the recurrence, re-root the block tree away from `scheduled`, or
+    # disable the rule — each of which must be reflected in next_scheduled_at, or
+    # the scheduler fires a cadence the rule no longer has.
+    _recompute_next_scheduled_at(rule)
 
     await db.commit()
     await db.refresh(rule)
@@ -992,6 +1044,10 @@ async def toggle_trigger_rule(
         )
 
     rule.enabled = not rule.enabled
+    # Enable/disable IS the due-index switch for a scheduled-root automation:
+    # enabling stamps the next fire from the block recurrence, disabling clears it
+    # so the scheduler never fires a paused rule.
+    _recompute_next_scheduled_at(rule)
     await db.commit()
     await db.refresh(rule)
 

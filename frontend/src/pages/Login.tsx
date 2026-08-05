@@ -74,7 +74,7 @@ export const Login: React.FC = () => {
           <WritWordmark size={28} className="text-ink" />
         </div>
 
-        <div className="bg-white rounded-2xl shadow-sm border border-ink/20 p-6">
+        <div className="bg-surface rounded-2xl shadow-sm border border-ink/20 p-6">
           <h1 className="text-base font-semibold text-ink mb-1">{t('Sign in')}</h1>
           <p className="text-sm text-secondary mb-5">{t('Sign in to your self-host coordinator.')}</p>
 

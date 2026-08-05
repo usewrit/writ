@@ -7,6 +7,7 @@ import { formatRelativeTime } from '../../utils/format';
 import { CrossRefBadge } from './CrossRefBadge';
 import { PortalMenu } from './PortalMenu';
 import { Modal } from '../ui/Modal';
+import { EmptyHero } from '../ui';
 import toast from 'react-hot-toast';
 import {
   LinkIcon,
@@ -91,17 +92,12 @@ export const WebhookList: React.FC<WebhookListProps> = ({ search }) => {
 
   if (webhookList.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[50vh] text-center">
-        <div className="w-12 h-12 rounded-2xl bg-chrome border border-border flex items-center justify-center mb-4">
-          <LinkIcon className="h-6 w-6 text-tertiary" />
-        </div>
-        <p className="text-sm font-medium text-ink">
-          {search ? t('No webhooks match your search') : t('No webhooks yet')}
-        </p>
-        <p className="text-xs text-secondary mt-1">
-          {search ? t('Try a different search term') : t("Create an automation with a 'Webhook' source to generate one")}
-        </p>
-      </div>
+      <EmptyHero
+        icon={LinkIcon}
+        title={search ? t('No webhooks match your search') : t('No webhooks yet')}
+        description={search ? t('Try a different search term') : t("Create an automation with a 'Webhook' source to generate one")}
+        className="min-h-[50vh]"
+      />
     );
   }
 

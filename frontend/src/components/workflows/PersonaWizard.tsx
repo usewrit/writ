@@ -119,7 +119,13 @@ function buildInitialForm(persona?: Persona | null, defaultDomain?: string, pref
     extraFields: Object.entries(persona?.linked_secrets || {})
       .filter(([field]) => field !== 'password' && field !== 'username')
       .map(([field, secretKey]) => ({ key: field, value: '', secretKey })),
-    twofa_method: persona?.twofa_method || prefill?.twofa_method || 'none',
+    // Self-host supports none/totp/email_otp only — clamp an unsupported hint
+    // (the recorder prefills 'sms' when the site texts codes) so the 2FA step
+    // never opens on a method with no card that the coordinator would 422.
+    twofa_method: (() => {
+      const m = persona?.twofa_method || prefill?.twofa_method || 'none';
+      return m === 'sms' ? 'none' : m;
+    })(),
     totp_seed: '',
     totp_digits: 6,
     totp_period_seconds: 30,
@@ -239,7 +245,7 @@ const StepIndicator: React.FC<{
               ) : (
                 <span className={clsx(
                   'w-3.5 h-3.5 rounded-full text-[9px] flex items-center justify-center font-medium',
-                  isCurrent ? 'bg-white text-ink' : 'bg-hover text-tertiary',
+                  isCurrent ? 'bg-surface text-ink' : 'bg-hover text-tertiary',
                 )}>
                   {index + 1}
                 </span>

@@ -1,11 +1,11 @@
 import React, { useState, useRef } from 'react';
+import { shallow } from 'zustand/shallow';
 import { PlusIcon, TrashIcon, ArrowsRightLeftIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { FlowBlock, getBlockIcon, getBlockLabel } from '../types';
 import { blockStyleVars, isBlockReady } from '../blockStyle';
-import { getChildBlocks } from '../FlowBuilderContext';
-import { useFlowBuilder } from '../FlowBuilderContext';
+import { getChildBlocks, useFlowState, useFlowActions } from '../FlowBuilderContext';
 import { BlockContent } from './BlockContent';
 import { BlockIO } from './BlockIO';
 import { BlockAddMenu } from './BlockAddMenu';
@@ -80,7 +80,7 @@ const NeedsSetup: React.FC = () => {
   );
 };
 
-const ParallelBranches: React.FC<{ blocks: FlowBlock[]; depth: number }> = ({ blocks, depth }) => {
+const ParallelBranches: React.FC<{ blocks: FlowBlock[]; depth: number }> = React.memo(({ blocks, depth }) => {
   const { t } = useTranslation();
   return (
     <div className="w-full mt-1">
@@ -115,18 +115,21 @@ const ParallelBranches: React.FC<{ blocks: FlowBlock[]; depth: number }> = ({ bl
       </div>
     </div>
   );
-};
+});
+ParallelBranches.displayName = 'ParallelBranches';
 
-export const BlockNode: React.FC<BlockNodeProps> = ({ block, depth = 0, actionsOnly = false }) => {
+export const BlockNode: React.FC<BlockNodeProps> = React.memo(({ block, depth = 0, actionsOnly = false }) => {
   const { t } = useTranslation();
-  const { state, removeBlock } = useFlowBuilder();
+  const { removeBlock } = useFlowActions();
   const vars = blockStyleVars(block);
   const Icon = getBlockIcon(block);
   const isFirst = !block.parentId;
   const label = getBlockLabel(block, isFirst);
   const ready = isBlockReady(block);
 
-  const children = getChildBlocks(state.blocks, block.id);
+  // Subscribe to ONLY this node's children (shallow-compared) so an edit to a
+  // sibling block doesn't re-render this subtree.
+  const children = useFlowState((s) => getChildBlocks(s.blocks, block.id), shallow);
 
   // actionsOnly mode: skip rendering the block card, just show the add button + children
   if (actionsOnly) {
@@ -223,4 +226,5 @@ export const BlockNode: React.FC<BlockNodeProps> = ({ block, depth = 0, actionsO
       {children.length > 1 && <ParallelBranches blocks={children} depth={depth} />}
     </div>
   );
-};
+});
+BlockNode.displayName = 'BlockNode';

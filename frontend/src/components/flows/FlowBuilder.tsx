@@ -120,7 +120,7 @@ export const FlowBuilder: React.FC<FlowBuilderProps> = ({ onSave, onCancel, embe
           data-tour="flow-name"
           value={name}
           onChange={e => dispatch({ type: 'SET_META', name: e.target.value })}
-          className="flex-1 max-w-xs px-2 py-1 bg-transparent text-[13px] font-semibold text-ink outline-none border-b border-transparent hover:border-zinc-200 focus:border-ink/30 transition-colors"
+          className="flex-1 max-w-xs px-2 py-1 bg-transparent text-[13px] font-semibold text-ink outline-none border-b border-transparent hover:border-border focus:border-ink/30 transition-colors"
           placeholder={t('Automation name...')}
         />
         <div className="flex-1" />
@@ -133,7 +133,7 @@ export const FlowBuilder: React.FC<FlowBuilderProps> = ({ onSave, onCancel, embe
             className={clsx(
               'px-3 py-1.5 text-[12px] font-medium rounded-lg transition-colors',
               saving || !isDirty
-                ? 'bg-zinc-100 text-tertiary cursor-not-allowed'
+                ? 'bg-hover text-tertiary cursor-not-allowed'
                 : 'bg-accent-strong text-accent-on hover:bg-accent-strong/90'
             )}
           >
@@ -142,10 +142,15 @@ export const FlowBuilder: React.FC<FlowBuilderProps> = ({ onSave, onCancel, embe
         )}
       </div>
 
-      {/* Workspace canvas */}
-      <div data-tour="flow-canvas" className="flex-1 relative overflow-auto">
-        {/* Dot grid background */}
+      {/* Workspace canvas. The dot grid is a SIBLING of the scroller, not a child:
+          an absolutely-positioned child inside an `overflow-auto` box is anchored
+          to that box's padding box, so it can't ride the scrolled layer and the
+          compositor has to repaint the whole gradient on the main thread every
+          frame. That only bites once the content actually overflows, which is why
+          the jank appeared exactly when a flow grew past one screen. */}
+      <div data-tour="flow-canvas" className="relative flex-1 min-h-0">
         <div
+          aria-hidden="true"
           className="absolute inset-0 pointer-events-none"
           style={{
             backgroundImage: 'radial-gradient(circle, rgb(var(--border)) 1px, transparent 1px)',
@@ -154,9 +159,10 @@ export const FlowBuilder: React.FC<FlowBuilderProps> = ({ onSave, onCancel, embe
           }}
         />
 
-        {/* pb clears the floating AI bar (pill at bottom-6 / progress strip at bottom-20)
-            so the create-start choices are never hidden behind it. */}
-        <div className="relative z-10 px-4 pt-8 pb-32">
+        <div className="absolute inset-0 overflow-auto">
+          {/* pb clears the floating AI bar (pill at bottom-6 / progress strip at
+              bottom-20) so the create-start choices are never hidden behind it. */}
+          <div className="relative z-10 px-4 pt-8 pb-32">
           {!hasBlocks ? (
             <SourceBlockPicker />
           ) : (
@@ -167,6 +173,7 @@ export const FlowBuilder: React.FC<FlowBuilderProps> = ({ onSave, onCancel, embe
               ))}
             </div>
           )}
+        </div>
         </div>
       </div>
 

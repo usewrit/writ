@@ -18,12 +18,12 @@
 
   <p align="center">
     <a href="#quickstart"><b>Quickstart</b></a> ·
-    <a href="https://github.com/usewrit/writ/wiki"><b>Docs</b></a> ·
-    <a href="#what-you-can-do"><b>Features</b></a> ·
+    <a href="#what-you-get"><b>Features</b></a> ·
+    <a href="#why-writ-and-not-a-scraping-api-or-an-ai-agent"><b>Why Writ</b></a> ·
+    <a href="#how-it-fits-together"><b>Architecture</b></a> ·
     <a href="#connect-your-ai-assistant-mcp"><b>Connect your AI</b></a> ·
-    <a href="#agents-in-more-detail"><b>Agents</b></a> ·
-    <a href="#the-writ-family"><b>SDKs</b></a> ·
-    <a href="./docs/DEPLOYMENT.md"><b>Deploy</b></a> ·
+    <a href="#run-it-for-real"><b>Deploy</b></a> ·
+    <a href="https://github.com/usewrit/writ/wiki"><b>Docs</b></a> ·
     <a href="./SECURITY.md"><b>Security</b></a>
   </p>
 </div>
@@ -36,10 +36,10 @@ up` and it serves the web UI and API, stores everything in a single SQLite file,
 PDFs and scanned pages, and dispatches all browser work to a fleet of lightweight
 `writ-agent` processes you run wherever you like. Your box, your data, your agents.
 
-> The Rust `writ-agent` lives in its **own repository**
-> ([`writ-agent`](https://github.com/usewrit/writ-agent)) — install it separately and
-> point it at this coordinator. This repo is the coordinator only (Python API + built
-> web UI); it never launches a browser itself.
+**The coordinator never launches a browser.** It is Python plus the built UI, and it
+hands every browsing job to a separate Rust agent — [`writ-agent`](https://github.com/usewrit/writ-agent),
+its own repository, installed on whichever machines should do the browsing. You will
+connect one in the quickstart below; until you do, nothing executes.
 
 <div align="center">
   <img src="./assets/media/record-to-api.gif" alt="The full flow: name a workflow, drive a live browser while every click is captured as a step, then finish on a callable REST endpoint with a ready-to-paste curl command" width="100%">
@@ -49,7 +49,9 @@ PDFs and scanned pages, and dispatches all browser work to a fleet of lightweigh
 
 ## Quickstart
 
-You need Docker. Nothing else.
+You need Docker. Nothing else. Three steps, and the third is the fun one.
+
+### 1. Start the coordinator
 
 ```bash
 git clone https://github.com/usewrit/writ.git && cd writ
@@ -57,12 +59,12 @@ git clone https://github.com/usewrit/writ.git && cd writ
 docker compose up -d --build
 ```
 
-Open **http://localhost:8000** and create your account. That is the whole install.
+Open **http://localhost:8000** and create your account.
 
 > First build takes a few minutes — the OCR runtime and its model weights are
 > baked in so document extraction works offline.
 
-### Then connect one agent
+### 2. Connect one agent
 
 The coordinator runs no browsers itself, so **nothing will execute until one
 agent is connected**. Open **Fleet → Connect a new agent**, copy the line it
@@ -79,97 +81,21 @@ document-extractor address and its secret — the installer fetches for itself, 
 there is nothing else to paste or configure.
 
 The agent dials out over WebSocket, so it needs no inbound ports and can sit
-behind NAT. It appears in **Fleet** within seconds, and you can record and run.
+behind NAT. It appears in **Fleet** within seconds.
 
-Prefer to do it by hand? The same modal has **Binary** and **Docker** tabs with
-the raw token, and [docs/CONNECT_AGENT.md](docs/CONNECT_AGENT.md) is the full
-reference. Sources for the binary: [`writ-agent`](https://github.com/usewrit/writ-agent)
-[Releases](https://github.com/usewrit/writ-agent/releases), the
-`ghcr.io/usewrit/writ-agent:latest` image, or build from source.
+> Prefer to do it by hand? The same modal has **Binary** and **Docker** tabs with
+> the raw token. See [Agents and your fleet](#agents-and-your-fleet) below, or
+> [docs/CONNECT_AGENT.md](docs/CONNECT_AGENT.md) for the full reference.
 
-### Put it on a real domain
+### 3. Record something
 
-The quickstart binds to `127.0.0.1` — nothing is exposed to the network until you
-say so. When you are ready to run it on a public server, point your domain's A
-record at that machine and run:
+Click **New workflow**, drive the task in the live browser, and save. You now have a
+step list you can replay, schedule, publish as a REST endpoint, or hand to an AI
+assistant — all covered below.
 
-```bash
-./scripts/deploy.sh writ.example.com you@example.com
-```
+That is the whole install. Everything after this point is optional.
 
-One command, and you have HTTPS. It checks DNS and the ports before touching
-anything, writes every domain-derived setting into `.env` consistently, brings up
-a bundled [Caddy](https://caddyserver.com) that gets a Let's Encrypt certificate
-and **renews it by itself** — no certbot, no cron, no reload hook to forget — and
-then verifies the live `https://` URL before telling you it worked. Re-run it any
-time to change domain or repair a half-finished deploy.
-
-Already have nginx or a load balancer? Skip it — the coordinator stays on
-loopback and you point your proxy at `127.0.0.1:8000`.
-[docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) has that path, the backup checklist,
-and what to do when the certificate does not arrive.
-
-### Day-to-day
-
-```bash
-docker compose logs -f    # follow logs
-docker compose restart    # restart
-docker compose down       # stop, keep your data
-docker compose down -v    # stop and delete everything
-```
-
-Run these from the repository root — the root `compose.yaml` wires in
-`docker/docker-compose.yml` and loads your `.env` automatically. If you deployed
-with TLS, add `--profile tls` so the commands reach Caddy too.
-
-<details>
-<summary><b>Generate the secrets</b></summary>
-
-<br/>
-
-`./scripts/gen-env.sh` fills all of these in for you. To do it manually,
-fill these into `.env`. Never commit the filled-in `.env`.
-
-| Variable | How to generate |
-| --- | --- |
-| `WRIT_JWT_SECRET` | `openssl rand -hex 32` |
-| `API_SECRET_KEY` | `openssl rand -hex 32` |
-| `HMAC_SECRET_KEY` | `openssl rand -hex 32` |
-| `RECORDER_AUTH_SECRET` | `openssl rand -hex 32` |
-| `INTERNAL_API_SECRET` | `openssl rand -hex 32` |
-| `GATEWAY_SECRET` | `openssl rand -hex 32` |
-| `DOC_EXTRACT_SECRET` | `openssl rand -hex 32` |
-| `SECRET_ENCRYPTION_KEY` | `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
-
-> Every one of these is **required** — with the default `ENVIRONMENT=production`
-> the coordinator refuses to boot if any is missing, blank, or shorter than 32
-> characters. That is deliberate: HS256 signs happily with an empty key, so a
-> half-filled template would otherwise leave the signing secret publicly known.
-
-> **Back up `SECRET_ENCRYPTION_KEY` separately from your data volume.** It
-> encrypts your stored secrets and credentials at rest. If you lose it, those
-> values become unrecoverable — see [SECURITY.md](./SECURITY.md).
-
-`WRIT_JWT_SECRET` is the operator-facing name; the compose file maps it onto the
-`JWT_SECRET_KEY` the app reads. Set one, not both.
-
-</details>
-
-## Why self-host
-
-- **You own everything.** One SQLite file, one volume. No managed cloud, no third-party
-  data processor, no telemetry phoning home — nothing here makes an outbound call you
-  did not ask for.
-- **No browsers in the coordinator.** It never launches Chromium — your `writ-agent`
-  fleet does the browsing, wherever you run it. That image is just Python + the UI.
-- **PDFs and scans included.** The document/OCR extractor ships in the box and is wired
-  up for you, so a crawl reads PDFs, Word/Excel/PowerPoint files and scanned pages
-  instead of skipping them. CPU-only and fully offline — it works air-gapped.
-- **No external database or cache services to run.** SQLite on disk plus an in-process queue. Back up one file.
-- **MCP-native.** Point Claude Code, Claude Desktop, Cursor, or any MCP client at your
-  coordinator and your saved workflows become tools it can run, read, schedule, and build.
-
-## What you can do
+## What you get
 
 **Capture the task once**
 
@@ -196,10 +122,13 @@ fill these into `.env`. Never commit the filled-in `.env`.
 | | |
 | --- | --- |
 | 🔌 **REST endpoint** | Publish any workflow as an HTTP endpoint with its own API key and scopes. |
-| 🤖 **MCP tool** | Your saved workflows become 25 tools an AI assistant can run, read, schedule, expose — and *build*, by driving a live recording session. |
+| 🤖 **MCP tool** | Your saved workflows become tools an AI assistant can run, read, schedule, expose — and *build*, by driving a live recording session. [Details below.](#connect-your-ai-assistant-mcp) |
 | 💬 **OpenAI-compatible** | Serve a workflow as `/v1/chat/completions`, `/v1/models` and `/v1/responses`, so any OpenAI SDK can point at it with a base-URL change. |
 | 🗃️ **Datasets** | Every run appends to a searchable dataset. Query across all history, or export it. |
 | 📦 **Typed SDKs** | Official [TypeScript, Python, Go and Rust clients](https://github.com/usewrit/writ-sdks) generated from one OpenAPI spec — same contract against this coordinator or Writ Cloud. |
+
+Everything above is in this repository, under AGPL-3.0 with **no feature gates**. Nothing
+here is a locked trial tier — read it, fork it, run it.
 
 ## What it looks like
 
@@ -216,7 +145,7 @@ Four things it does, each shown doing it.
 </tr>
 </table>
 
-## Why this and not a scraping API or an AI agent
+## Why Writ and not a scraping API or an AI agent
 
 Three approaches exist for "get me this data off the web". They differ in where
 the intelligence sits, and that decides everything else.
@@ -249,8 +178,12 @@ run means a run can silently do something *different* from yesterday's. A
 recorded workflow does what it did last time, and when a site really does change,
 it fails loudly and points at the step that broke instead of improvising.
 
-And it is AGPL-3.0 with **no feature gates**: everything above is in this
-repository. Nothing here is a locked trial tier — read it, fork it, run it.
+And self-hosting it means you own everything: one SQLite file, one volume, no
+managed cloud, no third-party data processor, and no telemetry — nothing here makes
+an outbound call you did not ask for. There is no external database or cache service
+to run either (SQLite on disk plus an in-process queue), so a backup is one file. The
+document/OCR extractor ships in the box, so a crawl reads PDFs, office files and
+scanned pages instead of skipping them — CPU-only, fully offline, works air-gapped.
 
 ## How it fits together
 
@@ -274,16 +207,33 @@ Note the arrows: agents call doc-extract directly with bytes they already
 fetched — the coordinator never touches it. The coordinator does hand each agent
 that address when it connects, so you never configure it yourself.
 
+### Agents and your fleet
+
+- **Run as many as you like.** Each dials out over WebSocket, so no inbound
+  ports and NAT is fine, and the coordinator spreads work across whichever have
+  capacity.
+- **Sitting at the coordinator's own machine?** **Fleet → run an agent on this
+  host** does the download, configure and launch for you.
+- **Agents on other machines** cannot reach the document extractor's default
+  loopback address. Set `DOC_EXTRACT_URL` in `.env` to something routable and
+  every generated connect command picks it up.
+- **Where the binary comes from:** the [`writ-agent`](https://github.com/usewrit/writ-agent)
+  repository — [Releases](https://github.com/usewrit/writ-agent/releases), the
+  `ghcr.io/usewrit/writ-agent:latest` image, or build it yourself:
+  `cargo build --release --no-default-features --features local,fleet,openai --bin writ-agent-fleet`
+
+[docs/CONNECT_AGENT.md](docs/CONNECT_AGENT.md) is the full reference — install
+paths, every environment variable, healthchecks and troubleshooting.
+
 ## Connect your AI assistant (MCP)
 
 Your coordinator speaks the **Model Context Protocol**. Attach an AI client and your saved
 workflows become tools it can run, read, schedule, expose — and even *build* by recording.
 
-**1. Create an API key** in the app → **Developers → API keys**.
-**2. Add the connector to your client.** The bundled [`writ-mcp`](./connectors/writ-mcp)
-bridge is a zero-dependency stdio↔HTTP proxy (it also ships in the repo, so no install is
-strictly required). The app's **Connect** page generates these snippets for you, prefilled
-with your endpoint.
+**1. Create an API key** in the app → **Developers → API keys**, with the
+`mcp:execute` scope (see the note below).
+**2. Add the connector to your client.** The app's **Connect** page generates these
+snippets for you, prefilled with your endpoint.
 
 <details open>
 <summary><b>Claude Code</b></summary>
@@ -329,18 +279,40 @@ claude mcp add writ-selfhost -e WRIT_API_KEY=<YOUR_API_KEY> -- npx -y writ-mcp -
 > (which registers as `writ`). The server identifies itself to the AI as *"Writ Self-Host
 > Coordinator"* — never confused with the desktop app.
 
-**The tools your assistant gets** — 28 of them, plus a `run_<name>` tool per saved workflow:
+**The tools your assistant gets** — 31 of them, plus a `run_<name>` tool per saved workflow:
 
 | Family | Tools |
 | --- | --- |
 | **Operate** | `writ_list_workflows` · `writ_run_workflow` · `writ_workflow_data` · `writ_search_data` · `writ_export_data` · `writ_workflow_runs` |
 | **Automate** | `writ_set_schedule` · `writ_expose_workflow_api` · `writ_create_automation` · `writ_create_monitor` · `writ_wire_monitor` |
 | **Crawl** | `writ_crawl_site` · `writ_crawl_status` · `writ_saved_crawls` · `writ_run_saved_crawl` · `writ_saved_crawl_data` |
-| **Build** (un-guided) | `writ_record_start` · `writ_record_act` · `writ_record_context` · `writ_record_network` · `writ_record_save` · `writ_record_cancel` |
-| **Drive a browser** | `writ_browser_use` · `writ_browser_act` · `writ_browser_context` · `writ_browser_network` · `writ_browser_save` · `writ_browser_cancel` |
+| **Start a session** | `writ_browser_use` · `writ_record_website` · `writ_build` · `writ_website_to_api` |
+| **Drive it** | `writ_browser_act` · `writ_browser_context` · `writ_browser_network` · `writ_browser_save` · `writ_browser_cancel` |
+| **Legacy aliases** | `writ_record_start` · `writ_record_act` · `writ_record_context` · `writ_record_network` · `writ_record_save` · `writ_record_cancel` |
 
-Building is **un-guided**: the AI drives a live record session on your fleet, and asks
-you for clarifications directly in the chat.
+Building is **un-guided**: your assistant is the brain. It drives a live session on your
+fleet and asks you for clarifications directly in the chat — there is no coordinator-side
+AI and no model key of ours anywhere in the path. Pick the start tool by intent
+(`writ_browser_use` to just do something now, `writ_website_to_api` for a site with no
+usable API, `writ_record_website` / `writ_build` to record a repeatable task); an API
+build first offers you workflows you already have, so it never records something twice.
+
+The assistant reads Writ's own recording policy through
+`writ_browser_context(section=explorer)` — the same rules the guided builder follows — and
+finds a site's real backend with `writ_browser_network`, so a workflow can call the JSON
+endpoint instead of scraping the page.
+
+> **Passwords never reach the model.** Anything sent as `inputs`, or on a fill with a
+> `data_key`, is held by the coordinator: it reaches the page, but comes back to the
+> assistant as `{{placeholder}}`, and the saved step keeps the placeholder — so the
+> workflow re-substitutes on each run instead of carrying your password in its steps.
+> Sessions left idle are closed automatically; an open one is holding a real browser.
+
+> **Give the key the `mcp:execute` scope.** API keys are scoped, and the MCP
+> endpoint checks for that one specifically — without it every call returns
+> `API key is missing the 'mcp:execute' scope`. Add the resource scopes you want
+> the assistant to have alongside it (`workflows:read`, `workflows:execute`,
+> `runs:read`, `datasets:read` is a sensible starting set).
 
 > **Saved crawls save real money.** A whole-site crawl is slow, so the worst thing an
 > assistant can do is re-crawl a site to answer a question it already has the pages
@@ -350,43 +322,39 @@ you for clarifications directly in the chat.
 > in which case crawl again." Assistants should check `writ_saved_crawls` **before**
 > starting a new crawl of a site.
 
-> **Give the key the `mcp:execute` scope.** API keys are scoped, and the MCP
-> endpoint checks for that one specifically — without it every call returns
-> `API key is missing the 'mcp:execute' scope`. Add the resource scopes you want
-> the assistant to have alongside it (`workflows:read`, `workflows:execute`,
-> `runs:read`, `datasets:read` is a sensible starting set).
+## Run it for real
 
-## Agents, in more detail
+The quickstart binds to `127.0.0.1` — nothing is exposed to the network until you
+say so. This section is everything you need beyond that.
 
-The quickstart above covers the common case. A few things worth knowing once you
-have more than one agent:
+### Put it on a domain
 
-- **Run as many as you like.** Each dials out over WebSocket — no inbound ports,
-  NAT is fine — and the coordinator spreads work across whichever have capacity.
-- **Sitting at the coordinator's own machine?** **Fleet → run an agent on this
-  host** does the download, configure and launch for you.
-- **Agents on other machines** cannot reach the document extractor's default
-  loopback address. Set `DOC_EXTRACT_URL` in `.env` to something routable and
-  every generated connect command picks it up — see
-  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
-- **Building from source:**
-  `cargo build --release --no-default-features --features local,fleet,openai --bin writ-agent-fleet`
+Point your domain's A record at the machine and run:
 
-[docs/CONNECT_AGENT.md](docs/CONNECT_AGENT.md) is the full reference — install
-paths, every environment variable, healthchecks and troubleshooting.
+```bash
+./scripts/deploy.sh writ.example.com you@example.com
+```
+
+One command, and you have HTTPS. It checks DNS and the ports before touching
+anything, writes every domain-derived setting into `.env` consistently, brings up
+a bundled [Caddy](https://caddyserver.com) that gets a Let's Encrypt certificate
+and **renews it by itself** — no certbot, no cron, no reload hook to forget — and
+then verifies the live `https://` URL before telling you it worked. Re-run it any
+time to change domain or repair a half-finished deploy.
+
+Already have nginx or a load balancer? Skip it — the coordinator stays on
+loopback and you point your proxy at `127.0.0.1:8000`.
+
+[docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) covers that path, the backup checklist,
+and what to do when the certificate does not arrive.
 
 <details>
-<summary><b>Production notes</b></summary>
+<summary><b>Wiring a proxy by hand</b></summary>
 
 <br/>
 
-The defaults are tuned for a quick local trial — the compose file publishes the
-port on loopback only (`127.0.0.1:8000`), so nothing is reachable from the
-network until you say so.
-
-**`./scripts/deploy.sh <domain> <email>` does all of the below for you.** Read on
-if you are wiring it up by hand, or fronting it with a proxy you already run
-(full guide: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)):
+`./scripts/deploy.sh` does all of this for you. Read on only if you are fronting
+it with a proxy you already run:
 
 1. **Terminate TLS in front** and forward to `127.0.0.1:8000`. Do **not** publish
    port `8000` on a public interface. Your proxy must forward WebSocket upgrades
@@ -409,6 +377,52 @@ trusted automatically. Set it only for extra names (an alias, a
 
 Because your proxy terminates TLS, the container keeps listening on plain HTTP `:8000` on
 the internal network — that is expected.
+
+</details>
+
+### Day-to-day
+
+```bash
+docker compose logs -f    # follow logs
+docker compose restart    # restart
+docker compose down       # stop, keep your data
+docker compose down -v    # stop and delete everything
+```
+
+Run these from the repository root — the root `compose.yaml` wires in
+`docker/docker-compose.yml` and loads your `.env` automatically. If you deployed
+with TLS, add `--profile tls` so the commands reach Caddy too.
+
+<details>
+<summary><b>The secrets, and generating them by hand</b></summary>
+
+<br/>
+
+`./scripts/gen-env.sh` fills all of these in for you. To do it manually,
+fill these into `.env`. Never commit the filled-in `.env`.
+
+| Variable | How to generate |
+| --- | --- |
+| `WRIT_JWT_SECRET` | `openssl rand -hex 32` |
+| `API_SECRET_KEY` | `openssl rand -hex 32` |
+| `HMAC_SECRET_KEY` | `openssl rand -hex 32` |
+| `RECORDER_AUTH_SECRET` | `openssl rand -hex 32` |
+| `INTERNAL_API_SECRET` | `openssl rand -hex 32` |
+| `GATEWAY_SECRET` | `openssl rand -hex 32` |
+| `DOC_EXTRACT_SECRET` | `openssl rand -hex 32` |
+| `SECRET_ENCRYPTION_KEY` | `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+
+> Every one of these is **required** — with the default `ENVIRONMENT=production`
+> the coordinator refuses to boot if any is missing, blank, or shorter than 32
+> characters. That is deliberate: HS256 signs happily with an empty key, so a
+> half-filled template would otherwise leave the signing secret publicly known.
+
+> **Back up `SECRET_ENCRYPTION_KEY` separately from your data volume.** It
+> encrypts your stored secrets and credentials at rest. If you lose it, those
+> values become unrecoverable — see [SECURITY.md](./SECURITY.md).
+
+`WRIT_JWT_SECRET` is the operator-facing name; the compose file maps it onto the
+`JWT_SECRET_KEY` the app reads. Set one, not both.
 
 </details>
 
@@ -437,6 +451,17 @@ next visit shows first-run setup again.
 
 </details>
 
+<details>
+<summary><b>Running without document extraction</b></summary>
+
+<br/>
+
+Start `docker compose up -d coordinator` alone and set `DOC_EXTRACT_URL=` (empty)
+in `.env`. Crawls then skip every non-HTML resource they reach — a silent no-op,
+never an error.
+
+</details>
+
 ## What's in the box
 
 | Path | What it is |
@@ -444,7 +469,7 @@ next visit shows first-run setup again.
 | `coordinator/` | The Python API + Alembic migrations (the runtime). |
 | `ui/` | The built web UI (SPA) served by the coordinator. |
 | `doc-extract/` | The document + OCR extraction service (PDF, office files, scans). |
-| `connectors/writ-mcp/` | Zero-dependency Node MCP connector (stdio↔HTTP bridge). |
+| `connectors/writ-mcp/` | Zero-dependency Node MCP connector (stdio↔HTTP bridge), bundled so no install is strictly required. |
 | `docker/` | `Dockerfile.coordinator`, `Dockerfile.doc-extract`, `docker-compose.yml`, `entrypoint.sh`, `Caddyfile`. |
 | `docs/` | Operator guides (agent connect walkthrough, production deployment). |
 | `scripts/gen-env.sh` | Generates a filled-in `.env` with fresh secrets. |
@@ -454,10 +479,6 @@ Health endpoints are `GET /health` on the coordinator (`:8000`) and on
 doc-extract (`:8092`) — both JSON, and both used by the container `HEALTHCHECK`
 and the compose healthcheck.
 
-To run without document extraction, start `docker compose up -d coordinator`
-alone and set `DOC_EXTRACT_URL=` (empty) in `.env`. Crawls then skip every
-non-HTML resource they reach — a silent no-op, never an error.
-
 ## The Writ family
 
 This repository is the coordinator. Three sibling repositories complete it —
@@ -466,7 +487,7 @@ each is independently useful and separately licensed.
 | Repository | What it is | Install |
 | --- | --- | --- |
 | **[`writ`](https://github.com/usewrit/writ)** *(you are here)* | The self-hosted coordinator: API, web UI, scheduler, document/OCR extraction. | `docker compose up` |
-| **[`writ-agent`](https://github.com/usewrit/writ-agent)** | The Rust fleet agent that actually drives the browsers. Dials out over WebSocket; no inbound ports. | [Releases](https://github.com/usewrit/writ-agent/releases) · `ghcr.io/usewrit/writ-agent` · or the one-line installer in the quickstart |
+| **[`writ-agent`](https://github.com/usewrit/writ-agent)** | The Rust fleet agent that actually drives the browsers. Dials out over WebSocket; no inbound ports. | [Releases](https://github.com/usewrit/writ-agent/releases) · `ghcr.io/usewrit/writ-agent` · or the one-liner in the quickstart |
 | **[`writ-mcp`](https://github.com/usewrit/writ-mcp)** | The MCP connector — a zero-dependency stdio↔HTTP bridge that turns your workflows into tools any MCP client can call. Also bundled here at [`connectors/writ-mcp`](./connectors/writ-mcp). | `npx -y writ-mcp` |
 | **[`writ-sdks`](https://github.com/usewrit/writ-sdks)** | Official clients for **TypeScript, Python, Go and Rust** — one contract, generated from a shared OpenAPI spec. Drive this coordinator, a local `writ-agentd`, or Writ Cloud from the same client. | Build from the repo — registry releases are still pending |
 

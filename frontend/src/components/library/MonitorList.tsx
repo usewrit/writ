@@ -19,7 +19,7 @@ import {
   EyeIcon,
   ArrowPathIcon,
 } from '@heroicons/react/24/outline';
-import { Stagger, Select } from '../ui';
+import { Stagger, Select, Button, EmptyHero } from '../ui';
 import { ScrollArea } from '../ui/ScrollArea';
 import { tintStyle } from '../../utils/tint';
 import { MonitorDetailPane } from './MonitorDetailPane';
@@ -540,17 +540,14 @@ export const MonitorList: React.FC<MonitorListProps> = ({ search, onSearchChange
 function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
   const { t } = useTranslation();
   return (
-    <div className="flex flex-1 min-h-0 w-full flex-col items-center justify-center bg-surface text-center px-6">
-      <div className="w-12 h-12 rounded-2xl bg-hover border border-border flex items-center justify-center mb-4">
-        <ExclamationTriangleIcon className="h-6 w-6 text-tertiary" />
-      </div>
-      <p className="text-sm font-medium text-ink">{t("Couldn't load monitors")}</p>
-      <p className="text-xs text-secondary mt-1">{message}</p>
-      <button onClick={onRetry}
-        className="mt-4 px-4 py-2 bg-accent-strong text-accent-on text-sm font-medium rounded-lg hover:bg-accent-strong/90 transition-colors">
-        {t('Retry')}
-      </button>
-    </div>
+    <EmptyHero
+      icon={ExclamationTriangleIcon}
+      title={t("Couldn't load monitors")}
+      description={message}
+      className="flex-1 min-h-0 bg-surface"
+    >
+      <Button onClick={onRetry} size="sm">{t('Retry')}</Button>
+    </EmptyHero>
   );
 }
 
@@ -558,22 +555,17 @@ function EmptyState({ search }: { search: string }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   return (
-    <div className="flex flex-1 min-h-0 w-full flex-col items-center justify-center bg-surface text-center px-6">
-      <div className="w-12 h-12 rounded-2xl bg-hover border border-border flex items-center justify-center mb-4">
-        <EyeIcon className="h-6 w-6 text-tertiary" />
-      </div>
-      <p className="text-sm font-medium text-ink">
-        {search ? t('No monitors match your search') : t('No monitors yet')}
-      </p>
-      <p className="text-xs text-secondary mt-1">
-        {search ? t('Try a different search term') : t('Create your first monitor to watch a webpage for changes')}
-      </p>
+    <EmptyHero
+      icon={EyeIcon}
+      title={search ? t('No monitors match your search') : t('No monitors yet')}
+      description={search ? t('Try a different search term') : t('Create your first monitor to watch a webpage for changes')}
+      className="flex-1 min-h-0 bg-surface"
+    >
       {!search && (
-        <button onClick={() => navigate('/checks/new')}
-          className="mt-4 px-4 py-2 bg-accent-strong text-accent-on text-sm font-medium rounded-lg hover:bg-accent-strong/90 transition-colors">
+        <Button onClick={() => navigate('/checks/new')} size="sm">
           {t('New Monitor')}
-        </button>
+        </Button>
       )}
-    </div>
+    </EmptyHero>
   );
 }

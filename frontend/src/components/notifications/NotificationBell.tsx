@@ -6,6 +6,7 @@ import clsx from 'clsx';
 import { BellIcon } from '@heroicons/react/24/outline';
 import { useNotifications } from '../../providers/NotificationProvider';
 import { NotificationRow } from './NotificationRow';
+import { EmptyHero } from '../ui';
 
 // Sidebar/header bell with an unread badge + an inbox dropdown preview.
 // Reads everything from NotificationProvider; safe to mount even
@@ -109,7 +110,7 @@ export const NotificationBell: React.FC = () => {
         aria-haspopup="true"
         aria-expanded={open}
         title={t('Notifications')}
-        className="relative p-1.5 text-zinc-400 hover:text-ink rounded-md hover:bg-white/80 transition-colors shrink-0"
+        className="relative p-1.5 text-tertiary hover:text-ink rounded-md hover:bg-surface/80 transition-colors shrink-0"
       >
         <BellIcon className="w-4 h-4" />
         {unreadCount > 0 && (
@@ -140,7 +141,7 @@ export const NotificationBell: React.FC = () => {
           <div className="flex-1 overflow-y-auto">
             {loading && items.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-10 text-center">
-                <div className="w-2 h-2 rounded-full bg-zinc-300 animate-pulse mb-3" />
+                <div className="w-2 h-2 rounded-full bg-active animate-pulse mb-3" />
                 <p className="text-xs text-tertiary">{t('Loading…')}</p>
               </div>
             ) : error && items.length === 0 ? (
@@ -154,15 +155,13 @@ export const NotificationBell: React.FC = () => {
                 </button>
               </div>
             ) : items.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-10 text-center px-4">
-                <div className="w-10 h-10 rounded-2xl bg-hover border border-border flex items-center justify-center mb-3">
-                  <BellIcon className="h-5 w-5 text-tertiary" />
-                </div>
-                <p className="text-xs font-medium text-ink">{t('No notifications yet')}</p>
-                <p className="text-[11px] text-tertiary mt-1">
-                  {t('Updates about your runs, payouts and listings will appear here')}
-                </p>
-              </div>
+              <EmptyHero
+                size="sm"
+                icon={BellIcon}
+                title={t('No notifications yet')}
+                description={t('Updates about your runs, payouts and listings will appear here')}
+                className="py-10"
+              />
             ) : (
               <ul className="divide-y divide-border">
                 {items.slice(0, 8).map(n => (

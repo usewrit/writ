@@ -15,21 +15,21 @@
     .sm-eye  { transform-box: fill-box; transform-origin: center;
                animation: scribe-blink 6.5s ease-in-out infinite; }
     @keyframes scribe-glance {
-      0%,20%   { transform: translate(0,0); }
-      26%,40%  { transform: translate(4px,1px); }
-      46%,57%  { transform: translate(0,0); }
-      63%,74%  { transform: translate(-4px,1px); }
-      80%,89%  { transform: translate(0,-3px); }
-      95%,100% { transform: translate(0,0); }
+      0%,4%     { transform: translate(0,0); }
+      10%,24%   { transform: translate(4px,1px); }
+      30%,42%   { transform: translate(0,0); }
+      48%,60%   { transform: translate(-4px,1px); }
+      66%,76%   { transform: translate(0,-3px); }
+      82%,100%  { transform: translate(0,0); }
     }
     @keyframes scribe-blink {
-      0%,40%      { transform: scaleY(1); }
-      42%,43.5%   { transform: scaleY(.08); }
-      45%,88%     { transform: scaleY(1); }
-      89.5%,90.5% { transform: scaleY(.08); }
-      92%,94.5%   { transform: scaleY(1); }
-      96%,97%     { transform: scaleY(.08); }
-      98.5%,100%  { transform: scaleY(1); }
+      0%,5%        { transform: scaleY(1); }
+      7%,8.5%      { transform: scaleY(.08); }
+      10%,55%      { transform: scaleY(1); }
+      56.5%,57.5%  { transform: scaleY(.08); }
+      59%,62%      { transform: scaleY(1); }
+      63.5%,64.5%  { transform: scaleY(.08); }
+      66%,100%     { transform: scaleY(1); }
     }
     @media (prefers-reduced-motion: reduce) {
       .sm-look, .sm-eye { animation: none; }

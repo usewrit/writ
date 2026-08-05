@@ -3,7 +3,8 @@ import { Menu } from '@headlessui/react';
 import { VariableIcon } from '@heroicons/react/24/outline';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { useFlowBuilder, getAncestorChain } from '../FlowBuilderContext';
+import { useFlowState, getAncestorChain } from '../FlowBuilderContext';
+import { shallow } from 'zustand/shallow';
 import { getBlockDef } from '../blockCatalog';
 
 interface FieldRefProps {
@@ -41,8 +42,12 @@ interface SourceGroup {
  */
 export const FieldRef: React.FC<FieldRefProps> = ({ blockId, onInsert, className }) => {
   const { t } = useTranslation();
-  const { state } = useFlowBuilder();
-  const { blocks, blockOutputs, workflows, sessions } = state;
+  // Slice subscriptions — this menu is mounted per editable field, so a full-state
+  // subscription multiplied every edit by the number of fields on the canvas.
+  const blocks = useFlowState((s) => s.blocks, shallow);
+  const blockOutputs = useFlowState((s) => s.blockOutputs, shallow);
+  const workflows = useFlowState((s) => s.workflows, shallow);
+  const sessions = useFlowState((s) => s.sessions, shallow);
 
   const groups = React.useMemo<SourceGroup[]>(() => {
     const result: SourceGroup[] = [];

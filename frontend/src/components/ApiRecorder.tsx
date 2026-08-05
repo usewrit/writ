@@ -290,14 +290,14 @@ export const ApiRecorder: React.FC<ApiRecorderProps> = ({
   // Render JSON body with clickable fields for parameterization
   const renderJsonBody = (obj: any, reqId: string, prefix: string = '', isResponse: boolean = false) => {
     if (typeof obj !== 'object' || obj === null) {
-      return <span className="text-gray-600">{JSON.stringify(obj)}</span>;
+      return <span className="text-secondary">{JSON.stringify(obj)}</span>;
     }
 
     const reqParams = parameterized[reqId] || {};
     const reqExtractions = extractions[reqId] || {};
 
     return (
-      <div className="pl-3 border-l border-gray-200 space-y-0.5">
+      <div className="pl-3 border-l border-border space-y-0.5">
         {Object.entries(obj).map(([key, value]) => {
           const path = prefix ? `${prefix}.${key}` : key;
           const isParam = !!reqParams[path];
@@ -306,15 +306,15 @@ export const ApiRecorder: React.FC<ApiRecorderProps> = ({
 
           return (
             <div key={path} className="text-xs font-mono">
-              <span className="text-zinc-300">{key}</span>
-              <span className="text-gray-400">: </span>
+              <span className="text-tertiary">{key}</span>
+              <span className="text-tertiary">: </span>
               {isLeaf ? (
                 <span className="inline-flex items-center gap-1">
                   <span className={clsx(
                     'px-1 py-0.5 rounded cursor-pointer transition',
                     isParam ? 'bg-amber-200 text-amber-800 font-bold' :
                     extractName ? 'bg-green-200 text-green-800 font-bold' :
-                    'hover:bg-gray-100'
+                    'hover:bg-hover'
                   )}
                     onClick={() => isResponse ? toggleExtraction(reqId, path) : toggleParam(reqId, path)}
                     title={isResponse ? (extractName ? t('Extract as: {{name}}', { name: extractName }) : t('Click to extract')) : (isParam ? t('Parameter: {{token}}', { token: `{{${reqParams[path]}}}` }) : t('Click to parameterize'))}
@@ -433,12 +433,12 @@ export const ApiRecorder: React.FC<ApiRecorderProps> = ({
                           <span className="text-xs text-zinc-400 font-medium">
                             {t('Captured Requests ({{n}})', { n: capturedRequests.length })}
                           </span>
-                          <p className="text-[10px] text-zinc-600 mt-0.5">{t('Click request body fields to parameterize, response fields to extract')}</p>
+                          <p className="text-[10px] text-secondary mt-0.5">{t('Click request body fields to parameterize, response fields to extract')}</p>
                         </div>
 
                         <div className="flex-1 overflow-y-auto divide-y divide-zinc-800/50">
                           {capturedRequests.length === 0 ? (
-                            <div className="p-8 text-center text-zinc-600 text-sm">
+                            <div className="p-8 text-center text-secondary text-sm">
                               <ArrowPathIcon className="h-8 w-8 mx-auto mb-2 animate-spin" />
                               {t('Navigate the app to capture API calls...')}
                             </div>
@@ -518,19 +518,19 @@ export const ApiRecorder: React.FC<ApiRecorderProps> = ({
                                         {/* Request side */}
                                         <div>
                                           <div className="flex items-center gap-1.5 mb-1">
-                                            <span className="text-[10px] font-bold text-zinc-300">{t('REQUEST')}</span>
-                                            <span className="text-[10px] text-zinc-600">{t('(click values to parameterize)')}</span>
+                                            <span className="text-[10px] font-bold text-tertiary">{t('REQUEST')}</span>
+                                            <span className="text-[10px] text-secondary">{t('(click values to parameterize)')}</span>
                                           </div>
                                           {req.headers?.['content-type'] && (
-                                            <p className="text-[9px] text-zinc-600 font-mono mb-1">{req.headers['content-type']}</p>
+                                            <p className="text-[9px] text-secondary font-mono mb-1">{req.headers['content-type']}</p>
                                           )}
-                                          <div className="bg-zinc-800/50 rounded-lg p-2 max-h-52 overflow-y-auto border border-zinc-700/50">
+                                          <div className="bg-ink/50 rounded-lg p-2 max-h-52 overflow-y-auto border border-zinc-700/50">
                                             {req.body ? (
                                               typeof req.body === 'object'
                                                 ? renderJsonBody(req.body, req.id, '', false)
-                                                : <pre className="text-xs text-zinc-400 whitespace-pre-wrap">{req.body}</pre>
+                                                : <pre className="text-xs text-tertiary whitespace-pre-wrap">{req.body}</pre>
                                             ) : (
-                                              <span className="text-[10px] text-zinc-600 italic">{t('No body')}</span>
+                                              <span className="text-[10px] text-secondary italic">{t('No body')}</span>
                                             )}
                                           </div>
                                         </div>
@@ -538,7 +538,7 @@ export const ApiRecorder: React.FC<ApiRecorderProps> = ({
                                         {/* Response side */}
                                         <div>
                                           <div className="flex items-center gap-1.5 mb-1">
-                                            <span className="text-[10px] font-bold text-zinc-300">{t('RESPONSE')}</span>
+                                            <span className="text-[10px] font-bold text-tertiary">{t('RESPONSE')}</span>
                                             {req.response ? (
                                               <span className={clsx('text-[10px] font-mono font-bold px-1 rounded',
                                                 req.response.status < 300 ? 'bg-green-900/30 text-green-400' :
@@ -548,20 +548,20 @@ export const ApiRecorder: React.FC<ApiRecorderProps> = ({
                                                 {req.response.status} {req.response.status_text || ''}
                                               </span>
                                             ) : (
-                                              <span className="text-[10px] text-zinc-600 animate-pulse">{t('waiting...')}</span>
+                                              <span className="text-[10px] text-secondary animate-pulse">{t('waiting...')}</span>
                                             )}
-                                            <span className="text-[10px] text-zinc-600">{t('(click values to extract)')}</span>
+                                            <span className="text-[10px] text-secondary">{t('(click values to extract)')}</span>
                                           </div>
                                           {req.response?.content_type && (
-                                            <p className="text-[9px] text-zinc-600 font-mono mb-1">{req.response.content_type}</p>
+                                            <p className="text-[9px] text-secondary font-mono mb-1">{req.response.content_type}</p>
                                           )}
-                                          <div className="bg-zinc-800/50 rounded-lg p-2 max-h-52 overflow-y-auto border border-zinc-700/50">
+                                          <div className="bg-ink/50 rounded-lg p-2 max-h-52 overflow-y-auto border border-zinc-700/50">
                                             {req.response?.body ? (
                                               typeof req.response.body === 'object'
                                                 ? renderJsonBody(req.response.body, req.id, '', true)
-                                                : <pre className="text-xs text-zinc-400 whitespace-pre-wrap">{String(req.response.body).substring(0, 2000)}</pre>
+                                                : <pre className="text-xs text-tertiary whitespace-pre-wrap">{String(req.response.body).substring(0, 2000)}</pre>
                                             ) : (
-                                              <span className="text-[10px] text-zinc-600 italic">{req.response ? t('Empty response') : t('No response yet')}</span>
+                                              <span className="text-[10px] text-secondary italic">{req.response ? t('Empty response') : t('No response yet')}</span>
                                             )}
                                           </div>
                                         </div>

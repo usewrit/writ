@@ -62,6 +62,7 @@ from routers.mcp_server import router as mcp_server_router, connect_router as mc
 from routers.runs import router as runs_router
 from routers.ai_sessions import router as ai_sessions_router
 from routers.crawl import router as crawl_router
+from routers.transfer import router as transfer_router
 
 from security.dependencies import require_platform_admin
 
@@ -732,6 +733,7 @@ app.include_router(mcp_connect_router, prefix="/api")        # /api/mcp/connect-
 app.include_router(runs_router, prefix="/api")
 app.include_router(ai_sessions_router, prefix="/api")     # /api/ai-sessions/* (dispatch proxy)
 app.include_router(crawl_router, prefix="/api")           # /api/crawl/* (Dragnet distributed crawl)
+app.include_router(transfer_router, prefix="/api")        # /api/transfer/* — portable .writ import/export
 
 
 # Root endpoint (API-info JSON). When a built UI is present (see the SPA mount

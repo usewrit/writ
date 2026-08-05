@@ -142,15 +142,15 @@ export const SecureDataFields: React.FC<SecureDataFieldsProps> = ({
                 readOnly={vaultRef}
                 className={clsx(
                   'w-1/3 px-3 py-2 text-xs border rounded-lg bg-surface text-ink placeholder:text-tertiary',
-                  field.isSecret ? 'border-zinc-400' : 'border-border',
+                  field.isSecret ? 'border-border-strong' : 'border-border',
                   vaultRef && 'opacity-80',
                 )}
               />
 
               {vaultRef ? (
                 /* Linked vault secret — read-only reference; value lives in the vault */
-                <span className="flex-1 flex items-center gap-1.5 px-3 py-2 text-xs border border-zinc-400 rounded-lg bg-hover text-secondary font-mono">
-                  <ShieldCheckIcon className="w-3.5 h-3.5 text-zinc-700 shrink-0" />
+                <span className="flex-1 flex items-center gap-1.5 px-3 py-2 text-xs border border-border-strong rounded-lg bg-hover text-secondary font-mono">
+                  <ShieldCheckIcon className="w-3.5 h-3.5 text-ink shrink-0" />
                   {field.value}
                 </span>
               ) : (
@@ -162,7 +162,7 @@ export const SecureDataFields: React.FC<SecureDataFieldsProps> = ({
                   placeholder={field.isSecret ? '••••••••' : t('Value')}
                   className={clsx(
                     'flex-1 px-3 py-2 text-xs border rounded-lg bg-surface text-ink placeholder:text-tertiary',
-                    field.isSecret ? 'border-zinc-400' : 'border-border',
+                    field.isSecret ? 'border-border-strong' : 'border-border',
                   )}
                 />
               )}

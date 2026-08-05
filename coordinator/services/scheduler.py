@@ -263,16 +263,174 @@ async def _max_concurrent_runs(db) -> int:
     return max(1, val)
 
 
+def scheduled_recurrence_from_blocks(blocks) -> Optional[dict]:
+    """Extract the recurrence of a SCHEDULED-root automation from its block tree.
+
+    Returns ``{kind, interval_ms, time, days, tz}`` when `blocks` is a block tree
+    whose ROOT event block (``type == "event"`` with no ``parentId``) has
+    ``blockType == "scheduled"``, reading the recurrence from that block's
+    ``config`` (``mode`` -> kind; ``interval_ms`` or ``interval_minutes * 60000``;
+    ``time``; ``days``; ``tz``). Returns None for any non-scheduled-root automation.
+
+    Mirrors the cloud's `central_scheduler.scheduled_recurrence_from_blocks` and
+    the desktop daemon's `scheduled_recurrence` (scheduled_automations.rs) — one
+    block shape, three runtimes. The values feed
+    `schedule_recurrence.compute_next_run(kind, now, interval_ms, time, days, tz)`
+    directly.
+    """
+    if not isinstance(blocks, list):
+        return None
+    root = None
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") != "event":
+            continue
+        if block.get("parentId"):
+            continue
+        root = block
+        break
+    if root is None:
+        return None
+    if (root.get("blockType") or root.get("block_type")) != "scheduled":
+        return None
+
+    cfg = root.get("config") or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    # `mode` (block naming) maps to schedule_recurrence's `kind`. Absent ⇒ interval.
+    kind = (cfg.get("mode") or "interval")
+    if isinstance(kind, str):
+        kind = kind.lower()
+    else:
+        kind = "interval"
+
+    # interval_ms wins; interval_minutes is a back-compat shim (×60000).
+    interval_ms = cfg.get("interval_ms")
+    if interval_ms is None and cfg.get("interval_minutes") is not None:
+        try:
+            interval_ms = int(cfg["interval_minutes"]) * 60000
+        except (TypeError, ValueError):
+            interval_ms = None
+
+    days = cfg.get("days")
+    if not isinstance(days, list):
+        days = None
+
+    return {
+        "kind": kind,
+        "interval_ms": interval_ms,
+        "time": cfg.get("time"),
+        "days": days,
+        "tz": cfg.get("tz"),
+    }
+
+
+async def _dispatch_due_scheduled_automations(db, now: datetime) -> int:
+    """Fire all DUE standalone SCHEDULED automations (trigger rules whose ROOT
+    event block is blockType == "scheduled") as of `now`. Returns the count fired.
+
+    Mirrors the workflow due-scan lane above and the cloud's identical lane: for
+    each due rule ADVANCE FIRST (stamp last_triggered_at = now, recompute
+    next_scheduled_at from the block's recurrence config) and commit, so a slow or
+    failing fire can't leave the rule perpetually due, THEN fire via
+    UnifiedTriggerService.process_scheduled_automation — the same firing path the
+    event-driven automations use, so guardrails (cooldown / max_fires) and block
+    processing apply unchanged. Per-rule failures are isolated (logged + continue)
+    so one bad automation can't wedge the tick.
+    """
+    from models.trigger_rule import TriggerRule
+    from services.schedule_recurrence import compute_next_run
+    from services.unified_trigger_service import UnifiedTriggerService
+
+    result = await db.execute(
+        select(TriggerRule).where(
+            TriggerRule.enabled == True,  # noqa: E712
+            TriggerRule.next_scheduled_at.isnot(None),
+            TriggerRule.next_scheduled_at <= now,
+        )
+    )
+    due_rules = result.scalars().all()
+    if not due_rules:
+        return 0
+
+    fired = 0
+    for rule in due_rules:
+        # Re-confirm this is genuinely a scheduled-root automation and read its
+        # recurrence from the block tree. If it isn't (e.g. blocks were rewritten
+        # to a non-scheduled root while a stale next_scheduled_at lingered), clear
+        # the cadence so it drops out of the due index instead of firing every tick.
+        recurrence = scheduled_recurrence_from_blocks(rule.blocks)
+        if recurrence is None:
+            rule.next_scheduled_at = None
+            await db.commit()
+            continue
+
+        # ADVANCE FIRST: recompute the next occurrence from the block config, then
+        # COMMIT — so even if the fire below is slow or raises, the rule is no
+        # longer due (it retries next occurrence). Deliberately does NOT stamp
+        # last_triggered_at: due-ness is purely next_scheduled_at, and the cooldown
+        # guardrail measures from last_triggered_at — stamping it here would make
+        # any scheduled automation with a cooldown_minutes suppress ITSELF on every
+        # tick. The service stamps it on an actual successful fire.
+        rule.next_scheduled_at = compute_next_run(
+            recurrence["kind"],
+            now,
+            recurrence["interval_ms"],
+            recurrence["time"],
+            recurrence["days"],
+            recurrence["tz"],
+        )
+        await db.commit()
+
+        # FIRE via the shared firing path. process_scheduled_automation re-stamps
+        # last_triggered_at/trigger_count + commits its own execution record; the
+        # cadence advance above is what guards against double-fire.
+        try:
+            await UnifiedTriggerService(db).process_scheduled_automation(rule)
+            fired += 1
+        except Exception as e:
+            logger.error(
+                "scheduled_automations: fire failed for rule %s: %s", rule.id, e,
+            )
+            # Roll back any partial fire state so the session stays clean for the
+            # next due rule; the cadence was already advanced + committed above.
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
+    return fired
+
+
 async def scheduled_workflows_tick() -> None:
     """Dispatch due schedule_enabled workflows to the fleet, gated by a semaphore
     sized to max_concurrent_runs. Advances next_scheduled_at so a slow/queued run
-    can't stack up."""
+    can't stack up.
+
+    Also fires due SCHEDULED AUTOMATIONS (time-rooted trigger rules) — same tick,
+    same cadence: both are "scan a next_scheduled_at index, advance, dispatch",
+    and a separate job id would buy nothing but registration ceremony."""
     from database import AsyncSessionLocal
     from models.automation_workflow import AutomationWorkflow
 
     async with AsyncSessionLocal() as db:
         now = datetime.now(timezone.utc)
         limit = await _max_concurrent_runs(db)
+
+        # Time-rooted AUTOMATIONS first (cheap: the due index is NULL for every
+        # event-driven rule). Isolated so a bad rule can't cost the workflow lane.
+        try:
+            fired = await _dispatch_due_scheduled_automations(db, now)
+            if fired:
+                logger.info("scheduled_automations: %d automation(s) fired", fired)
+        except Exception as e:
+            logger.error("scheduled_automations: lane failed: %s", e)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
 
         # Due-scan: interval workflows need a schedule_interval_ms; daily/weekly
         # workflows have a NULL interval but a computed next_scheduled_at, so gate
@@ -424,9 +582,23 @@ async def housekeeping_tick() -> None:
         # the purge above.
         files_swept = await _sweep_stored_files(now)
 
+    # Staged transfer packages hold DECRYPTED work (spec §10), so they are swept on
+    # their own short TTL rather than left until someone finishes an abandoned import
+    # wizard. Scrubs the row's payload, deletes the staged file, and reclaims files
+    # whose row is already gone (the crash-between-write-and-commit case). Own
+    # session; never fatal to the rest of housekeeping.
+    transfers_swept = 0
+    try:
+        from services import transfer_import_service as _transfer
+
+        async with AsyncSessionLocal() as t_db:
+            transfers_swept = await _transfer.sweep_expired(t_db)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("housekeeping: staged transfer sweep failed: %s", exc)
+
     logger.info(
-        "housekeeping: purged runs=%d uptime=%d changes=%d notif_logs=%d files=%d",
-        runs_purged, uptime_purged, changes_purged, notif_purged, files_swept,
+        "housekeeping: purged runs=%d uptime=%d changes=%d notif_logs=%d files=%d transfers=%d",
+        runs_purged, uptime_purged, changes_purged, notif_purged, files_swept, transfers_swept,
     )
 
 

@@ -98,7 +98,7 @@ export function AuthPanel({ workflow }: { workflow: AutomationWorkflow }) {
             <button
               onClick={clear}
               disabled={busy}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-secondary border border-border rounded-lg hover:bg-zinc-50 disabled:opacity-50 transition-colors shrink-0"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-secondary border border-border rounded-lg hover:bg-canvas disabled:opacity-50 transition-colors shrink-0"
             >
               <TrashIcon className="w-3.5 h-3.5" />
               {busy ? t('Clearing…') : t('Clear session')}

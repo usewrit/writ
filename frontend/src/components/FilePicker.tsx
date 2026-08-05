@@ -234,7 +234,7 @@ export const FilePicker: React.FC<FilePickerProps> = ({
         {/* List */}
         {loading ? (
           <div className="flex items-center justify-center py-12">
-            <div className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-800" />
+            <div className="h-5 w-5 animate-spin rounded-full border-2 border-border border-t-zinc-800" />
           </div>
         ) : visible.length === 0 ? (
           <div className="rounded-xl border border-border bg-canvas px-4 py-8 text-center">

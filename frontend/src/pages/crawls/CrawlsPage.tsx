@@ -31,6 +31,7 @@ import {
 import { CrawlStatusChip, CrawlProgressBar, crawlStatusMeta } from '../../components/dragnet/CrawlStatus';
 import { CrawlDetailView } from '../../components/dragnet/CrawlDetailView';
 import { AuthImage } from '../../components/common/AuthImage';
+import { EmptyHero } from '../../components/ui';
 
 function hostOf(url: string): string {
   try {
@@ -379,22 +380,24 @@ export const CrawlsPage: React.FC = () => {
           )}
 
           {all.length === 0 ? (
-            <div className="flex flex-1 flex-col items-center justify-center px-6 py-10 text-center">
-              <GlobeAltIcon className="h-7 w-7 text-tertiary" />
-              <p className="mt-3 text-[13px] font-medium text-ink">{t('No crawls yet')}</p>
-              <p className="mt-1 max-w-[15rem] text-[11px] text-secondary">
-                {t('Turn any website into a dataset. Point Harvest at a URL and it collects every page for you.')}
-              </p>
-              <Button className="mt-4" size="sm" onClick={goNew}>
+            <EmptyHero
+              icon={GlobeAltIcon}
+              title={t('No crawls yet')}
+              description={t('Turn any website into a dataset. Point Harvest at a URL and it collects every page for you.')}
+              className="flex-1 py-10"
+            >
+              <Button size="sm" onClick={goNew}>
                 <PlusIcon className="h-4 w-4" />
                 {t('New crawl')}
               </Button>
-            </div>
+            </EmptyHero>
           ) : visible.length === 0 ? (
-            <div className="flex flex-1 flex-col items-center justify-center px-6 py-10 text-center">
-              <p className="text-[13px] font-medium text-ink">{t('Nothing here')}</p>
-              <p className="mt-1 text-[11px] text-secondary">{t('No crawls match this filter or search.')}</p>
-            </div>
+            <EmptyHero
+              icon={GlobeAltIcon}
+              title={t('Nothing here')}
+              description={t('No crawls match this filter or search.')}
+              className="flex-1 py-10"
+            />
           ) : (
             <ScrollArea className="flex-1" viewportClassName="px-2 py-2" fade="chrome">
               <Stagger className="grid gap-0.5" staggerMs={16}>
@@ -419,17 +422,17 @@ export const CrawlsPage: React.FC = () => {
             {selected ? (
               <CrawlDetailView crawlId={selected.id} onDeleted={() => setSelectedId(null)} />
             ) : (
-              <div className="flex flex-1 flex-col items-center justify-center px-8 text-center">
-                <GlobeAltIcon className="h-8 w-8 text-tertiary" />
-                <p className="mt-3 text-[13px] font-medium text-ink">{t('Select a crawl')}</p>
-                <p className="mt-1 max-w-xs text-[12px] text-tertiary">
-                  {t('Pick a crawl to see its live progress and data, or start a new one.')}
-                </p>
-                <Button className="mt-4" size="sm" variant="secondary" onClick={goNew}>
+              <EmptyHero
+                icon={GlobeAltIcon}
+                title={t('Select a crawl')}
+                description={t('Pick a crawl to see its live progress and data, or start a new one.')}
+                className="flex-1"
+              >
+                <Button size="sm" variant="secondary" onClick={goNew}>
                   <PlusIcon className="h-4 w-4" />
                   {t('New crawl')}
                 </Button>
-              </div>
+              </EmptyHero>
             )}
           </SwapFade>
         </div>

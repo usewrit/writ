@@ -58,7 +58,7 @@ export const NotificationRow: React.FC<Props> = ({ notification: n, compact, onA
         className={clsx(
           'shrink-0 rounded-xl flex items-center justify-center',
           compact ? 'w-7 h-7' : 'w-9 h-9',
-          unread ? 'bg-ink/10 text-ink' : 'bg-zinc-100 text-zinc-400',
+          unread ? 'bg-ink/10 text-ink' : 'bg-hover text-tertiary',
         )}
       >
         <NotificationGlyph icon={Icon} className={compact ? 'h-4 w-4' : 'h-5 w-5'} />

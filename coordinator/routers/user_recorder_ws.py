@@ -2160,6 +2160,7 @@ async def _handle_task_progress(agent_id: str, msg: dict):
     if str(task_id) not in _dispatched_tasks.get(agent_id, set()):
         return
 
+    crawl_shim = None
     try:
         async with AsyncSessionLocal() as db:
             from models.automation_task import AutomationTask
@@ -2176,8 +2177,37 @@ async def _handle_task_progress(agent_id: str, msg: dict):
                 if msg.get("message"):
                     task.progress_message = str(msg["message"])[:500]
                 await db.commit()
+
+                # CRAWL SHARDS: the frame carries the batch's running page tally
+                # (`crawl_pages_done` / `crawl_pages_failed` — deliberately distinct
+                # from the `step`/`max_steps` run-progress fields that share this
+                # frame type). Snapshot what the credit needs; it runs BELOW, after
+                # this session is closed — `on_shard_progress` opens its own session
+                # and waits on the per-crawl shard lock, and holding a pooled
+                # connection across that wait is the pool exhaustion the completion
+                # path is careful to avoid.
+                if "crawl_pages_done" in msg or "crawl_pages_failed" in msg:
+                    from types import SimpleNamespace
+                    crawl_shim = SimpleNamespace(
+                        id=int(task_id), trigger_context=task.trigger_context or {}
+                    )
     except Exception:
         pass
+
+    # Credit the running tally so the crawl's counters move DURING a shard instead of
+    # only when the whole batch returns: a 25-URL browser-lane shard runs for over a
+    # minute, and a crawl frozen on page 1 for that long is one an operator cancels.
+    # Idempotent (see on_shard_progress); an agent that sends nothing is unaffected.
+    if crawl_shim is not None:
+        try:
+            from services.crawl_orchestrator import on_shard_progress
+            await on_shard_progress(
+                crawl_shim,
+                int(msg.get("crawl_pages_done") or 0),
+                int(msg.get("crawl_pages_failed") or 0),
+            )
+        except Exception:
+            pass
 
 
 async def _handle_finding(agent_id: str, msg: dict):

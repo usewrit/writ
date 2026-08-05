@@ -6,6 +6,7 @@ import { useQuery } from '../../hooks/useQuery';
 import { inboxApi, NotificationItem } from '../../api/inbox';
 import { useNotifications } from '../../providers/NotificationProvider';
 import { NotificationRow } from './NotificationRow';
+import { Button, EmptyHero } from '../ui';
 
 // Full /notifications inbox page. Loads a deeper, paginated list than
 // the bell dropdown; reuses NotificationRow + the standard loading/error/empty
@@ -79,39 +80,31 @@ export const NotificationsPage: React.FC = () => {
           {/* Loading */}
           {initialLoading && (
             <div className="flex flex-col items-center justify-center min-h-[50vh] text-center">
-              <div className="w-2 h-2 rounded-full bg-zinc-300 animate-pulse mb-3" />
+              <div className="w-2 h-2 rounded-full bg-active animate-pulse mb-3" />
               <p className="text-xs text-tertiary">{t('Loading…')}</p>
             </div>
           )}
 
           {/* Error */}
           {error && items.length === 0 && (
-            <div className="flex flex-col items-center justify-center min-h-[50vh] text-center">
-              <div className="w-12 h-12 rounded-2xl bg-zinc-100 border border-zinc-200 flex items-center justify-center mb-4">
-                <ExclamationTriangleIcon className="h-6 w-6 text-zinc-400" />
-              </div>
-              <p className="text-sm font-medium text-ink">{t("Couldn't load notifications")}</p>
-              <p className="text-xs text-secondary mt-1">{error}</p>
-              <button
-                onClick={() => refresh()}
-                className="mt-4 px-4 py-2 bg-accent-strong text-accent-on text-sm font-medium rounded-lg hover:bg-accent-strong/90 transition-colors"
-              >
-                {t('Retry')}
-              </button>
-            </div>
+            <EmptyHero
+              icon={ExclamationTriangleIcon}
+              title={t("Couldn't load notifications")}
+              description={error}
+              className="min-h-[50vh]"
+            >
+              <Button onClick={() => refresh()} size="sm">{t('Retry')}</Button>
+            </EmptyHero>
           )}
 
           {/* Empty */}
           {!initialLoading && !error && items.length === 0 && (
-            <div className="flex flex-col items-center justify-center min-h-[50vh] text-center">
-              <div className="w-12 h-12 rounded-2xl bg-zinc-100 border border-zinc-200 flex items-center justify-center mb-4">
-                <BellIcon className="h-6 w-6 text-zinc-400" />
-              </div>
-              <p className="text-sm font-medium text-ink">{t('No notifications yet')}</p>
-              <p className="text-xs text-secondary mt-1">
-                {t('Updates about your runs, payouts and listings will appear here')}
-              </p>
-            </div>
+            <EmptyHero
+              icon={BellIcon}
+              title={t('No notifications yet')}
+              description={t('Updates about your runs, payouts and listings will appear here')}
+              className="min-h-[50vh]"
+            />
           )}
 
           {/* List */}

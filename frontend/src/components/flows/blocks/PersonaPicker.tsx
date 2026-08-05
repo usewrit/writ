@@ -54,7 +54,7 @@ export const PersonaPicker: React.FC<PersonaPickerProps> = ({
 
   return (
     <div className="space-y-1.5">
-      <label className="flex items-center gap-1.5 text-xs font-medium text-zinc-500">
+      <label className="flex items-center gap-1.5 text-xs font-medium text-secondary">
         <UserCircleIcon className="w-4 h-4" />
         {label || t('Persona')}
       </label>

@@ -567,6 +567,7 @@ class RecorderCapacityManager:
         required_tier: str = None,
         capacity: dict = None,
         running_override: dict = None,
+        exclude_agents: set = None,
     ) -> Optional[dict]:
         """Try to acquire a recorder slot respecting the per-class reservation
         split (direct / called / scheduled), with idle-slot borrowing.
@@ -577,6 +578,11 @@ class RecorderCapacityManager:
         BUYER's own agents, so a queued consumer run never lands on the creator's
         local agent (its credentials would otherwise execute on the creator's
         machine). Trusted cloud remains tenant-agnostic.
+
+        ``exclude_agents`` are agents this work was just REFUSED on (a crawl shard
+        carries them as ``_avoid_agents`` after a host blocked that agent's IP). The
+        selector treats them as a last resort rather than a hard filter — see
+        ``_pick_recorder`` — so a single-agent fleet still makes progress.
 
         ``capacity`` lets a batch caller (the queue processor / central scheduler)
         pass a capacity snapshot it already computed this cycle, so we don't
@@ -617,6 +623,7 @@ class RecorderCapacityManager:
             is_scheduled=(tt == "scheduled"),
             traffic_type=tt,
             required_tier=required_tier,
+            exclude_agents=exclude_agents,
         )
 
 

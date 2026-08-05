@@ -127,7 +127,7 @@ const StepFrame: React.FC<{
 }> = ({ title, subtitle, onBack, onSkipAll, onSkip, primaryLabel, onPrimary, busy, disabled, children }) => {
   const { t } = useTranslation();
   return (
-    <div className="bg-white rounded-2xl shadow-sm border border-ink/20 p-6">
+    <div className="bg-surface rounded-2xl shadow-sm border border-ink/20 p-6">
       <div className="flex items-start justify-between gap-3 mb-4">
         <div>
           <h1 className="text-base font-semibold text-ink">{title}</h1>
@@ -301,7 +301,7 @@ const AiStep: React.FC<{ onNext: () => void; onBack: () => void; onSkipAll: () =
         <div className="flex gap-1.5">
           {AI_PROVIDERS.map((p) => (
             <Chip key={p.id} active={provider === p.id} onClick={() => setProvider(p.id)}>
-              <span className={clsx('w-4 h-4 rounded flex items-center justify-center text-[9px] font-bold', provider === p.id ? 'bg-white/20' : 'bg-hover')}>{p.mono}</span>
+              <span className={clsx('w-4 h-4 rounded flex items-center justify-center text-[9px] font-bold', provider === p.id ? 'bg-surface/20' : 'bg-hover')}>{p.mono}</span>
               {p.label}
             </Chip>
           ))}
@@ -504,7 +504,7 @@ const AgentStep: React.FC<{ onNext: () => void; onBack: () => void; onSkipAll: (
         <div className="rounded-lg border border-border bg-canvas px-3 py-2.5 text-[13px] text-secondary">{error}</div>
       ) : !pair ? (
         <div className="flex items-center gap-2 text-sm text-secondary py-2">
-          <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-800" /> {t('Preparing a connect token…')}
+          <div className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-zinc-800" /> {t('Preparing a connect token…')}
         </div>
       ) : (
         <div className="space-y-3">
@@ -523,7 +523,7 @@ const AgentStep: React.FC<{ onNext: () => void; onBack: () => void; onSkipAll: (
           )}
           <div className="relative">
             <pre className="text-[11px] leading-relaxed font-mono bg-ink text-white/90 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap break-all">{command}</pre>
-            <button type="button" onClick={copy} className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium bg-white/15 text-white rounded hover:bg-white/25 transition-colors">
+            <button type="button" onClick={copy} className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium bg-surface/15 text-white rounded hover:bg-surface/25 transition-colors">
               <ClipboardDocumentIcon className="w-3 h-3" /> {t('Copy')}
             </button>
           </div>
@@ -531,7 +531,7 @@ const AgentStep: React.FC<{ onNext: () => void; onBack: () => void; onSkipAll: (
             {connected ? (
               <><CheckCircleIcon className="w-4 h-4" /> {t('Agent connected — you\'re ready to run work.')}</>
             ) : (
-              <><div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-800" /> {t('Waiting for the agent to come online…')}</>
+              <><div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-border border-t-zinc-800" /> {t('Waiting for the agent to come online…')}</>
             )}
           </div>
         </div>
@@ -592,7 +592,7 @@ export const Setup: React.FC = () => {
   };
 
   if (checking) {
-    return <div className="min-h-screen flex items-center justify-center bg-[#EDEBE8]"><div className="h-6 w-6 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-800" /></div>;
+    return <div className="min-h-screen flex items-center justify-center bg-[#EDEBE8]"><div className="h-6 w-6 animate-spin rounded-full border-2 border-border border-t-zinc-800" /></div>;
   }
 
   return (
@@ -606,7 +606,7 @@ export const Setup: React.FC = () => {
 
         <Fade on={step}>
           {step === 'account' && (
-            <div className="bg-white rounded-2xl shadow-sm border border-ink/20 p-6">
+            <div className="bg-surface rounded-2xl shadow-sm border border-ink/20 p-6">
               <h1 className="text-base font-semibold text-ink mb-1">{t('Welcome — create your account')}</h1>
               <p className="text-[13px] text-secondary mb-5 leading-relaxed">{t('This is the single admin for your self-hosted coordinator.')}</p>
               <form onSubmit={createAccount} className="space-y-3.5">
@@ -642,7 +642,7 @@ export const Setup: React.FC = () => {
           {step === 'agent' && <AgentStep onNext={next} onBack={back} onSkipAll={skipAll} onConnected={() => setDone((d) => ({ ...d, agent: true }))} />}
 
           {step === 'done' && (
-            <div className="bg-white rounded-2xl shadow-sm border border-ink/20 p-6">
+            <div className="bg-surface rounded-2xl shadow-sm border border-ink/20 p-6">
               <div className="flex items-center gap-2 mb-1">
                 <CheckCircleIcon className="w-5 h-5 text-emerald-500" />
                 <h1 className="text-base font-semibold text-ink">{t("You're all set")}</h1>

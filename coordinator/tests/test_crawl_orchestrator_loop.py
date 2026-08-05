@@ -64,8 +64,48 @@ async def _fresh_schema():
     await get_redis().flushall()
 
 
+def _setattr_compatible(monkeypatch, target, name, replacement):
+    """`monkeypatch.setattr`, but first prove the stub can absorb every argument
+    the REAL function accepts.
+
+    A stub silently rots when the function it stands in for gains a parameter: the
+    patch still applies, and the mismatch only surfaces as a ``TypeError`` thrown
+    from deep inside the code under test — which reads like a product bug, not a
+    stale double. (That is exactly how `auth=` slipped past when login-before-crawl
+    was added.) Checking here fails at the patch site with a message naming the
+    parameter that drifted.
+    """
+    import inspect
+
+    real = getattr(target, name)
+    real_params = inspect.signature(real).parameters
+    stub_params = inspect.signature(replacement).parameters
+    absorbs_any = any(
+        p.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
+        for p in stub_params.values()
+    )
+    if not absorbs_any:
+        missing = [
+            pname for pname, p in real_params.items()
+            if pname not in stub_params
+            and p.kind not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
+        ]
+        assert not missing, (
+            f"stub for {getattr(target, '__name__', target)}.{name} is stale: the real "
+            f"function now takes {missing} — add {'it' if len(missing) == 1 else 'them'} "
+            f"to the stub so this test keeps exercising the real call."
+        )
+    monkeypatch.setattr(target, name, replacement)
+
+
 def _stub_network(monkeypatch, sitemap_urls):
-    """Neutralise every egress seam the crawl loop touches."""
+    """Neutralise every egress seam the crawl loop touches.
+
+    Each stub mirrors the real signature (including keyword-only params like the
+    `auth` session threaded through by login-before-crawl) and is installed via
+    `_setattr_compatible`, so a future signature change fails here rather than
+    somewhere inside the orchestrator.
+    """
     from services import crawl_orchestrator as co
     from services import robots_guard, url_policy
 
@@ -76,26 +116,26 @@ def _stub_network(monkeypatch, sitemap_urls):
     async def _check_url(url, **kw):
         return _Ok()
 
-    async def _robots_ok(url, respect_robots=True):
+    async def _robots_ok(url, *, respect_robots=True):
         return True
 
-    async def _sitemap(seed_url):
+    async def _sitemap(seed_url, *, auth=None):
         return list(sitemap_urls)
 
-    async def _harvest(seed_url, cap=200):
+    async def _harvest(seed_url, *, cap=200, auth=None):
         return []
 
     async def _ensure_loaded(db):
         return None
 
-    monkeypatch.setattr(url_policy, "check_url", _check_url)
-    monkeypatch.setattr(co.url_policy, "check_url", _check_url)
-    monkeypatch.setattr(robots_guard, "is_allowed", _robots_ok)
-    monkeypatch.setattr(co.robots_guard, "is_allowed", _robots_ok)
-    monkeypatch.setattr(co, "_discover_sitemap_urls", _sitemap)
-    monkeypatch.setattr(co, "_harvest_seed_links", _harvest)
+    _setattr_compatible(monkeypatch, url_policy, "check_url", _check_url)
+    _setattr_compatible(monkeypatch, co.url_policy, "check_url", _check_url)
+    _setattr_compatible(monkeypatch, robots_guard, "is_allowed", _robots_ok)
+    _setattr_compatible(monkeypatch, co.robots_guard, "is_allowed", _robots_ok)
+    _setattr_compatible(monkeypatch, co, "_discover_sitemap_urls", _sitemap)
+    _setattr_compatible(monkeypatch, co, "_harvest_seed_links", _harvest)
     from services import domain_guard
-    monkeypatch.setattr(domain_guard, "ensure_loaded", _ensure_loaded)
+    _setattr_compatible(monkeypatch, domain_guard, "ensure_loaded", _ensure_loaded)
 
     # start_crawl fires the seeder as a DETACHED task. Neuter it so each test
     # drives `_seed_inner` itself and owns the timing (a second seed pass would
@@ -535,3 +575,184 @@ def test_sweep_reaps_stale_shard_and_requeues(loop, monkeypatch):
     urls, task_status = loop.run_until_complete(main())
     assert "https://stale.example/x" in urls, "a reaped shard's URLs must be requeued"
     assert task_status == "failed"
+
+
+def test_live_shard_progress_advances_counters_without_double_counting(loop, monkeypatch):
+    """A running shard reports its page tally; the crawl's counters move BEFORE the
+    batch returns, and the completion path credits only the remainder.
+
+    Why this matters: a shard is the accounting unit, so `pages_done` could not move
+    for the whole life of a shard. On the browser lane that is 25 URLs at seconds
+    each — over a minute of a run reading as frozen on page 1, which is what
+    operators cancelled (and the shard's results were then discarded as late).
+
+    The invariant under test is that live crediting is EXACTLY additive: whatever
+    sequence of progress frames arrives, the totals after completion are the same as
+    if none had.
+    """
+    from services import crawl_orchestrator as co
+    from database import AsyncSessionLocal
+    from models.crawl_job import CrawlJob
+    from types import SimpleNamespace
+
+    _stub_network(monkeypatch, [])
+
+    async def main():
+        await _fresh_schema()
+        async with AsyncSessionLocal() as db:
+            crawl = await co.start_crawl(
+                db, seed_url="https://example.com", page_budget=100, max_depth=0)
+            cid = crawl.id
+            batch = [{"url": f"https://example.com/{i}", "depth": 0} for i in range(4)]
+            task = await co._mint_shard_task(db, crawl, batch)
+            tid = task.id
+            task.status = "running"
+            await db.commit()
+
+        shim = SimpleNamespace(
+            id=tid, trigger_context={co.CTX_CRAWL_ID: cid, co.CTX_CRAWL_SHARD: batch})
+
+        # Two pages in, mid-shard.
+        await co.on_shard_progress(shim, done=2, failed=0)
+        async with AsyncSessionLocal() as db:
+            mid = await db.get(CrawlJob, cid)
+            mid_done, mid_failed = mid.pages_done, mid.pages_failed
+
+        # A redelivered frame with the SAME tally must add nothing.
+        await co.on_shard_progress(shim, done=2, failed=0)
+        # …and one more page, plus a failure.
+        await co.on_shard_progress(shim, done=3, failed=1)
+        async with AsyncSessionLocal() as db:
+            late = await db.get(CrawlJob, cid)
+            late_done, late_failed = late.pages_done, late.pages_failed
+
+        # The shard finishes: 3 ok + 1 failed — exactly what progress last reported.
+        result_data = {
+            "engine": "browser",
+            "pages": [{"url": f"https://example.com/{i}", "status": "ok"} for i in range(3)],
+            "failed": [{"url": "https://example.com/3", "reason": "timeout"}],
+            "discovered_links": [],
+            "extracted_data": [],
+        }
+        await co.complete_shard_task(
+            tid, cid, success=True, result_data=result_data, reporter_agent="agent-1")
+
+        async with AsyncSessionLocal() as db:
+            row = await db.get(CrawlJob, cid)
+            return (mid_done, mid_failed, late_done, late_failed,
+                    row.pages_done, row.pages_failed, row.shards_done)
+
+    (mid_done, mid_failed, late_done, late_failed,
+     final_done, final_failed, shards_done) = loop.run_until_complete(main())
+
+    assert (mid_done, mid_failed) == (2, 0), "counters must move mid-shard"
+    assert (late_done, late_failed) == (3, 1), "a repeated tally adds nothing; a higher one adds the delta"
+    # The completion path already saw all 4 credited, so it adds nothing further.
+    assert (final_done, final_failed) == (3, 1), (
+        f"pages must be counted exactly once, got {final_done} done / {final_failed} failed")
+    assert shards_done == 1
+
+
+def test_shard_progress_is_ignored_after_the_crawl_is_terminal(loop, monkeypatch):
+    """A cancelled crawl must not be resurrected by a frame from a shard still
+    running on its agent — cancel is an INSTANT stop, and its in-flight shards
+    orphan-drain (the same reason on_shard_complete bails on is_terminal)."""
+    from services import crawl_orchestrator as co
+    from database import AsyncSessionLocal
+    from models.crawl_job import CrawlJob
+    from types import SimpleNamespace
+
+    _stub_network(monkeypatch, [])
+
+    async def main():
+        await _fresh_schema()
+        async with AsyncSessionLocal() as db:
+            crawl = await co.start_crawl(
+                db, seed_url="https://example.com", page_budget=100, max_depth=0)
+            cid = crawl.id
+            batch = [{"url": "https://example.com/a", "depth": 0}]
+            task = await co._mint_shard_task(db, crawl, batch)
+            tid = task.id
+            task.status = "running"
+            await db.commit()
+            await co.cancel_crawl(db, crawl)
+            await db.commit()
+
+        shim = SimpleNamespace(
+            id=tid, trigger_context={co.CTX_CRAWL_ID: cid, co.CTX_CRAWL_SHARD: batch})
+        await co.on_shard_progress(shim, done=5, failed=0)
+
+        async with AsyncSessionLocal() as db:
+            row = await db.get(CrawlJob, cid)
+            return row.status, row.pages_done
+
+    status, pages_done = loop.run_until_complete(main())
+    assert status == "cancelled"
+    assert pages_done == 0, "a late frame must not credit pages to a terminal crawl"
+
+
+def test_progress_frame_from_the_wire_moves_the_crawl_counter(loop, monkeypatch):
+    """The whole path, as an agent drives it: a `task_progress` frame arrives on the
+    recorder socket and the crawl's page counter moves — no `task_result` involved.
+
+    This is the seam the fix lives on. `_handle_task_progress` used to do nothing but
+    stamp a status string, so a crawl's counters could not move until a whole 25-URL
+    shard came back; on the browser lane that is a minute-plus of a run that looks
+    stuck on page 1.
+    """
+    from services import crawl_orchestrator as co
+    from routers import user_recorder_ws as ws
+    from database import AsyncSessionLocal
+    from models.crawl_job import CrawlJob
+
+    _stub_network(monkeypatch, [])
+
+    async def main():
+        await _fresh_schema()
+        async with AsyncSessionLocal() as db:
+            crawl = await co.start_crawl(
+                db, seed_url="https://example.com", page_budget=100, max_depth=0)
+            cid = crawl.id
+            batch = [{"url": f"https://example.com/{i}", "depth": 0} for i in range(6)]
+            task = await co._mint_shard_task(db, crawl, batch)
+            tid = task.id
+            task.status = "running"
+            # The frame is only trusted from the agent the shard was dispatched to.
+            task.executor_agent_id = "agent-7"
+            await db.commit()
+
+        ws._dispatched_tasks["agent-7"] = {str(tid)}
+        try:
+            await ws._handle_task_progress("agent-7", {
+                "type": "task_progress",
+                "task_id": str(tid),
+                "crawl_pages_done": 4,
+                "crawl_pages_failed": 1,
+                "crawl_pages_total": 6,
+                "message": "5/6 pages",
+            })
+            async with AsyncSessionLocal() as db:
+                credited = await db.get(CrawlJob, cid)
+                credited_done, credited_failed = credited.pages_done, credited.pages_failed
+
+            # An agent the shard was NOT dispatched to must not move anything.
+            ws._dispatched_tasks["agent-9"] = {str(tid)}
+            await ws._handle_task_progress("agent-9", {
+                "type": "task_progress",
+                "task_id": str(tid),
+                "crawl_pages_done": 99,
+                "crawl_pages_failed": 0,
+            })
+        finally:
+            ws._dispatched_tasks.pop("agent-7", None)
+            ws._dispatched_tasks.pop("agent-9", None)
+
+        async with AsyncSessionLocal() as db:
+            row = await db.get(CrawlJob, cid)
+            return credited_done, credited_failed, row.pages_done, row.pages_failed
+
+    done, failed, after_stranger, after_stranger_failed = loop.run_until_complete(main())
+
+    assert (done, failed) == (4, 1), "the frame's tally must land on the crawl row"
+    assert (after_stranger, after_stranger_failed) == (4, 1), (
+        "only the assigned executor may report this shard's progress")

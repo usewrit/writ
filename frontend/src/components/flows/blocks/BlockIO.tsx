@@ -5,7 +5,8 @@ import clsx from 'clsx';
 import { ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import { FlowBlock } from '../types';
 import { blockOutputTokens, blockInputTokens } from '../blockCatalog';
-import { useFlowBuilder, getAncestorChain } from '../FlowBuilderContext';
+import { useFlowState, getAncestorChain } from '../FlowBuilderContext';
+import { shallow } from 'zustand/shallow';
 
 interface BlockIOProps {
   block: FlowBlock;
@@ -31,8 +32,10 @@ const prefixOf = (tok: string): string => (tok.includes('.') ? tok.slice(0, tok.
  */
 export const BlockIO: React.FC<BlockIOProps> = ({ block, className }) => {
   const { t } = useTranslation();
-  const { state } = useFlowBuilder();
-  const { blocks, blockOutputs } = state;
+  // Slice subscriptions, not the whole state: this strip renders once per block,
+  // so a full-state subscription made every keystroke re-render every block's IO.
+  const blocks = useFlowState((s) => s.blocks, shallow);
+  const blockOutputs = useFlowState((s) => s.blockOutputs, shallow);
 
   const outputs = blockOutputTokens(block.blockType);
   const inputs = blockInputTokens(block.config);

@@ -26,6 +26,7 @@ import {
   ChevronRightIcon,
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
+import { Button, EmptyHero } from '../../components/ui';
 
 // Friendly labels for the event names the runtime emits. Unknown names fall
 // back to their snake_case → Title Case form.
@@ -348,32 +349,25 @@ export const StreamingSessionPage: React.FC = () => {
   if (!session) {
     if (!loading && error) {
       return (
-        <div className="flex flex-col items-center justify-center min-h-[50vh] text-center px-6">
-          <div className="w-12 h-12 rounded-2xl bg-zinc-100 border border-zinc-200 flex items-center justify-center mb-4">
-            <SignalIcon className="h-6 w-6 text-zinc-400" />
-          </div>
-          <p className="text-sm font-medium text-ink">{t("Couldn't load this session")}</p>
-          <p className="text-xs text-secondary mt-1 max-w-sm">{error}</p>
-          <div className="mt-4 flex items-center gap-2">
-            <button
-              onClick={() => refresh()}
-              className="px-4 py-2 bg-accent-strong text-accent-on text-sm font-semibold shadow-sm rounded-lg hover:bg-accent-strong/90 transition-colors"
-            >
-              {t('Retry')}
-            </button>
-            <Link
-              to="/streaming"
-              className="px-4 py-2 text-sm font-medium text-secondary border border-zinc-200 rounded-lg hover:bg-chrome hover:text-ink transition-colors"
-            >
-              {t('Back to Streaming')}
-            </Link>
-          </div>
-        </div>
+        <EmptyHero
+          icon={SignalIcon}
+          title={t("Couldn't load this session")}
+          description={error}
+          className="min-h-[50vh]"
+        >
+          <Button onClick={() => refresh()} size="sm">{t('Retry')}</Button>
+          <Link
+            to="/streaming"
+            className="inline-flex items-center justify-center rounded-lg border border-border bg-surface px-3 py-1.5 text-sm font-medium text-secondary transition-colors hover:border-ink/20 hover:bg-chrome hover:text-ink"
+          >
+            {t('Back to Streaming')}
+          </Link>
+        </EmptyHero>
       );
     }
     return (
       <div className="flex flex-col items-center justify-center min-h-[50vh] text-center">
-        <div className="w-2 h-2 rounded-full bg-zinc-300 animate-pulse mb-3" />
+        <div className="w-2 h-2 rounded-full bg-active animate-pulse mb-3" />
         <p className="text-xs text-tertiary">{t('Loading session…')}</p>
       </div>
     );
@@ -450,7 +444,7 @@ export const StreamingSessionPage: React.FC = () => {
           {session.workflow_id != null && (
             <Link
               to={`/workflows/${session.workflow_id}?tab=connect`}
-              className="hidden @pair/stage:flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-secondary border border-zinc-200 rounded-lg hover:bg-chrome hover:text-ink transition-colors shrink-0"
+              className="hidden @pair/stage:flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-secondary border border-border rounded-lg hover:bg-chrome hover:text-ink transition-colors shrink-0"
             >
               <ArrowTopRightOnSquareIcon className="w-3.5 h-3.5" />
               {t('Workflow')}
@@ -460,7 +454,7 @@ export const StreamingSessionPage: React.FC = () => {
           {(isRunning || isQueued) && (
             <button
               onClick={handleEnd}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-secondary border border-zinc-200 rounded-lg hover:bg-chrome hover:text-ink transition-colors shrink-0"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-secondary border border-border rounded-lg hover:bg-chrome hover:text-ink transition-colors shrink-0"
             >
               <StopCircleIcon className="w-4 h-4" />
               {isQueued ? t('Cancel') : t('End Session')}

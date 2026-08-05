@@ -130,7 +130,7 @@ export const TEMPLATE_SPECS: TemplateSpec[] = [
     conditionLabel: 'Run checkout when availability text contains',
     actionWorkflow: true,
     notifyTitle: 'Restock purchase',
-    notifyTemplate: '✅ Checkout workflow ran for {{target_name}} — back in stock at {{now_time}}.',
+    notifyTemplate: 'Checkout workflow ran for {{target_name}} — back in stock at {{now_time}}.',
     payment: ['merchant_saved', 'browser_autofill'],
     defaultDryRun: true,
   },
@@ -155,7 +155,7 @@ export const TEMPLATE_SPECS: TemplateSpec[] = [
     conditionLabel: 'Alert when availability text contains',
     actionWorkflow: false,
     notifyTitle: 'Back in stock',
-    notifyTemplate: '🔔 {{target_name}} is back in stock — {{now_time}}.',
+    notifyTemplate: '{{target_name}} is back in stock — {{now_time}}.',
   },
   {
     id: 'reservation_sniper',
@@ -178,7 +178,7 @@ export const TEMPLATE_SPECS: TemplateSpec[] = [
     conditionLabel: 'Alert when availability text contains',
     actionWorkflow: true,
     notifyTitle: 'Slot available',
-    notifyTemplate: '📅 A slot opened on {{target_name}} — {{now_time}}.',
+    notifyTemplate: 'A slot opened on {{target_name}} — {{now_time}}.',
   },
 
   // ─────────────────────────── INTEL ───────────────────────────
@@ -201,7 +201,7 @@ export const TEMPLATE_SPECS: TemplateSpec[] = [
     ],
     extractHint: 'The container that holds each ad card. We snapshot its text so new ads surface as a change.',
     notifyTitle: 'New competitor ad',
-    notifyTemplate: '📣 New ad activity on {{target_name}} — {{now_time}}.',
+    notifyTemplate: 'New ad activity on {{target_name}} — {{now_time}}.',
   },
 
 ];

@@ -33,7 +33,7 @@ const Pill: React.FC<{ label: string; dot?: 'ok' | 'idle'; warn?: boolean; fille
   );
   const inner = (
     <>
-      {dot && <span className={clsx('w-1.5 h-1.5 rounded-full', dot === 'ok' ? 'bg-emerald-500' : 'bg-zinc-300')} />}
+      {dot && <span className={clsx('w-1.5 h-1.5 rounded-full', dot === 'ok' ? 'bg-emerald-500' : 'bg-active')} />}
       {label}
     </>
   );

@@ -6,7 +6,8 @@ import { BlockMeta, blockColorToken } from '../types';
 import { blockVars } from '../blockStyle';
 import type { Tint } from '../../../utils/tint';
 import { getAvailableBlocks } from '../FlowBuilderContext';
-import { useFlowBuilder } from '../FlowBuilderContext';
+import { useFlowActions, useFlowState } from '../FlowBuilderContext';
+import { shallow } from 'zustand/shallow';
 import { APP_PLATFORM } from '../../../api/aiAssist';
 
 // Family variables for a menu row, mirroring the canvas node tints so the color
@@ -21,8 +22,11 @@ interface BlockAddMenuProps {
 
 export const BlockAddMenu: React.FC<BlockAddMenuProps> = ({ parentBlockId, anchorRef, onClose }) => {
   const { t } = useTranslation();
-  const { state, addBlock } = useFlowBuilder();
-  const availableBlocks = getAvailableBlocks(state.blocks, parentBlockId, APP_PLATFORM);
+  // `addBlock` comes from the stable action handles (never a re-render source);
+  // only `blocks` is subscribed, and only while the menu is open.
+  const { addBlock } = useFlowActions();
+  const blocks = useFlowState((s) => s.blocks, shallow);
+  const availableBlocks = getAvailableBlocks(blocks, parentBlockId, APP_PLATFORM);
   const recommended = availableBlocks.filter(b => b.priority >= 80);
   const actions = availableBlocks.filter(b => b.type === 'action' && b.priority < 80);
   const other = availableBlocks.filter(b => b.priority < 80 && b.type !== 'action');

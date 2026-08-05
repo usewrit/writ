@@ -198,6 +198,17 @@ class TriggerRule(Base):
         default=0,
         comment="Total times this trigger has fired"
     )
+    # The scheduler's due index for TIME-DRIVEN automations. Set (by
+    # routers.triggers._recompute_next_scheduled_at) only while the rule is
+    # enabled AND its root event block is blockType == "scheduled"; NULL drops it
+    # out of the due scan entirely, so event-driven rules never cost the tick
+    # anything. Mirrors AutomationWorkflow.next_scheduled_at / the cloud column.
+    next_scheduled_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+        comment="Next fire time for a scheduled-root automation; NULL = not time-driven"
+    )
 
     # Timestamps
     created_at = Column(
@@ -242,6 +253,7 @@ class TriggerRule(Base):
             "actions": self.actions,
             "blocks": self.blocks,
             "last_triggered_at": self.last_triggered_at.isoformat() if self.last_triggered_at else None,
+            "next_scheduled_at": self.next_scheduled_at.isoformat() if self.next_scheduled_at else None,
             "trigger_count": self.trigger_count,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

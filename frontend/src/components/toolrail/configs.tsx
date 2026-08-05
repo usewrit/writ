@@ -274,7 +274,7 @@ const RUN_TYPE_LABEL: Record<string, string> = {
   check: 'Monitor',
   ai_session: 'AI session',
   automation: 'Automation',
-  crawl: 'Crawl',
+  crawl: 'Harvest',
 };
 const runIsRunning = (r: any) => r.status === 'running' || r.status === 'pending';
 const withinHours = (iso: string | null | undefined, h: number) =>

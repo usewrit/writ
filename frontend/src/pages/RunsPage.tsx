@@ -47,7 +47,7 @@ const TYPE_LABELS: Record<RunType, string> = {
   check: 'Monitor',
   ai_session: 'AI Session',
   automation: 'Automation',
-  crawl: 'Crawl',
+  crawl: 'Harvest',
 };
 
 function fmtDuration(ms: number): string {
@@ -92,7 +92,7 @@ const RunRow: React.FC<RunRowProps> = React.memo(({ run, expanded, isCancelling,
         >
           {statusLabel(run.status)}
         </span>
-        <span className="hidden @rail/stage:inline-flex justify-center w-[84px] px-1.5 py-0.5 bg-zinc-100 text-secondary rounded-full text-[10px] shrink-0">
+        <span className="hidden @rail/stage:inline-flex justify-center w-[84px] px-1.5 py-0.5 bg-hover text-secondary rounded-full text-[10px] shrink-0">
           {TYPE_LABELS[run.run_type]}
         </span>
 
@@ -206,14 +206,14 @@ const RunRow: React.FC<RunRowProps> = React.memo(({ run, expanded, isCancelling,
               {run.data_url_hint && (
                 <button
                   onClick={(e) => onViewData(e, run)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-zinc-200 text-[12px] font-medium text-secondary rounded-lg hover:text-ink hover:border-zinc-300 transition-colors"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-surface border border-border text-[12px] font-medium text-secondary rounded-lg hover:text-ink hover:border-border-strong transition-colors"
                 >
                   <TableCellsIcon className="w-3.5 h-3.5" /> {t('View data')}
                 </button>
               )}
               <button
                 onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(String(run.id)); toast.success(t('Run ID copied')); }}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-zinc-200 text-[12px] font-medium text-secondary rounded-lg hover:text-ink hover:border-zinc-300 transition-colors"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-surface border border-border text-[12px] font-medium text-secondary rounded-lg hover:text-ink hover:border-border-strong transition-colors"
               >
                 <ClipboardDocumentIcon className="w-3.5 h-3.5" /> {t('Copy ID')}
               </button>

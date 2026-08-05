@@ -276,5 +276,5 @@ export const ConnectTab: React.FC<ConnectTabProps> = ({ workflow, linkedTriggers
 
 // Tiny monochrome status dot for a linked automation row (enabled = ink, off = grey).
 function clsxDot(enabled: boolean): string {
-  return `w-2 h-2 rounded-full shrink-0 ${enabled ? 'bg-ink' : 'bg-zinc-300'}`;
+  return `w-2 h-2 rounded-full shrink-0 ${enabled ? 'bg-ink' : 'bg-active'}`;
 }

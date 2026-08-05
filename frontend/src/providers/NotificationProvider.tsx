@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useCallback, useEffect, useMemo, useRef } from 'react';
 import toast from 'react-hot-toast';
+import { toastIcon } from '../components/ui/toastIcon';
+import { BellIcon } from '@heroicons/react/24/outline';
 import { useQuery } from '../hooks/useQuery';
 import { useQueryCache } from '../stores/queryCache';
 import { inboxApi, NotificationItem } from '../api/inbox';
@@ -75,7 +77,7 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
     }
     if (top.id !== lastTopIdRef.current && !top.read_at) {
       lastTopIdRef.current = top.id;
-      toast(top.title, { icon: '🔔' });
+      toast(top.title, { icon: toastIcon(BellIcon) });
     } else {
       lastTopIdRef.current = top.id;
     }

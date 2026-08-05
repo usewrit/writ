@@ -27,20 +27,24 @@ import {
  */
 
 const TICK_MS = 60;
+/** One typed character every 2 ticks — a human cadence, not a paste. */
+const CHAR_TICKS = 2;
 
 const NAME = 'api_key';
 const VALUE = 'sk-live-7Q2f9Xd';
 
 // Beats, in ticks. Named so the derivations below read as a storyboard.
-const ROW_IN = 8;
-const NAME_FROM = 10;
-const NAME_TO = NAME_FROM + NAME.length;       // 17
-const VALUE_FROM = NAME_TO + 2;                // 19
-const VALUE_TO = VALUE_FROM + VALUE.length;    // 34
-const REACH_LOCK = VALUE_TO + 1;               // 35
-const LOCKED = VALUE_TO + 6;                   // 40
-const SAVED = LOCKED + 10;                     // 50
-const END = SAVED + 6;                         // 56
+// The pacing is set by the captions, not the actions: each caption's window is
+// sized to be read (~200ms a word), so the dwells between beats are the point.
+const ROW_IN = 52;
+const NAME_FROM = ROW_IN + 5;                             // 57
+const NAME_TO = NAME_FROM + NAME.length * CHAR_TICKS;     // 71
+const VALUE_FROM = NAME_TO + 20;                          // 91
+const VALUE_TO = VALUE_FROM + VALUE.length * CHAR_TICKS;  // 121
+const REACH_LOCK = VALUE_TO + 22;                         // 143
+const LOCKED = REACH_LOCK + 28;                           // 171
+const SAVED = LOCKED + 66;                                // 237
+const END = SAVED + 12;                                   // 249
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
 
@@ -72,8 +76,8 @@ export const SecureFieldDemo: React.FC = () => {
   }, [runId, reduce]);
 
   const rowIn = tick >= ROW_IN;
-  const nameText = NAME.slice(0, clamp(tick - NAME_FROM, 0, NAME.length));
-  const valueChars = clamp(tick - VALUE_FROM, 0, VALUE.length);
+  const nameText = NAME.slice(0, clamp(Math.floor((tick - NAME_FROM) / CHAR_TICKS), 0, NAME.length));
+  const valueChars = clamp(Math.floor((tick - VALUE_FROM) / CHAR_TICKS), 0, VALUE.length);
   const valueText = VALUE.slice(0, valueChars);
   const locked = tick >= LOCKED;
   const saved = tick >= SAVED;

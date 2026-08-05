@@ -108,7 +108,7 @@ function buildEcommerceRestock(): { name: string; description: string; blocks: F
       config: {
         channels: ['email'],
         title: 'Restock purchase',
-        template: '✅ Checkout workflow ran for {{target_name}} — back in stock at {{now_time}}.',
+        template: 'Checkout workflow ran for {{target_name}} — back in stock at {{now_time}}.',
       },
     },
   ];

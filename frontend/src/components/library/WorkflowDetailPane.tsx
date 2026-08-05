@@ -27,6 +27,9 @@ import {
   RectangleStackIcon,
   BanknotesIcon,
   CpuChipIcon,
+  CommandLineIcon,
+  ClipboardDocumentIcon,
+  CodeBracketIcon,
 } from '@heroicons/react/24/outline';
 import { SendToAgentModal } from '../fleet/SendToAgentModal';
 import { useQuery } from '../../hooks/useQuery';
@@ -47,6 +50,7 @@ import { statusStyle } from '../../utils/statusStyle';
 import { RunWithTargetButton } from '../workflows/ExecutionTargetPicker';
 import { InlineScheduleControl } from '../schedule/InlineScheduleControl';
 import i18n from '../../i18n';
+import { EmptyHero } from '../ui';
 
 const RUNNING_STATES = ['running', 'pending', 'assigned', 'queued'];
 
@@ -67,7 +71,9 @@ const STEP_VERB: Record<string, string> = {
   extract: 'Extract', evaluate: 'Run script', advanced_script: 'Run script', api_call: 'API call',
   assert: 'Assert', wait: 'Wait', wait_for_change: 'Wait for change', wait_for_download: 'Wait for download',
   captcha: 'Solve CAPTCHA', end_point: 'End',
-  ai_fill: 'AI fill', ai_continue: 'AI continue', ai_navigate: 'AI navigate', codegen: 'AI step',
+  // `ai_continue` and `ai_navigate` are the two wire spellings of the one merged AI step,
+  // so they read the same here. `codegen` is a script block, not an AI step.
+  ai_continue: 'AI task', ai_navigate: 'AI task', ai_fill: 'AI fill', codegen: 'Script Block',
 };
 
 function stepLabel(step: WorkflowStep): string {
@@ -94,6 +100,38 @@ const SectionLabel: React.FC<{ children: React.ReactNode; right?: React.ReactNod
     <span className="text-[10px] font-semibold uppercase tracking-wider text-secondary">{children}</span>
     {right}
   </div>
+);
+
+/**
+ * ActionTile — one entry in the "Use this workflow" block. A shortcut into the tab
+ * that already implements the capability (Connect = REST/MCP, Steps, Data), so the
+ * value prop — this workflow is callable, schedulable, reusable — is one click away
+ * instead of buried behind a generic "Open details".
+ */
+const ActionTile: React.FC<{
+  icon: React.FC<any>;
+  label: string;
+  desc: string;
+  onClick: () => void;
+  disabled?: boolean;
+}> = ({ icon: Icon, label, desc, onClick, disabled }) => (
+  <button
+    onClick={onClick}
+    disabled={disabled}
+    className={clsx(
+      'flex items-center gap-2.5 rounded-xl border border-border bg-surface p-2.5 text-left transition-colors',
+      'outline-none focus-visible:ring-2 focus-visible:ring-ink/30 active:scale-[0.99]',
+      disabled ? 'opacity-50' : 'hover:bg-chrome',
+    )}
+  >
+    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-chrome text-ink">
+      <Icon className="h-4 w-4" />
+    </span>
+    <span className="min-w-0">
+      <span className="block text-[12px] font-medium text-ink truncate">{label}</span>
+      <span className="block text-[10.5px] text-tertiary truncate">{desc}</span>
+    </span>
+  </button>
 );
 
 interface WorkflowDetailPaneProps {
@@ -219,15 +257,12 @@ export const WorkflowDetailPane: React.FC<WorkflowDetailPaneProps> = ({
   // ── Empty state ──────────────────────────────────────────────────────────
   if (!workflow) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center text-center px-6">
-        <div className="w-12 h-12 rounded-2xl bg-chrome border border-border flex items-center justify-center mb-4">
-          <CursorArrowRaysIcon className="h-6 w-6 text-tertiary" />
-        </div>
-        <p className="text-sm font-medium text-ink">{t('Select a workflow')}</p>
-        <p className="text-xs text-secondary mt-1 max-w-xs">
-          {t('Pick one on the left to see its status, run it, and review recent results.')}
-        </p>
-      </div>
+      <EmptyHero
+        icon={CursorArrowRaysIcon}
+        title={t('Select a workflow')}
+        description={t('Pick one on the left to see its status, run it, and review recent results.')}
+        className="flex-1"
+      />
     );
   }
 
@@ -267,6 +302,18 @@ export const WorkflowDetailPane: React.FC<WorkflowDetailPaneProps> = ({
     ?? (w.last_run_extracted_data && Object.keys(w.last_run_extracted_data).length > 0);
 
   const openEditor = (tab?: string) => navigate(`/workflows/${w.id}${tab ? `?tab=${tab}` : ''}`);
+
+  const isStreaming = w.workflow_type === 'streaming';
+  // The coordinator mounts the automation router under /api (routers/automation.py) —
+  // NOT under /api/v1, where nothing but files/local-workflows live. Same URL the
+  // Connect tab copies; keeping one source for it is what stops this pane from
+  // advertising a 404 the way the cloud tree once did.
+  // NB: `origin` above is the workflow's ORIGIN MARKER (cloud|local:…), not the page's.
+  const callEndpoint = `${typeof window !== 'undefined' ? window.location.origin : ''}/api/automation/workflows/${w.id}/run`;
+  const copyEndpoint = () => {
+    navigator.clipboard.writeText(callEndpoint);
+    toast.success(t('Endpoint copied'));
+  };
 
   return (
     <div className="flex flex-1 flex-col min-h-0">
@@ -437,8 +484,11 @@ export const WorkflowDetailPane: React.FC<WorkflowDetailPaneProps> = ({
           )}
         </div>
 
-        {/* Secondary actions. `flex-wrap` so this row of buttons wraps instead of
-            running off the edge of the pane when it's narrow. */}
+        {/* Secondary actions. View data / Duplicate / Send to agent moved into the
+            "Use this workflow" grid in the body (where the cloud app has them), so
+            this row keeps only the two that are about the pane itself: open the full
+            page, and the destructive one. `flex-wrap` so it wraps instead of running
+            off the edge of a narrow pane. */}
         <div className="flex flex-wrap items-center gap-1.5 mt-3">
           <button
             onClick={() => openEditor()}
@@ -447,34 +497,6 @@ export const WorkflowDetailPane: React.FC<WorkflowDetailPaneProps> = ({
             <ArrowTopRightOnSquareIcon className="h-3.5 w-3.5" />
             {t('Open details')}
           </button>
-          {hasData && (
-            <button
-              onClick={() => openEditor('data')}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] font-medium text-secondary border border-border rounded-lg hover:bg-chrome hover:text-ink transition-colors"
-            >
-              <TableCellsIcon className="h-3.5 w-3.5" />
-              {t('View data')}
-            </button>
-          )}
-          {!isInstalled && (
-            <button
-              onClick={() => onDuplicate(w.id)}
-              disabled={mutatingRow}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] font-medium text-secondary border border-border rounded-lg hover:bg-chrome hover:text-ink transition-colors disabled:opacity-50"
-            >
-              <DocumentDuplicateIcon className="h-3.5 w-3.5" />
-              {t('Duplicate')}
-            </button>
-          )}
-          {!isInstalled && (
-            <button
-              onClick={() => setSendOpen(true)}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] font-medium text-secondary border border-border rounded-lg hover:bg-chrome hover:text-ink transition-colors"
-            >
-              <CpuChipIcon className="h-3.5 w-3.5" />
-              {t('Send to agent')}
-            </button>
-          )}
           {/* `ml-auto` (not a flex-1 spacer) keeps Delete pushed to the right on
               a full row, and lets it wrap cleanly instead of leaving a gap. */}
           <button
@@ -526,6 +548,80 @@ export const WorkflowDetailPane: React.FC<WorkflowDetailPaneProps> = ({
             )}
             {(w.usage_count ?? 0) > 0 && (
               <Fact icon={PlayIcon} label={t('Total runs')}>{w.usage_count}</Fact>
+            )}
+          </div>
+        </div>
+
+        {/* Use this workflow — turns the pane from a fact sheet into an action
+            surface, matching the cloud app. Each tile is a shortcut into the tab
+            that already implements the capability, so "this is callable
+            infrastructure" is one click away rather than something you have to go
+            hunting for behind "Open details". */}
+        <div>
+          <SectionLabel>{t('Use this workflow')}</SectionLabel>
+          {/* auto-fit tracks the pane's real width, so tiles reflow 1→2→3 columns
+              with the window instead of staying cramped at narrow widths. */}
+          <div className="grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(200px,1fr))]">
+            {/* Call it — the headline. The body opens the Connect tab (endpoint,
+                key, MCP); Copy grabs the run endpoint in one click. This is the
+                COORDINATOR's real route (/api/automation/...) — the /api/v1 tree
+                that once got advertised here is mounted nowhere and 404s. */}
+            <div className="[grid-column:1/-1] flex items-center gap-2.5 rounded-xl border border-ink/20 bg-ink/[0.04] p-2.5">
+              <button
+                onClick={() => openEditor('connect')}
+                className="group flex min-w-0 flex-1 items-center gap-2.5 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ink/30"
+              >
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-ink/15 text-ink">
+                  <CommandLineIcon className="h-4 w-4" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-[12px] font-medium text-ink truncate group-hover:underline">{t('Call it')}</span>
+                  <span className="block text-[10.5px] text-tertiary truncate" title={callEndpoint}>{t('REST · MCP')}</span>
+                </span>
+              </button>
+              <button
+                onClick={copyEndpoint}
+                title={callEndpoint}
+                aria-label={t('Copy endpoint URL')}
+                className="flex shrink-0 items-center gap-1 rounded-lg border border-border bg-surface px-2 py-1 text-[11px] font-medium text-secondary hover:text-ink hover:border-border-strong outline-none focus-visible:ring-2 focus-visible:ring-ink/40 transition-colors"
+              >
+                <ClipboardDocumentIcon className="h-3.5 w-3.5" />
+                {t('Copy')}
+              </button>
+            </div>
+            {!isInstalled && (
+              <ActionTile
+                icon={isStreaming ? CodeBracketIcon : ListBulletIcon}
+                label={isStreaming ? t('Edit script') : t('Edit steps')}
+                desc={isStreaming ? t('Live session logic') : t('{{n}} recorded', { n: stepCount })}
+                onClick={() => openEditor('steps')}
+              />
+            )}
+            <ActionTile
+              icon={TableCellsIcon}
+              label={t('View data')}
+              desc={hasData ? t('Extracted results') : t('Nothing yet')}
+              onClick={() => openEditor('data')}
+            />
+            {!isInstalled && (
+              <ActionTile
+                icon={DocumentDuplicateIcon}
+                label={t('Duplicate')}
+                desc={mutatingRow ? t('Duplicating…') : t('Make a copy')}
+                disabled={mutatingRow}
+                onClick={() => { if (!mutatingRow) onDuplicate(w.id); }}
+              />
+            )}
+            {/* Push the workflow (bundled with its secrets + persona) onto a
+                connected agent so it can run there. Installed proxies aren't yours
+                to send. */}
+            {!isInstalled && (
+              <ActionTile
+                icon={CpuChipIcon}
+                label={t('Send to agent')}
+                desc={t('Run it on your machine')}
+                onClick={() => setSendOpen(true)}
+              />
             )}
           </div>
         </div>

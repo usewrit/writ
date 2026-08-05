@@ -49,6 +49,7 @@ from .local_workflow import LocalWorkflow
 from .ai_session import AiSession
 from .crawl_job import CrawlJob
 from .crawl_definition import CrawlDefinition
+from .transfer_import import TransferImport
 
 
 __all__ = [
@@ -104,4 +105,5 @@ __all__ = [
     "AiSession",
     "CrawlJob",
     "CrawlDefinition",
+    "TransferImport",
 ]

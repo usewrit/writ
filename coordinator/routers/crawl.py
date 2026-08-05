@@ -543,6 +543,11 @@ class MapCrawlRequest(BaseModel):
     url: str = Field(..., description="Site to map")
     search: Optional[str] = Field(None, description="Rank URLs by relevance to this query")
     limit: int = Field(100, ge=1, le=500)
+    persona_id: Optional[int] = Field(
+        None,
+        description="Map the site as this login identity — the picker that feeds an "
+                    "authenticated crawl must see the pages the crawl will actually reach",
+    )
 
 
 def _last_segment(url: str) -> Optional[str]:
@@ -564,12 +569,25 @@ async def map_crawl(
 
     # Anchor text (from the harvest) doubles as a title + a relevance signal;
     # sitemap URLs have neither, so they rank on path tokens alone.
+    # Map AS THE PERSONA when one is given. This picker is what feeds an
+    # authenticated crawl's seed_urls, so mapping anonymously would offer the caller a
+    # login wall's links and then crawl something else entirely.
+    auth_session = None
+    if body.persona_id:
+        from services.persona_service import PersonaService
+        persona = await PersonaService.get_owned(db, int(body.persona_id))
+        if not persona:
+            raise HTTPException(404, "persona_id does not reference one of your personas")
+        auth_session = PersonaService.load_session(persona)
+
     text_by_url: dict = {}
-    harvested = await crawl_orchestrator._harvest_seed_links(url, cap=body.limit)
+    harvested = await crawl_orchestrator._harvest_seed_links(
+        url, cap=body.limit, auth=auth_session)
     for h in harvested:
         text_by_url[h["url"]] = h.get("text") or ""
     candidates = list(dict.fromkeys(
-        [h["url"] for h in harvested] + list(await crawl_orchestrator._discover_sitemap_urls(url))
+        [h["url"] for h in harvested]
+        + list(await crawl_orchestrator._discover_sitemap_urls(url, auth=auth_session))
     ))
 
     targeting = crawl_targeting.make_targeting(intent=(body.search or ""))

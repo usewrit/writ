@@ -154,7 +154,7 @@ const SurfacerCard: React.FC<{ hintId: string; onDismiss: () => void }> = ({ hin
         <button
           type="button"
           onClick={onDismiss}
-          className="text-[12px] font-medium bg-white/15 hover:bg-white/25 transition rounded-lg px-3 py-1.5"
+          className="text-[12px] font-medium bg-surface/15 hover:bg-surface/25 transition rounded-lg px-3 py-1.5"
         >
           {t('Got it')}
         </button>
@@ -163,7 +163,7 @@ const SurfacerCard: React.FC<{ hintId: string; onDismiss: () => void }> = ({ hin
         type="button"
         onClick={onDismiss}
         aria-label={t('Dismiss')}
-        className="absolute top-2 right-2 p-1 rounded-md text-white/50 hover:text-white hover:bg-white/15 transition"
+        className="absolute top-2 right-2 p-1 rounded-md text-white/50 hover:text-white hover:bg-surface/15 transition"
       >
         <XMarkIcon className="w-3.5 h-3.5" />
       </button>

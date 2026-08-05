@@ -70,7 +70,7 @@ const Footer: React.FC<{ onClear?: () => void; onApply: () => void; canClear: bo
 };
 
 const inputCls =
-  'w-full rounded-md border border-border bg-canvas px-2 py-1 text-[12px] text-ink placeholder:text-tertiary focus:border-zinc-400 focus:outline-none';
+  'w-full rounded-md border border-border bg-canvas px-2 py-1 text-[12px] text-ink placeholder:text-tertiary focus:border-border-strong focus:outline-none';
 
 const ContainsEditor: React.FC<{
   col: string;

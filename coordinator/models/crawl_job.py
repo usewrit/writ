@@ -221,6 +221,10 @@ class CrawlJob(Base):
             "relevance_threshold": self.relevance_threshold,
             "render_mode": self.render_mode,
             "ocr_mode": self.ocr_mode,
+            # The login identity this crawl runs as (id only — never the session).
+            # Surfaced so the detail view can show "signed in as", and so its
+            # URL-picker maps the site through the SAME login the crawl uses.
+            "persona_id": self.persona_id,
             "workflow_id": self.workflow_id,
             "definition_id": self.definition_id,
             "pages_discovered": self.pages_discovered,

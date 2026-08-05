@@ -281,7 +281,7 @@ export const WorkflowDetailPage: React.FC = () => {
             >
               <TrashIcon className="w-3.5 h-3.5" />
             </button>
-            <div className={clsx('w-2 h-2 rounded-full ml-1', workflow.is_active ? 'bg-ink' : 'bg-zinc-300')} />
+            <div className={clsx('w-2 h-2 rounded-full ml-1', workflow.is_active ? 'bg-ink' : 'bg-active')} />
           </div>
         </div>
 

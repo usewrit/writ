@@ -86,7 +86,7 @@ export const ExecutionTargetPicker: React.FC<ExecutionTargetPickerProps> = ({
   if (compact) {
     return (
       <div className="space-y-2">
-        <div className="flex items-center gap-1 bg-zinc-100 rounded-full p-0.5">
+        <div className="flex items-center gap-1 bg-hover rounded-full p-0.5">
           {OPTIONS.map((opt) => {
             const Icon = opt.icon;
             const disabled = opt.value === 'local' && !hasAgent;
@@ -99,10 +99,10 @@ export const ExecutionTargetPicker: React.FC<ExecutionTargetPickerProps> = ({
                 className={clsx(
                   'flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-full transition-all',
                   value === opt.value
-                    ? 'bg-white text-ink shadow-sm'
+                    ? 'bg-surface text-ink shadow-sm'
                     : disabled
-                      ? 'text-zinc-300 cursor-not-allowed'
-                      : 'text-zinc-500 hover:text-ink',
+                      ? 'text-tertiary cursor-not-allowed'
+                      : 'text-secondary hover:text-ink',
                 )}
               >
                 <Icon className="w-3.5 h-3.5" />
@@ -131,7 +131,7 @@ export const ExecutionTargetPicker: React.FC<ExecutionTargetPickerProps> = ({
 
   return (
     <div className="space-y-2">
-      <label className="text-xs font-medium text-zinc-500">{t('Run on')}</label>
+      <label className="text-xs font-medium text-secondary">{t('Run on')}</label>
       <div className="grid grid-cols-3 gap-2">
         {OPTIONS.map((opt) => {
           const Icon = opt.icon;
@@ -169,7 +169,7 @@ export const ExecutionTargetPicker: React.FC<ExecutionTargetPickerProps> = ({
           value = let the server pick. Single/zero-device UX is unchanged. */}
       {multiDevice && value === 'local' && (
         <div className="space-y-1 pt-1">
-          <label className="text-xs font-medium text-zinc-500">{t('Device')}</label>
+          <label className="text-xs font-medium text-secondary">{t('Device')}</label>
           <Select
             value={agentId ?? ''}
             onChange={(v) => onAgentIdChange?.(v || undefined)}
@@ -182,9 +182,9 @@ export const ExecutionTargetPicker: React.FC<ExecutionTargetPickerProps> = ({
         </div>
       )}
       {!hasAgent && (
-        <p className="text-[10px] text-zinc-400">
+        <p className="text-[10px] text-tertiary">
           {t('Connect a local agent to enable local execution.')}{' '}
-          <a href="/fleet" className="underline hover:text-zinc-600">{t('Setup agent')}</a>
+          <a href="/fleet" className="underline hover:text-secondary">{t('Setup agent')}</a>
         </p>
       )}
     </div>
@@ -254,7 +254,7 @@ export const RunWithTargetButton: React.FC<{
           onClick={() => setOpen(!open)}
           disabled={loading}
           className={clsx(
-            'font-medium bg-accent-strong text-accent-on border-l border-white/20 rounded-r-lg hover:bg-accent-strong/90 transition-all disabled:opacity-50',
+            'font-medium bg-accent-strong text-accent-on border-l border-surface/20 rounded-r-lg hover:bg-accent-strong/90 transition-all disabled:opacity-50',
             size === 'sm' ? 'px-1.5 py-1.5' : 'px-2 py-1.5',
           )}
         >
@@ -264,8 +264,8 @@ export const RunWithTargetButton: React.FC<{
         </button>
       </div>
       {open && (
-        <div className="absolute right-0 top-full mt-1 w-60 bg-white border border-zinc-200 rounded-xl shadow-lg z-50 overflow-hidden max-h-80 overflow-y-auto">
-          <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+        <div className="absolute right-0 top-full mt-1 w-60 bg-surface border border-border rounded-xl shadow-lg z-50 overflow-hidden max-h-80 overflow-y-auto">
+          <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-tertiary">
             {t('Run this on')}
           </div>
           {/* Local Agent (BYO). When none is online it stays visible but disabled,
@@ -279,14 +279,14 @@ export const RunWithTargetButton: React.FC<{
               hasAgent ? 'hover:bg-hover' : 'cursor-not-allowed',
             )}
           >
-            <ComputerDesktopIcon className={clsx('w-4 h-4', hasAgent ? 'text-zinc-500' : 'text-zinc-300')} />
-            <span className={clsx('flex-1 text-left', hasAgent ? 'text-zinc-700' : 'text-zinc-300')}>{t('Run on Local Agent')}</span>
-            {!hasAgent && <span className="text-[10px] text-zinc-400 shrink-0">{t('none online')}</span>}
+            <ComputerDesktopIcon className={clsx('w-4 h-4', hasAgent ? 'text-secondary' : 'text-tertiary')} />
+            <span className={clsx('flex-1 text-left', hasAgent ? 'text-ink' : 'text-tertiary')}>{t('Run on Local Agent')}</span>
+            {!hasAgent && <span className="text-[10px] text-tertiary shrink-0">{t('none online')}</span>}
           </button>
           {/* With 2+ online devices, offer to pin the run to a specific one. */}
           {hasAgent && multiDevice && (
             <div className="border-t border-border py-1">
-              <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+              <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-tertiary">
                 {t('Run on a device')}
               </div>
               {onlineDevices.map((d) => (
@@ -295,8 +295,8 @@ export const RunWithTargetButton: React.FC<{
                   onClick={() => { setOpen(false); onRun('local', d.agent_id); }}
                   className="flex items-center gap-2 w-full px-3 py-2 text-sm hover:bg-hover transition-colors"
                 >
-                  <ComputerDesktopIcon className="w-4 h-4 text-zinc-400 shrink-0" />
-                  <span className="text-zinc-700 truncate" title={d.name}>{d.name}</span>
+                  <ComputerDesktopIcon className="w-4 h-4 text-tertiary shrink-0" />
+                  <span className="text-ink truncate" title={d.name}>{d.name}</span>
                 </button>
               ))}
             </div>
@@ -306,8 +306,8 @@ export const RunWithTargetButton: React.FC<{
             onClick={() => { setOpen(false); onRun('cloud'); }}
             className="flex items-center gap-2 w-full px-3 py-2.5 text-sm hover:bg-hover transition-colors border-t border-border"
           >
-            <CloudIcon className="w-4 h-4 text-zinc-500" />
-            <span className="text-zinc-700">{t('Run on Writ Cloud')}</span>
+            <CloudIcon className="w-4 h-4 text-secondary" />
+            <span className="text-ink">{t('Run on Writ Cloud')}</span>
           </button>
           {/* Auto — only meaningful when a local agent exists. */}
           {hasAgent && (
@@ -315,8 +315,8 @@ export const RunWithTargetButton: React.FC<{
               onClick={() => { setOpen(false); onRun('auto'); }}
               className="flex items-center gap-2 w-full px-3 py-2.5 text-sm hover:bg-hover transition-colors border-t border-border"
             >
-              <ArrowsRightLeftIcon className="w-4 h-4 text-zinc-500" />
-              <span className="text-zinc-700">{t('Auto (prefer local)')}</span>
+              <ArrowsRightLeftIcon className="w-4 h-4 text-secondary" />
+              <span className="text-ink">{t('Auto (prefer local)')}</span>
             </button>
           )}
           {/* Connect prompt when no BYO agent is online. */}
@@ -324,7 +324,7 @@ export const RunWithTargetButton: React.FC<{
             <a
               href="/fleet"
               onClick={() => setOpen(false)}
-              className="flex items-center gap-2 w-full px-3 py-2 text-[11px] text-zinc-500 hover:bg-hover transition-colors border-t border-border"
+              className="flex items-center gap-2 w-full px-3 py-2 text-[11px] text-secondary hover:bg-hover transition-colors border-t border-border"
             >
               {t('Connect a local agent to run on your own device →')}
             </a>

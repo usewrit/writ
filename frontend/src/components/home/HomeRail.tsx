@@ -114,7 +114,7 @@ export const FleetStatus: React.FC = () => {
   ];
 
   const dotClass = (d?: 'ok' | 'idle') =>
-    d === 'ok' ? 'bg-emerald-500' : 'bg-zinc-300';
+    d === 'ok' ? 'bg-emerald-500' : 'bg-active';
 
   return (
     <div className="rounded-2xl border border-ink/20 bg-surface px-3.5 py-3 shadow-sm">

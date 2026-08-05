@@ -19,8 +19,8 @@ const statusConfig = {
   error: { color: 'bg-red-50 text-red-700', dot: 'bg-red-500', label: 'Error' },
   revoked: { color: 'bg-red-50 text-red-700', dot: 'bg-red-500', label: 'Revoked' },
   suspended: { color: 'bg-amber-50 text-amber-700', dot: 'bg-amber-500', label: 'Suspended' },
-  inactive: { color: 'bg-gray-100 text-gray-600', dot: 'bg-gray-400', label: 'Inactive' },
-  disabled: { color: 'bg-gray-100 text-gray-600', dot: 'bg-gray-400', label: 'Disabled' },
+  inactive: { color: 'bg-hover text-secondary', dot: 'bg-tertiary', label: 'Inactive' },
+  disabled: { color: 'bg-hover text-secondary', dot: 'bg-tertiary', label: 'Disabled' },
 };
 
 const sizeConfig = {
@@ -32,7 +32,7 @@ const sizeConfig = {
 const liveStatuses = new Set(['online', 'active', 'enabled']);
 
 export const StatusBadge: React.FC<StatusBadgeProps> = ({ status, size = 'md' }) => {
-  const config = statusConfig[status] || { color: 'bg-gray-100 text-gray-600', dot: 'bg-gray-400', label: status || i18n.t('Unknown') };
+  const config = statusConfig[status] || { color: 'bg-hover text-secondary', dot: 'bg-tertiary', label: status || i18n.t('Unknown') };
   const isLive = liveStatuses.has(status);
 
   return (

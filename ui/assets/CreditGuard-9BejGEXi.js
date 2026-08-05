@@ -1,1 +1,0 @@
-function r(t,n){const e=(typeof t=="number"&&Number.isFinite(t)?t:0)/1e6;return n!=null&&n.short?`$${e.toFixed(2)}`:e!==0&&Math.abs(e)<.01?`$${e.toFixed(4)}`:`$${e.toFixed(2)}`}const s=t=>r(t),a=t=>r(t,{short:!0}),i={standard:25e4,intelligent:1e6};function u(){return null}export{i as A,a,s as f,u};

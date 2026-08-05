@@ -44,6 +44,7 @@ import {
   crawlStatusMeta,
 } from './CrawlStatus';
 import clsx from 'clsx';
+import { EmptyHero } from '../ui';
 
 // ── Count-up: smoothly tween a displayed integer toward its real value so the
 // live page counter *moves* between polls instead of jumping. ────────────────
@@ -186,7 +187,13 @@ const SiteMapSection: React.FC<{ crawl: CrawlView }> = ({ crawl }) => {
     setLoading(true);
     setErr(null);
     try {
-      const res = await crawlApi.map({ url: crawl.seed_url, search: crawl.intent || undefined, limit: 80 });
+      const res = await crawlApi.map({
+        url: crawl.seed_url,
+        search: crawl.intent || undefined,
+        limit: 80,
+        // Same login identity the crawl itself runs as.
+        persona_id: crawl.persona_id ?? undefined,
+      });
       setUrls(res.urls || []);
     } catch (e) {
       setErr(apiErrorMessage(e, t('Could not map the site')));
@@ -560,17 +567,17 @@ export const CrawlDetailView: React.FC<{
 
   if (!crawl) {
     return (
-      <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-        <ExclamationTriangleIcon className="h-7 w-7 text-tertiary" />
-        <p className="mt-3 text-[14px] font-medium text-ink">{t('Crawl not found')}</p>
-        <p className="mt-1 max-w-sm text-[12px] text-tertiary">
-          {error || t('This crawl may have been removed, or the link is wrong.')}
-        </p>
-        <Button className="mt-4" size="sm" onClick={() => navigate('/crawls')}>
+      <EmptyHero
+        icon={ExclamationTriangleIcon}
+        title={t('Crawl not found')}
+        description={error || t('This crawl may have been removed, or the link is wrong.')}
+        className="h-full"
+      >
+        <Button size="sm" onClick={() => navigate('/crawls')}>
           <ArrowLeftIcon className="h-3.5 w-3.5" />
           {t('Back to Harvest')}
         </Button>
-      </div>
+      </EmptyHero>
     );
   }
 

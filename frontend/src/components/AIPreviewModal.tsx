@@ -335,16 +335,16 @@ export const AIPreviewModal: React.FC<AIPreviewModalProps> = ({
                     <div className="flex flex-col items-center gap-3 text-zinc-400 text-center">
                       <SignalSlashIcon className="h-10 w-10 text-red-500" />
                       <p>{t('Failed to connect to session')}</p>
-                      <p className="text-xs text-zinc-500">{t('The session may have ended')}</p>
+                      <p className="text-xs text-secondary">{t('The session may have ended')}</p>
                       <button
                         onClick={connectToSession}
-                        className="mt-1 px-4 py-2 bg-white hover:bg-zinc-200 rounded-lg text-zinc-900 text-sm font-medium transition-colors"
+                        className="mt-1 px-4 py-2 bg-surface hover:bg-active rounded-lg text-ink text-sm font-medium transition-colors"
                       >
                         {t('Retry Connection')}
                       </button>
                     </div>
                   ) : (
-                    <div className="flex flex-col items-center gap-3 text-zinc-400">
+                    <div className="flex flex-col items-center gap-3 text-tertiary">
                       <EyeIcon className="h-12 w-12 opacity-50" />
                       <p>{t('Waiting for preview...')}</p>
                     </div>

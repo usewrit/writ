@@ -43,7 +43,7 @@ export const CopyButton: React.FC<{
       className={clsx(
         'inline-flex items-center gap-1.5 text-xs transition-colors',
         tone === 'on-dark'
-          ? 'rounded bg-white/15 px-2 py-0.5 font-medium text-white hover:bg-white/25'
+          ? 'rounded bg-surface/15 px-2 py-0.5 font-medium text-white hover:bg-surface/25'
           : 'text-secondary hover:text-ink',
       )}
     >

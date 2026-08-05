@@ -48,6 +48,10 @@ import {
   ArrowUpTrayIcon,
   ArrowDownTrayIcon,
   StopIcon,
+  LightBulbIcon,
+  LockClosedIcon,
+  QueueListIcon,
+  EyeSlashIcon,
 } from '@heroicons/react/24/outline';
 import { ScribeMark } from './brand/ScribeMark';
 import toast from 'react-hot-toast';
@@ -64,7 +68,8 @@ import type { WorkflowStep } from '../types/api';
 import { createStep, stepMeta, GROUP_NODE_STYLE } from './steps/stepMeta';
 import { StepConfigForm } from './steps/StepConfigForm';
 import { StepTypePalette } from './steps/StepTypePalette';
-import { Checkbox, NumberInput, Select, Switch, ScrollArea } from './ui';
+import { Button, Checkbox, NumberInput, Select, Switch, ScrollArea, EmptyHero, toastIcon } from './ui';
+import { formatMoneyMicros as formatUsd } from '../utils/money';
 
 /**
  * Mint a single-use, short-lived WebSocket auth ticket so the long-lived JWT does
@@ -336,6 +341,7 @@ const STEP_TYPE_ICON: Record<string, HeroIcon> = {
   api_call: LinkIcon,
   upload: ArrowUpTrayIcon,
   wait_for_download: ArrowDownTrayIcon,
+  twofa: ShieldCheckIcon,
 };
 
 // Render a value string with {{tags}} highlighted as colored chips
@@ -412,6 +418,8 @@ const getStepTitle = (step: RecordedStep): string => {
     const label = options.label || '';
     return label ? i18n.t('Uncheck "{{label}}"', { label: label.substring(0, 20) }) : i18n.t('Uncheck');
   }
+
+  if (step.type === 'twofa') return i18n.t('Enter 2FA code');
 
   if (step.type === 'scroll') {
     if (options.container || step.selector) {
@@ -646,8 +654,8 @@ const StepFormPanel: React.FC<{
         <span className={clsx('w-6 h-6 rounded-md flex items-center justify-center shrink-0', GROUP_NODE_STYLE[meta.group])}>
           <Icon className="w-3 h-3" />
         </span>
-        <span className="text-sm font-semibold text-ink">{meta.label}</span>
-        <span className="text-[11px] text-tertiary truncate">{meta.description}</span>
+        <span className="text-sm font-semibold text-ink">{t(meta.label)}</span>
+        <span className="text-[11px] text-tertiary truncate">{t(meta.description)}</span>
       </div>
 
       <StepConfigForm step={step} onUpdate={onChange} onPickSelector={onPickSelector} />
@@ -764,7 +772,7 @@ const ManualStepAdder: React.FC<{
     <>
       <button
         onClick={() => setOpen(true)}
-        className="w-full px-3 py-2 border border-dashed border-border rounded-lg text-secondary hover:text-ink hover:border-gray-500 text-xs flex items-center justify-center gap-1.5 transition-colors"
+        className="w-full px-3 py-2 border border-dashed border-border rounded-lg text-secondary hover:text-ink hover:border-border-strong text-xs flex items-center justify-center gap-1.5 transition-colors"
       >
         <PlusIcon className="w-3.5 h-3.5" /> {t('Add Step Manually')}
       </button>
@@ -859,6 +867,14 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   const reconnectAttemptsRef = useRef(0);
   const MAX_RECONNECT_ATTEMPTS = 5;
   const wasRecordingRef = useRef(false);
+  // Set when the session ends INTENTIONALLY (Stop button / idle timeout). The
+  // agent tears the session down after `stop` and then closes this socket —
+  // without this flag that close is indistinguishable from a dropped
+  // connection, so onclose flipped to 'disconnected', which re-armed the
+  // auto-connect effect and silently started a brand-new recording session
+  // (fresh "Recording started!" toast + re-recorded navigation steps): an
+  // unstoppable Stop. Cleared on the next connect().
+  const userStoppedRef = useRef(false);
 
   // Idle timeout — close session if no user activity for 5 minutes
   const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -868,13 +884,17 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     idleTimerRef.current = setTimeout(() => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        toast(t('Recording stopped — idle timeout'), { icon: '⏱' });
+        toast(t('Recording stopped — idle timeout'), { icon: toastIcon(ClockIcon) });
         // Stop recording inline (can't reference stopRecording here)
         wasRecordingRef.current = false;
+        userStoppedRef.current = true;
         try { wsRef.current.send(JSON.stringify({ type: 'stop' })); } catch {}
         wsRef.current.close();
         wsRef.current = null;
-        setConnectionState('disconnected');
+        // Post-stop review state — NOT 'disconnected', which would re-arm the
+        // auto-connect effect and open a fresh session while the user is away.
+        // Steps stay in the rail for the wizard to finalize.
+        setConnectionState('connected');
       }
     }, IDLE_TIMEOUT_MS);
   }, []);
@@ -931,7 +951,12 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   const [showPersonaWizard, setShowPersonaWizard] = useState(false);
   const [showAuthImport, setShowAuthImport] = useState(false);
   const [personaPromptDismissed, setPersonaPromptDismissed] = useState(false);
-  const twofaToastShownRef = useRef(false);
+  // Persona attached from this recorder (wizard-created or authenticator import). Unlike
+  // personaPromptDismissed this survives a reconnect — the attachment lives on the draft
+  // (onPersonaCreated → wizard config), so the unattended hint must not re-nag.
+  const [attachedPersonaId, setAttachedPersonaId] = useState<number | null>(null);
+  // Rail fully hidden (beyond the collapsed strip): only the stage pill can bring it back.
+  const [railHidden, setRailHidden] = useState(false);
   const [capturedFormData, setCapturedFormData] = useState<Record<string, string>>({});
 
   // UI state
@@ -1291,7 +1316,6 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
       setDetected2fa(false);
       setDetected2faChannel(null);
       setPersonaPromptDismissed(false);
-      twofaToastShownRef.current = false;
       setOpenTabs([]);
       // Reset API capture state
       setCapturedApiRequests([]);
@@ -1442,6 +1466,8 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
     }
 
     setConnectionState('connecting');
+    // A fresh session supersedes any prior intentional stop.
+    userStoppedRef.current = false;
 
     // Connect to backend recorder proxy (backend handles recorder selection transparently)
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1591,15 +1617,12 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
 
           case 'twofa_detected':
             // The recorder spotted a one-time-code field and emitted a `twofa`
-            // step (the literal code is never recorded). Flag it so we can offer
-            // to set up a persona that solves 2FA automatically on future runs.
+            // step (the literal code is never recorded). Flag it — the floating
+            // "Run this unattended" card appears top-right with the create/import
+            // actions (it replaced the old actionless toast).
             setDetected2fa(true);
             if (data.channel_hint && data.channel_hint !== 'unknown') {
               setDetected2faChannel(data.channel_hint);
-            }
-            if (!twofaToastShownRef.current) {
-              twofaToastShownRef.current = true;
-              toast.success(t('2FA step detected — set up automatic codes with a persona.'), { duration: 3500 });
             }
             break;
 
@@ -1859,6 +1882,17 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
         if (wsRef.current !== ws) return;
         wsRef.current = null;
 
+        // Operator-initiated stop: the agent tears the session down after
+        // `stop` and then closes this socket. That close is EXPECTED — stay in
+        // the post-stop 'connected' review state (the 'stopped' frame already
+        // set it; this is the race-safe fallback) so the auto-connect effect
+        // (gated on 'disconnected') never restarts a session the user just
+        // ended.
+        if (userStoppedRef.current) {
+          setConnectionState('connected');
+          return;
+        }
+
         // Plan/capacity refusals from the gateway (pre-recording). Surface the
         // blocking gate instead of a silent close. 4009 = cloud quota exhausted
         // /disabled; 4003 = no recorder available right now.
@@ -1877,7 +1911,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
           const delay = Math.min(1000 * Math.pow(1.5, reconnectAttemptsRef.current), 10000);
           reconnectAttemptsRef.current += 1;
           setConnectionState('connecting');
-          toast(t('Recorder disconnected — reconnecting ({{n}}/{{max}})...', { n: reconnectAttemptsRef.current, max: MAX_RECONNECT_ATTEMPTS }), { icon: '🔄' });
+          toast(t('Recorder disconnected — reconnecting ({{n}}/{{max}})...', { n: reconnectAttemptsRef.current, max: MAX_RECONNECT_ATTEMPTS }), { icon: toastIcon(ArrowPathIcon) });
 
           reconnectTimerRef.current = setTimeout(() => {
             connect();
@@ -1902,6 +1936,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   // Stop recording
   const stopRecording = useCallback(() => {
     wasRecordingRef.current = false;
+    userStoppedRef.current = true;
     reconnectAttemptsRef.current = 0;
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
@@ -2492,7 +2527,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
       }
 
       if (data.credits_used) {
-        toast(data.credits_used === 1 ? t('Used {{n}} credit', { n: data.credits_used }) : t('Used {{n}} credits', { n: data.credits_used }), { icon: '✨', duration: 2000 });
+        toast(t('Used {{amount}}', { amount: formatUsd(data.credits_used) }), { icon: toastIcon(SparklesIcon), duration: 2000 });
       }
     } catch (err: any) {
       const detail = err?.response?.data?.detail || err?.response?.data?.error || err.message || t('AI request failed');
@@ -2539,7 +2574,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
         setOptimizeNote(warnings[0] || t('Workflow looks good — no safe changes found.'));
       }
       if (data.credits_used) {
-        toast(data.credits_used === 1 ? t('Used {{n}} credit', { n: data.credits_used }) : t('Used {{n}} credits', { n: data.credits_used }), { icon: '✨', duration: 2000 });
+        toast(t('Used {{amount}}', { amount: formatUsd(data.credits_used) }), { icon: toastIcon(SparklesIcon), duration: 2000 });
       }
     } catch (err: any) {
       const detail = err?.response?.data?.detail || err?.response?.data?.error || err.message || t('Optimization failed');
@@ -2730,7 +2765,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
           break;
         }
 
-        if (data.credits_used) toast(data.credits_used === 1 ? t('AI used {{n}} credit', { n: data.credits_used }) : t('AI used {{n}} credits', { n: data.credits_used }), { icon: '✨', duration: 1500 });
+        if (data.credits_used) toast(t('AI used {{amount}}', { amount: formatUsd(data.credits_used) }), { icon: toastIcon(SparklesIcon), duration: 1500 });
         if (data.thought) setScraperLog(p => [...p, { kind: 'thought', text: data.thought }]);
 
         if (data.action === 'done' && data.script) {
@@ -2755,7 +2790,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
           observation = obs;
           const sampledResults = results.map((r: any) => (r && 'eval_result' in r ? { ...r, eval_result: sampleForModel(r.eval_result) } : r));
           history.push({ thought: data.thought, actions, results: sampledResults });
-          const preview = sampledResults.map((r: any) => r?.error ? `✗ ${r.action}: ${r.error}` : (r?.eval_result !== undefined ? `${r.action} → ${JSON.stringify(r.eval_result).slice(0, 200)}` : `✓ ${r?.action}`)).join('\n');
+          const preview = sampledResults.map((r: any) => r?.error ? `${r.action} — failed: ${r.error}` : (r?.eval_result !== undefined ? `${r.action} → ${JSON.stringify(r.eval_result).slice(0, 200)}` : `${r?.action} — ok`)).join('\n');
           setScraperLog(p => [...p, { kind: 'result', text: preview.slice(0, 600) }]);
         } catch (err: any) {
           history.push({ thought: data.thought, actions, results: [{ error: String(err?.message || err).slice(0, 300) }] });
@@ -2910,7 +2945,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
       }
       if (chatStopRef.current) { setAiChatMessages(prev => [...prev, { role: 'assistant', content: t('Stopped.') }]); break; }
       ctx.iteration += 1;
-      if (data.credits_used) toast(data.credits_used === 1 ? t('AI used {{n}} credit', { n: data.credits_used }) : t('AI used {{n}} credits', { n: data.credits_used }), { icon: '✨', duration: 1500 });
+      if (data.credits_used) toast(t('AI used {{amount}}', { amount: formatUsd(data.credits_used) }), { icon: toastIcon(SparklesIcon), duration: 1500 });
 
       if (data.action === 'retry') {
         // The backend couldn't parse the model's JSON. Feed the exact error back
@@ -3013,8 +3048,8 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
             continue;
           }
           setAiChatMessages(prev => [...prev, { role: 'assistant', content: timedOut
-            ? t('⚠️ Could not verify within 90s (script may be slow) — review carefully before applying.')
-            : t('Verified ✓ returned {{n}} item(s). Review and Apply when ready.', { n: countOf(evalRes) }), kind: 'result' }]);
+            ? t('Could not verify within 90s (script may be slow) — review carefully before applying.')
+            : t('Verified — returned {{n}} item(s). Review and Apply when ready.', { n: countOf(evalRes) }), kind: 'result' }]);
         }
 
         // Verified (or nothing to verify) → PREVIEW for the user to confirm. Never auto-applied.
@@ -3407,15 +3442,15 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
 
                 {/* Tab bar — only show when multiple tabs are open */}
                 {openTabs.length > 1 && (
-                  <div className="flex items-center gap-0.5 px-3 py-1 bg-zinc-100 border-b border-border overflow-x-auto">
+                  <div className="flex items-center gap-0.5 px-3 py-1 bg-hover border-b border-border overflow-x-auto">
                     {openTabs.map((tab) => (
                       <div
                         key={tab.index}
                         className={clsx(
                           'flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs max-w-[200px] cursor-pointer transition-colors group',
                           tab.active
-                            ? 'bg-white text-ink shadow-sm border border-border'
-                            : 'text-secondary hover:bg-white/60 hover:text-ink'
+                            ? 'bg-surface text-ink shadow-sm border border-border'
+                            : 'text-secondary hover:bg-surface/60 hover:text-ink'
                         )}
                         onClick={() => {
                           if (tab.active || !wsRef.current) return;
@@ -3438,7 +3473,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                 tab_index: tab.index,
                               }));
                             }}
-                            className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-zinc-200 rounded transition-opacity"
+                            className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-active rounded transition-opacity"
                           >
                             <XMarkIcon className="w-3 h-3" />
                           </button>
@@ -3464,7 +3499,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                         // below is relative to THIS wrapper, so it shrinks to fit the remaining
                         // space — responsive on any viewport.
                         'absolute bottom-0 left-0 z-40 flex justify-center items-end pointer-events-none transition-[right] duration-300 ease-out',
-                        showSteps ? 'right-[21rem]' : 'right-[4.75rem]',
+                        railHidden ? 'right-3' : showSteps ? 'right-[21rem]' : 'right-[4.75rem]',
                       )}
                     >
                     <div
@@ -3918,7 +3953,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                     }}
                                     placeholder="handler_name"
                                     autoFocus
-                                    className="w-28 px-2 py-1.5 text-xs font-mono border border-zinc-300 rounded bg-white text-ink"
+                                    className="w-28 px-2 py-1.5 text-xs font-mono border border-border rounded bg-surface text-ink"
                                   />
                                   <button
                                     onClick={() => {
@@ -3937,8 +3972,9 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                   <button
                                     onClick={() => { setShowHandlerNameInput(false); setHandlerNameInput(''); }}
                                     className="px-2 py-1.5 text-secondary hover:text-ink text-xs"
+                                    aria-label={t('Cancel')}
                                   >
-                                    ✕
+                                    <XMarkIcon className="h-4 w-4" aria-hidden="true" />
                                   </button>
                                 </div>
                               ) : (
@@ -4003,6 +4039,26 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                               ? <ArrowPathIcon className="h-3.5 w-3.5 animate-spin" />
                               : <PlayIcon className="h-3.5 w-3.5" />}
                             {t('Start')}
+                          </button>
+                        </>
+                      )}
+                      {/* Rail re-opener — the ONLY way back once the rail is fully hidden
+                          (the strip's eye-slash). Lives in the pill so it exists in every
+                          connection state; the count keeps announcing new steps meanwhile. */}
+                      {railHidden && (
+                        <>
+                          <div className="w-px h-5 bg-border" />
+                          <button
+                            onClick={() => setRailHidden(false)}
+                            className="relative p-1.5 rounded-lg text-secondary hover:bg-active hover:text-ink transition-colors"
+                            title={monitorMode ? t('Show monitor panel') : t('Show recording panel')}
+                          >
+                            <QueueListIcon className="h-4 w-4" />
+                            {(monitorMode ? (monitorTargetCount || 0) : displaySteps.length) > 0 && (
+                              <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-0.5 rounded-full bg-ink text-white text-[9px] font-bold flex items-center justify-center tabular-nums">
+                                {monitorMode ? monitorTargetCount : displaySteps.length}
+                              </span>
+                            )}
                           </button>
                         </>
                       )}
@@ -4111,16 +4167,16 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                         )}
                         {connectionState === 'recording' && !isExtracting && (
                           <div className="absolute top-3 left-3 px-2.5 py-1.5 bg-ink text-white text-[11px] font-medium rounded-lg flex items-center gap-1.5 shadow-sm">
-                            <span className="w-1.5 h-1.5 bg-white rounded-full animate-pulse" />
+                            <span className="w-1.5 h-1.5 bg-surface rounded-full animate-pulse" />
                             {t('REC')}
                           </div>
                         )}
                         {isExtracting && (
                           <div className="absolute top-3 left-3 px-2.5 py-1.5 bg-ink text-white text-[11px] font-medium rounded-lg flex items-center gap-2 shadow-sm">
-                            <span className="w-1.5 h-1.5 bg-white rounded-full" />
+                            <span className="w-1.5 h-1.5 bg-surface rounded-full" />
                             {pickActive ? t('Click an element to use its selector') : t('EXTRACT — Click element to select')}
                             {pickActive && (
-                              <button onClick={cancelPickSelector} className="ml-0.5 px-1.5 py-0.5 rounded bg-white/20 hover:bg-white/30 text-[10px] font-medium transition-colors">
+                              <button onClick={cancelPickSelector} className="ml-0.5 px-1.5 py-0.5 rounded bg-surface/20 hover:bg-surface/30 text-[10px] font-medium transition-colors">
                                 {t('Cancel')}
                               </button>
                             )}
@@ -4254,7 +4310,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                             />
                             {/* Options dropdown */}
                             <div
-                              className="absolute z-20 bg-white border border-gray-300 rounded-md shadow-lg overflow-hidden"
+                              className="absolute z-20 bg-surface border border-border rounded-md shadow-lg overflow-hidden"
                               style={{
                                 left: `${(selectOverlay.position.x / 1280) * canvasRef.current.getBoundingClientRect().width}px`,
                                 top: `${(selectOverlay.position.y / 800) * canvasRef.current.getBoundingClientRect().height}px`,
@@ -4262,7 +4318,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                 maxHeight: '200px',
                               }}
                             >
-                              <div className="bg-gray-100 px-3 py-1.5 text-xs font-medium text-tertiary border-b">
+                              <div className="bg-hover px-3 py-1.5 text-xs font-medium text-tertiary border-b">
                                 {selectOverlay.name || t('Select an option')}
                               </div>
                               <div className="overflow-y-auto max-h-[180px]">
@@ -4274,10 +4330,10 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                     className={clsx(
                                       'w-full text-left px-3 py-2 text-sm transition-colors',
                                       option.disabled
-                                        ? 'text-secondary cursor-not-allowed bg-gray-50'
+                                        ? 'text-secondary cursor-not-allowed bg-canvas'
                                         : option.selected
                                           ? 'bg-ink/10 text-ink hover:bg-ink/15'
-                                          : 'text-gray-700 hover:bg-gray-100'
+                                          : 'text-ink hover:bg-hover'
                                     )}
                                   >
                                     {option.text || option.value || t('Option {{n}}', { n: idx + 1 })}
@@ -4298,14 +4354,14 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                             />
                             {/* Picker container */}
                             <div
-                              className="absolute z-20 bg-white border border-gray-300 rounded-lg shadow-lg overflow-hidden"
+                              className="absolute z-20 bg-surface border border-border rounded-lg shadow-lg overflow-hidden"
                               style={{
                                 left: `${(pickerOverlay.position.x / 1280) * canvasRef.current.getBoundingClientRect().width}px`,
                                 top: `${(pickerOverlay.position.y / 800) * canvasRef.current.getBoundingClientRect().height}px`,
                                 minWidth: '200px',
                               }}
                             >
-                              <div className="bg-gray-100 px-3 py-2 text-xs font-medium text-tertiary border-b flex items-center justify-between">
+                              <div className="bg-hover px-3 py-2 text-xs font-medium text-tertiary border-b flex items-center justify-between">
                                 <span>
                                   {pickerOverlay.pickerType === 'date' && t('Select Date')}
                                   {pickerOverlay.pickerType === 'time' && t('Select Time')}
@@ -4317,8 +4373,9 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                 <button
                                   onClick={closePickerOverlay}
                                   className="text-secondary hover:text-tertiary"
+                                  aria-label={t('Close')}
                                 >
-                                  ✕
+                                  <XMarkIcon className="h-4 w-4" aria-hidden="true" />
                                 </button>
                               </div>
                               <div className="p-3">
@@ -4330,7 +4387,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                     min={pickerOverlay.min}
                                     max={pickerOverlay.max}
                                     onChange={(e) => handlePickerValue(e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-ink focus:border-ink"
+                                    className="w-full px-3 py-2 border border-border rounded-md focus:ring-2 focus:ring-ink focus:border-ink"
                                     autoFocus
                                   />
                                 )}
@@ -4344,7 +4401,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                     max={pickerOverlay.max}
                                     step={pickerOverlay.step}
                                     onChange={(e) => handlePickerValue(e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-ink focus:border-ink"
+                                    className="w-full px-3 py-2 border border-border rounded-md focus:ring-2 focus:ring-ink focus:border-ink"
                                     autoFocus
                                   />
                                 )}
@@ -4357,7 +4414,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                     min={pickerOverlay.min}
                                     max={pickerOverlay.max}
                                     onChange={(e) => handlePickerValue(e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-ink focus:border-ink"
+                                    className="w-full px-3 py-2 border border-border rounded-md focus:ring-2 focus:ring-ink focus:border-ink"
                                     autoFocus
                                   />
                                 )}
@@ -4370,7 +4427,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                     min={pickerOverlay.min}
                                     max={pickerOverlay.max}
                                     onChange={(e) => handlePickerValue(e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-ink focus:border-ink"
+                                    className="w-full px-3 py-2 border border-border rounded-md focus:ring-2 focus:ring-ink focus:border-ink"
                                     autoFocus
                                   />
                                 )}
@@ -4383,7 +4440,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                     min={pickerOverlay.min}
                                     max={pickerOverlay.max}
                                     onChange={(e) => handlePickerValue(e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-ink focus:border-ink"
+                                    className="w-full px-3 py-2 border border-border rounded-md focus:ring-2 focus:ring-ink focus:border-ink"
                                     autoFocus
                                   />
                                 )}
@@ -4395,7 +4452,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                       type="color"
                                       defaultValue={pickerOverlay.currentValue || '#000000'}
                                       onChange={(e) => handlePickerValue(e.target.value)}
-                                      className="w-full h-12 cursor-pointer border border-gray-300 rounded-md"
+                                      className="w-full h-12 cursor-pointer border border-border rounded-md"
                                       autoFocus
                                     />
                                     <input
@@ -4407,7 +4464,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                           handlePickerValue(e.target.value);
                                         }
                                       }}
-                                      className="w-full px-3 py-1 text-sm border border-gray-300 rounded-md font-mono"
+                                      className="w-full px-3 py-1 text-sm border border-border rounded-md font-mono"
                                     />
                                   </div>
                                 )}
@@ -4579,6 +4636,63 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                       Progressive disclosure: the Requests and Functions tabs only appear
                       when there is something to show, so an empty recording leaves the
                       stage maximal. */}
+                  {/* Floating "Run this unattended" hint — surfaces top-right over the stage
+                      the moment a login or a 2FA step is captured, matching the rail's top
+                      band and retreating left of it exactly like the AI dock. Its old home
+                      (the bottom of the steps tab) was buried once the rail started life
+                      collapsed. Dismissible; gone for good once a persona is attached. */}
+                  {(() => {
+                    const has2fa = detected2fa || steps.some((s) => s.type === 'twofa');
+                    const hasLogin = detectedCredentials.length > 0 || has2fa;
+                    if (!hasLogin || personaPromptDismissed || attachedPersonaId !== null) return null;
+                    return (
+                      <div
+                        className={clsx(
+                          'absolute z-40 w-[300px] max-w-[calc(100%-6.5rem)] rounded-2xl border border-border bg-surface/95 backdrop-blur-xl shadow-2xl p-4 transition-[right] duration-300 ease-out',
+                          monitorMode ? 'top-28' : 'top-16',
+                          railHidden ? 'right-3' : showSteps ? 'right-[21rem]' : 'right-[4.75rem]',
+                        )}
+                      >
+                        <div className="flex items-start gap-3">
+                          <div className="h-8 w-8 shrink-0 rounded-full border border-border flex items-center justify-center">
+                            <ShieldCheckIcon className="h-4 w-4 text-ink" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-semibold text-ink">{t('Run this unattended')}</div>
+                            <p className="text-xs text-secondary mt-1 leading-relaxed">
+                              {has2fa
+                                ? t('This login uses 2FA. A persona signs in and enters codes automatically on every run.')
+                                : t('Save a persona so future runs sign in automatically.')}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => setPersonaPromptDismissed(true)}
+                            className="shrink-0 -mt-1 -mr-1 p-1 rounded text-tertiary hover:text-ink hover:bg-chrome transition-colors"
+                            title={t('Dismiss')}
+                          >
+                            <XMarkIcon className="h-4 w-4" />
+                          </button>
+                        </div>
+                        <div className="mt-3 flex flex-col items-start gap-2">
+                          <button
+                            onClick={() => setShowPersonaWizard(true)}
+                            className="flex items-center gap-1.5 px-3 py-1.5 bg-accent-strong text-accent-on text-xs font-semibold shadow-sm rounded-lg hover:bg-accent-strong/90 transition-colors"
+                          >
+                            <PlusIcon className="h-3.5 w-3.5" /> {t('Create persona')}
+                          </button>
+                          {has2fa && (
+                            <button
+                              onClick={() => setShowAuthImport(true)}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-surface text-ink border border-border text-xs font-medium rounded-lg hover:bg-chrome transition-colors"
+                            >
+                              <QrCodeIcon className="h-3.5 w-3.5" /> {t('Import 2FA secret')}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {(() => {
                     // What the spine can surface right now.
                     const requestCount = apiMode ? capturedApiRequests.length : detectedRequests.length;
@@ -4629,7 +4743,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                       // The stage toolbar is present in EVERY state now, so the strip clears
                       // it unconditionally (monitor mode also clears its action switcher).
                       monitorMode ? 'top-28' : 'top-16',
-                      showSteps ? "opacity-0 translate-x-2 pointer-events-none" : "opacity-100 translate-x-0"
+                      (showSteps || railHidden) ? "opacity-0 translate-x-2 pointer-events-none" : "opacity-100 translate-x-0"
                     )}>
                       <button
                         onClick={() => { setSpineTab(monitorMode ? 'targets' : 'steps'); setShowSteps(true); }}
@@ -4667,6 +4781,15 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                           );
                         })}
                       </div>
+                      {/* Hide the rail entirely — the stage pill grows a re-opener while
+                          hidden (the only way back), so the browser owns the full width. */}
+                      <button
+                        onClick={() => setRailHidden(true)}
+                        title={t('Hide panel — reopen from the toolbar')}
+                        className="shrink-0 flex items-center justify-center py-1.5 border-t border-border text-tertiary hover:text-ink hover:bg-chrome/40 transition-colors"
+                      >
+                        <EyeSlashIcon className="h-3.5 w-3.5" />
+                      </button>
                     </div>
 
                     {/* Floating rail — a detached glass card (same language as the floating
@@ -4679,7 +4802,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                       // so this offset no longer changes with the connection state — the rail
                       // stops jumping when a recording starts.
                       monitorMode ? 'top-28' : 'top-16',
-                      showSteps ? "translate-x-0 opacity-100" : "translate-x-[calc(100%+0.75rem)] opacity-0 pointer-events-none"
+                      (showSteps && !railHidden) ? "translate-x-0 opacity-100" : "translate-x-[calc(100%+0.75rem)] opacity-0 pointer-events-none"
                     )}>
                     <>
 
@@ -4905,13 +5028,13 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                           rather than a raw scroller, same as every other list surface. */}
                       <ScrollArea className="flex-1" viewportClassName="px-3 py-3" viewportRef={stepListScrollRef}>
                         {displaySteps.length === 0 ? (
-                          <div className="text-center py-10">
-                            <div className="w-10 h-10 rounded-full bg-hover border border-border flex items-center justify-center mx-auto mb-3">
-                              <CursorArrowRaysIcon className="h-5 w-5 text-tertiary" />
-                            </div>
-                            <p className="text-xs text-secondary">{t('Interact with the browser')}</p>
-                            <p className="text-[11px] text-tertiary mt-0.5">{t('Steps will appear here')}</p>
-                          </div>
+                          <EmptyHero
+                            size="sm"
+                            icon={CursorArrowRaysIcon}
+                            title={t('Interact with the browser')}
+                            description={t('Steps will appear here')}
+                            className="py-10"
+                          />
                         ) : (() => {
                           // Pre-compute function membership per step
                           const segForStep = new Map<number, typeof detectedSegments[0]>();
@@ -5017,19 +5140,19 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                         {step.title}
                                       </span>
                                       {step.isSensitive && (
-                                        <span className="px-1.5 py-0.5 text-[9px] bg-ink/8 text-secondary rounded-full font-medium">{t('SENSITIVE')}</span>
+                                        <span className="px-1.5 py-0.5 text-[9px] bg-ink/[0.08] text-secondary rounded-full font-medium">{t('SENSITIVE')}</span>
                                       )}
                                       {step.isFromPicker && (
-                                        <span className="px-1.5 py-0.5 text-[9px] bg-ink/8 text-secondary rounded-full font-medium">{t('PICKER')}</span>
+                                        <span className="px-1.5 py-0.5 text-[9px] bg-ink/[0.08] text-secondary rounded-full font-medium">{t('PICKER')}</span>
                                       )}
                                       {step.isFromAutocomplete && (
-                                        <span className="px-1.5 py-0.5 text-[9px] bg-ink/8 text-secondary rounded-full font-medium">{t('AUTO')}</span>
+                                        <span className="px-1.5 py-0.5 text-[9px] bg-ink/[0.08] text-secondary rounded-full font-medium">{t('AUTO')}</span>
                                       )}
                                       {step.isFromCustomDropdown && (
-                                        <span className="px-1.5 py-0.5 text-[9px] bg-ink/8 text-secondary rounded-full font-medium">{t('CUSTOM')}</span>
+                                        <span className="px-1.5 py-0.5 text-[9px] bg-ink/[0.08] text-secondary rounded-full font-medium">{t('CUSTOM')}</span>
                                       )}
                                       {step.isViaKeyboard && (
-                                        <span className="px-1.5 py-0.5 text-[9px] bg-ink/8 text-secondary rounded-full font-medium">{t('KB')}</span>
+                                        <span className="px-1.5 py-0.5 text-[9px] bg-ink/[0.08] text-secondary rounded-full font-medium">{t('KB')}</span>
                                       )}
                                     </div>
                                     {step.description && (
@@ -5158,7 +5281,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                     {/* Function container */}
                                     <div className="rounded-lg border border-ink/10 bg-ink/[0.02] overflow-hidden">
                                       {/* Function label bar */}
-                                      <div className="flex items-center gap-2 px-3 py-1.5 bg-ink/[0.04] border-b border-ink/8">
+                                      <div className="flex items-center gap-2 px-3 py-1.5 bg-ink/[0.04] border-b border-ink/[0.08]">
                                         <BoltIcon className="h-3 w-3 text-ink/60" />
                                         <span className="text-[11px] font-mono font-medium text-ink">{run.seg.name}</span>
                                         <span className="text-[9px] text-tertiary ml-auto">{run.items.length === 1 ? t('{{n}} step', { n: run.items.length }) : t('{{n}} steps', { n: run.items.length })}</span>
@@ -5254,7 +5377,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                     return (
                                       <span
                                         key={idx}
-                                        className="inline-flex items-center gap-1 px-2 py-1 bg-ink/8 rounded-md text-[10px] text-ink font-medium animate-step-enter cursor-pointer hover:bg-ink/15 transition-colors"
+                                        className="inline-flex items-center gap-1 px-2 py-1 bg-ink/[0.08] rounded-md text-[10px] text-ink font-medium animate-step-enter cursor-pointer hover:bg-ink/15 transition-colors"
                                         onClick={() => toggleStepSelection(idx)}
                                       >
                                         <Icon className="h-2.5 w-2.5 text-secondary" />
@@ -5313,54 +5436,9 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                     )}
                     {/* === END STEPS TAB === */}
 
-                    {/* Offer to capture the recorded login as a persona so runs
-                        sign in (and pass 2FA) unattended. Shows once a login or a
-                        2FA step is detected. */}
-                    {activeTab === 'steps' && (() => {
-                      const hasLogin =
-                        detectedCredentials.length > 0 || detected2fa || steps.some((s) => s.type === 'twofa');
-                      if (!hasLogin || personaPromptDismissed) return null;
-                      return (
-                        <div className="border-t border-border bg-hover/20">
-                          <div className="px-4 py-3 space-y-2">
-                            <div className="flex items-start gap-2">
-                              <ShieldCheckIcon className="h-4 w-4 text-secondary mt-0.5 shrink-0" />
-                              <div className="flex-1 min-w-0">
-                                <div className="text-xs text-ink font-medium">{t('Run this unattended')}</div>
-                                <p className="text-[10px] text-tertiary mt-0.5">
-                                  {detected2fa
-                                    ? t('This login uses 2FA. A persona signs in and enters codes automatically on every run.')
-                                    : t('Save a persona so future runs sign in automatically.')}
-                                </p>
-                              </div>
-                              <button
-                                onClick={() => setPersonaPromptDismissed(true)}
-                                className="text-tertiary hover:text-ink shrink-0"
-                                title={t('Dismiss')}
-                              >
-                                <XMarkIcon className="h-3.5 w-3.5" />
-                              </button>
-                            </div>
-                            <div className="flex items-center gap-2 pl-6">
-                              <button
-                                onClick={() => setShowPersonaWizard(true)}
-                                className="flex items-center gap-1.5 px-2.5 py-1 bg-accent-strong text-accent-on text-[11px] font-semibold shadow-sm rounded-lg hover:bg-accent-strong/90 transition-colors"
-                              >
-                                <PlusIcon className="h-3.5 w-3.5" /> {t('Create persona')}
-                              </button>
-                              {detected2fa && (
-                                <button
-                                  onClick={() => setShowAuthImport(true)}
-                                  className="flex items-center gap-1.5 px-2.5 py-1 bg-surface text-ink border border-border text-[11px] font-medium rounded-lg hover:bg-chrome transition-colors"
-                                >
-                                  <QrCodeIcon className="h-3.5 w-3.5" /> {t('Import 2FA secret')}
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })()}
+                    {/* The "Run this unattended" persona offer now floats top-right over the
+                        stage (see the card above the rail) — docked here it was buried the
+                        moment the rail started life collapsed. */}
 
                     {/* Detected Data Section */}
                     {activeTab === 'steps' && detectedCredentials.length > 0 && (
@@ -5450,7 +5528,30 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
 
                     {/* === FUNCTIONS TAB === grouped segments + streaming handlers */}
                     {/* Functions / Segments */}
-                    {activeTab === 'functions' && detectedSegments.length > 0 && connectionState !== 'recording' && (
+                    {/* Functions tab, nothing grouped yet: teach the concept instead of a
+                        blank pane — this tab is exactly where a user goes to learn what a
+                        function is. The CTA lands them in the builder (steps tab). */}
+                    {activeTab === 'functions' && !streamingMode && detectedSegments.length === 0 && (
+                      <div className="flex-1 min-h-0 flex flex-col justify-center border-t border-border">
+                        <EmptyHero
+                          size="sm"
+                          icon={BoltIcon}
+                          title={t('No functions yet')}
+                          description={t('A function is a named, reusable group of steps you can call on its own — from other workflows or the API. Select at least two steps that belong together, then group them.')}
+                          className="py-10"
+                        >
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => { setSpineTab('steps'); setFunctionBuilderOpen(true); }}
+                          >
+                            <BoltIcon className="h-3.5 w-3.5" />
+                            {t('Group Steps into Function')}
+                          </Button>
+                        </EmptyHero>
+                      </div>
+                    )}
+                    {activeTab === 'functions' && detectedSegments.length > 0 && (
                       <div className="border-t border-border">
                         <div className="px-4 py-2.5 border-b border-border bg-hover/40">
                           <div className="flex items-center gap-2">
@@ -5464,7 +5565,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                           {detectedSegments.map((seg, i) => (
                             <div key={i} className="px-2.5 py-2 bg-hover/30 rounded-lg text-xs group animate-step-enter" style={{ animationDelay: `${i * 50}ms` }}>
                               <div className="flex items-center gap-2">
-                                <span className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-ink/8 text-secondary uppercase">
+                                <span className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-ink/[0.08] text-secondary uppercase">
                                   {seg.segment_type}
                                 </span>
                                 <span className="text-ink font-medium truncate font-mono text-[11px]">{seg.name}</span>
@@ -5505,7 +5606,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                               >
                                 <div className="flex items-center gap-1.5">
                                   <code className="text-[11px] font-mono font-medium text-ink">{h.name}</code>
-                                  <span className="text-[10px] text-secondary bg-zinc-200/60 px-1 py-0.5 rounded">
+                                  <span className="text-[10px] text-secondary bg-active/60 px-1 py-0.5 rounded">
                                     {h.step_range[0]}–{h.step_range[1]}
                                   </span>
                                 </div>
@@ -5520,7 +5621,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                 </button>
                               </div>
                               {expandedHandlerId === h.name && (
-                                <div className="px-2.5 py-2 space-y-2 border-t border-border bg-white text-xs">
+                                <div className="px-2.5 py-2 space-y-2 border-t border-border bg-surface text-xs">
                                   <div className="flex gap-1.5 items-center">
                                     <label className="text-[10px] text-secondary w-12 shrink-0">{t('Steps:')}</label>
                                     <div className="w-16">
@@ -5626,7 +5727,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                   // watches the script fill in as the AI works.
                                   onClick={() => {
                                     if (connectionState !== 'recording' && connectionState !== 'connected') {
-                                      toast(t('Start the browser first — the AI writes the script against the live page.'), { icon: '💡' });
+                                      toast(t('Start the browser first — the AI writes the script against the live page.'), { icon: toastIcon(LightBulbIcon) });
                                       return;
                                     }
                                     setAiDockExpanded(true);
@@ -5635,7 +5736,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                     requestAnimationFrame(() => aiChatInputRef.current?.focus());
                                   }}
                                   title={t('Ask the AI to write this script — opens the assistant at the bottom of the stage')}
-                                  className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-ink bg-chrome rounded-md hover:bg-chrome transition-colors"
+                                  className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-ink bg-chrome rounded-md hover:bg-active transition-colors"
                                 >
                                   <ScribeMark className="w-3.5 h-3.5" />
                                   {t('AI Assist')}
@@ -5857,7 +5958,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                                   <span className="text-secondary truncate flex-1 font-mono">{(() => { try { return new URL(req.url).pathname; } catch { return req.url; } })()}</span>
                                   {req.function_name && (
                                     <span className="text-[10px] px-1 py-0.5 bg-ink/10 text-ink rounded font-medium">
-                                      {req.is_auth ? '🔐' : ''}{req.function_name}
+                                      {req.is_auth && <LockClosedIcon className="mr-1 inline-block h-3 w-3 align-[-2px]" aria-hidden="true" />}{req.function_name}
                                     </span>
                                   )}
                                 </div>
@@ -6075,6 +6176,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                   onSaved={(persona) => {
                     setShowPersonaWizard(false);
                     setPersonaPromptDismissed(true);
+                    if (persona?.id) setAttachedPersonaId(persona.id);
                     if (persona?.id && onPersonaCreated) {
                       onPersonaCreated(persona.id);
                       toast.success(t('Persona saved and attached to this workflow.'));
@@ -6094,6 +6196,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                   onImported={(created) => {
                     setShowAuthImport(false);
                     setPersonaPromptDismissed(true);
+                    if (created?.[0]?.id) setAttachedPersonaId(created[0].id);
                     // Attach the first imported persona as this workflow's default.
                     if (created?.[0]?.id && onPersonaCreated) {
                       onPersonaCreated(created[0].id);

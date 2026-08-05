@@ -14,13 +14,15 @@ import {
   EyeIcon,
   BellAlertIcon,
   BoltIcon,
+  Cog6ToothIcon,
 } from '@heroicons/react/24/outline';
 import { useQuery } from '../../hooks/useQuery';
 import { Q } from '../../stores/queryKeys';
-import { targetsApi, selectorsApi } from '../../api/endpoints';
+import { targetsApi, selectorsApi, triggersApi } from '../../api/endpoints';
 import { formatRelativeTime, formatDate } from '../../utils/format';
 import { tintStyle } from '../../utils/tint';
 import { LiveElapsed, LiveCountdown, IntervalProgress } from '../checks/LiveSince';
+import { EmptyHero } from '../ui';
 
 const PERIOD_LABELS: Record<number, string> = {
   10000: '10s', 30000: '30s', 60000: '1m', 300000: '5m',
@@ -76,6 +78,44 @@ const Fact: React.FC<{ icon: React.FC<any>; label: string; children: React.React
   </div>
 );
 
+/**
+ * ActionTile — one entry in the "When it changes" block. A shortcut into the
+ * capability that already implements the wiring (the Automations builder, the full
+ * monitor page, the settings tab). `accent` marks the headline action so the value
+ * prop — a monitor is a trigger you wire actions onto — lands first.
+ */
+const ActionTile: React.FC<{
+  icon: React.FC<any>;
+  label: string;
+  desc: string;
+  onClick: () => void;
+  accent?: boolean;
+  className?: string;
+}> = ({ icon: Icon, label, desc, onClick, accent, className }) => (
+  <button
+    onClick={onClick}
+    className={clsx(
+      'flex items-center gap-2.5 rounded-xl border p-2.5 text-left transition-colors active:scale-[0.99]',
+      'outline-none focus-visible:ring-2 focus-visible:ring-ink/30',
+      accent ? 'border-ink/20 bg-ink/[0.04] hover:bg-ink/[0.07]' : 'border-border bg-surface hover:bg-chrome',
+      className,
+    )}
+  >
+    <span
+      className={clsx(
+        'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+        accent ? 'bg-ink text-surface' : 'bg-chrome text-ink',
+      )}
+    >
+      <Icon className="h-4 w-4" />
+    </span>
+    <span className="min-w-0">
+      <span className="block text-[12px] font-medium text-ink truncate">{label}</span>
+      <span className="block text-[10.5px] text-tertiary truncate">{desc}</span>
+    </span>
+  </button>
+);
+
 interface MonitorDetailPaneProps {
   /** Lightweight list row for the selected monitor (instant render). Null → empty state. */
   target: any | null;
@@ -121,21 +161,26 @@ export const MonitorDetailPane: React.FC<MonitorDetailPaneProps> = ({
     { enabled: id != null, staleTime: 30000 },
   );
 
+  // What is wired to fire on a change. Fail soft to [] so a feed hiccup never blanks
+  // the pane — the action tiles must stay reachable even when this errors.
+  const { data: triggers } = useQuery(
+    id != null ? Q.targetTriggers(id) : 'target:none:triggers',
+    () => triggersApi.listForTarget(Number(id)).catch(() => []),
+    { enabled: id != null, staleTime: 30000 },
+  );
+
 
   const tg: any = full || row;
 
   // ── Empty state ──
   if (!row) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center text-center px-6">
-        <div className="w-12 h-12 rounded-2xl bg-chrome border border-border flex items-center justify-center mb-4">
-          <EyeIcon className="h-6 w-6 text-tertiary" />
-        </div>
-        <p className="text-sm font-medium text-ink">{t('Select a monitor')}</p>
-        <p className="text-xs text-secondary mt-1 max-w-xs">
-          {t('Pick one on the left to see its status, what it watches, and recent changes.')}
-        </p>
-      </div>
+      <EmptyHero
+        icon={EyeIcon}
+        title={t('Select a monitor')}
+        description={t('Pick one on the left to see its status, what it watches, and recent changes.')}
+        className="flex-1"
+      />
     );
   }
 
@@ -153,11 +198,17 @@ export const MonitorDetailPane: React.FC<MonitorDetailPaneProps> = ({
   const nextRun = tg.nextRunAt ?? tg.next_run_at
     ?? (lastChecked && periodMs ? new Date(new Date(lastChecked).getTime() + Math.max(periodMs, 60000)).toISOString() : null);
   const selectorList = selectors || [];
+  const triggerList = triggers || [];
   const changeList = changes || [];
 
   const respOk = statusCode != null && statusCode < 400;
   const respErr = statusCode != null && statusCode >= 400;
   const respClass = respOk ? 'text-success-fg' : respErr ? 'text-danger-fg' : 'text-ink';
+
+  const openPage = () => navigate(`/checks/${tg.id}`);
+  // Real entry point for wiring an action onto this monitor: the Automations
+  // builder reads `source=check&checkId=` and seeds the trigger for us.
+  const openAutomate = () => navigate(`/automations/new?source=check&checkId=${tg.id}`);
 
   return (
     <div className="flex flex-1 flex-col min-h-0">
@@ -174,7 +225,7 @@ export const MonitorDetailPane: React.FC<MonitorDetailPaneProps> = ({
 
           <div className="flex-1 min-w-0">
             <button
-              onClick={() => navigate(`/checks/${tg.id}`)}
+              onClick={openPage}
               className="text-[15px] font-semibold text-ink truncate hover:underline text-left block max-w-full min-w-0"
               title={tg.url}
             >
@@ -235,7 +286,7 @@ export const MonitorDetailPane: React.FC<MonitorDetailPaneProps> = ({
             {t('Edit')}
           </button>
           <button
-            onClick={() => navigate(`/checks/${tg.id}`)}
+            onClick={openPage}
             className="flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] font-medium text-secondary border border-border rounded-lg hover:bg-chrome hover:text-ink transition-colors"
           >
             <ArrowTopRightOnSquareIcon className="h-3.5 w-3.5" />
@@ -273,6 +324,46 @@ export const MonitorDetailPane: React.FC<MonitorDetailPaneProps> = ({
           </div>
         </div>
 
+        {/* When it changes — wire actions onto this monitor. Without this the pane
+            was a fact sheet: it could tell you something changed and offer no way to
+            do anything about it. The headline tile goes to the Automations builder
+            pre-seeded with this monitor as the trigger source. */}
+        <div>
+          <SectionLabel
+            right={triggerList.length > 0 ? (
+              <button onClick={openPage} className="text-[10px] text-tertiary hover:text-ink transition-colors">
+                {t('Manage')}
+              </button>
+            ) : undefined}
+          >
+            {t('When it changes')}
+          </SectionLabel>
+          <div className="grid grid-cols-2 gap-2">
+            <ActionTile
+              className="col-span-2"
+              accent
+              icon={BoltIcon}
+              label={t('Automate on change')}
+              desc={triggerList.length > 0
+                ? t('{{n}} wired · add another action', { n: triggerList.length })
+                : t('Notify · run a workflow · webhook')}
+              onClick={openAutomate}
+            />
+            <ActionTile
+              icon={Cog6ToothIcon}
+              label={t('Edit settings')}
+              desc={t('Frequency · login · watched')}
+              onClick={() => navigate(`/checks/${tg.id}?tab=settings`)}
+            />
+            <ActionTile
+              icon={ArrowTopRightOnSquareIcon}
+              label={t('Open page')}
+              desc={t('Full monitor page')}
+              onClick={openPage}
+            />
+          </div>
+        </div>
+
         {/* Watched elements */}
         {selectorList.length > 0 && (
           <div>
@@ -295,11 +386,44 @@ export const MonitorDetailPane: React.FC<MonitorDetailPaneProps> = ({
           </div>
         )}
 
+        {/* Wired automations — what actually fires on a detected change. */}
+        {triggerList.length > 0 && (
+          <div>
+            <SectionLabel
+              right={
+                <button onClick={openAutomate} className="text-[10px] text-tertiary hover:text-ink transition-colors">
+                  {t('Add')}
+                </button>
+              }
+            >
+              {t('What happens on a change')}
+            </SectionLabel>
+            <div className="rounded-xl border border-border bg-surface divide-y divide-border overflow-hidden">
+              {triggerList.slice(0, 6).map((trigger: any) => (
+                <button
+                  key={trigger.id}
+                  onClick={() => navigate(`/automations/${trigger.id}`)}
+                  className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-chrome transition-colors"
+                >
+                  <span className="inline-flex items-center gap-2 min-w-0">
+                    <BoltIcon className="h-3.5 w-3.5 text-tertiary shrink-0" />
+                    <span className="text-[12px] text-ink truncate">{trigger.name || t('Untitled')}</span>
+                  </span>
+                  <span
+                    className={clsx('w-2 h-2 rounded-full shrink-0', trigger.enabled ? 'bg-success' : 'bg-active')}
+                    title={trigger.enabled ? t('Active') : t('Paused')}
+                  />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Recent changes */}
         <div>
           <SectionLabel
             right={changeList.length > 0 ? (
-              <button onClick={() => navigate(`/checks/${tg.id}`)} className="text-[10px] text-tertiary hover:text-ink transition-colors">
+              <button onClick={openPage} className="text-[10px] text-tertiary hover:text-ink transition-colors">
                 {t('All changes')}
               </button>
             ) : undefined}

@@ -10,7 +10,7 @@ import { CheckIcon, MinusIcon } from '@heroicons/react/20/solid';
  * the same tokens Input/Select use, so it stays flush with the rest of a form
  * in both themes.
  *
- * Pass `label` for the common inline "☐ Enable X" pattern (the whole row
+ * Pass `label` for the common inline "Enable X" pattern (the whole row
  * becomes the click target). Omit it and the bare box works as a table-cell
  * toggle. `indeterminate` renders the tri-state minus glyph for
  * select-all rows.

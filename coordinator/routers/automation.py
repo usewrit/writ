@@ -112,6 +112,9 @@ class WorkflowCreate(BaseModel):
     schedule_time: Optional[str] = Field(None, description="'HH:MM' local wall-clock time (daily/weekly)")
     schedule_days: Optional[List[int]] = Field(None, description="ISO weekday ints 1=Mon..7=Sun (weekly)")
     schedule_tz: Optional[str] = Field(None, description="IANA tz name (daily/weekly); absent ⇒ UTC")
+    # Default sign-in identity: run-time persona (login creds + 2FA minting) unless a
+    # per-run override is given. Existence is validated in the handler.
+    default_persona_id: Optional[int] = Field(None, description="Persona this workflow signs in with by default")
     # Agent trust restriction
     trusted_agents_only: bool = Field(default=False, description="Only execute on trusted agents")
     # Session persistence
@@ -151,6 +154,9 @@ class WorkflowUpdate(BaseModel):
     schedule_tz: Optional[str] = None
     # Agent trust restriction
     trusted_agents_only: Optional[bool] = None
+    # Default sign-in identity. Explicit null DETACHES (distinguished from "absent"
+    # via model_fields_set in the handler); an id must reference an existing persona.
+    default_persona_id: Optional[int] = None
     # Session persistence
     session_persistence: Optional[bool] = None
     session_ttl_seconds: Optional[int] = Field(None, gt=0)
@@ -260,6 +266,7 @@ class WorkflowResponse(BaseModel):
     # Persona (auth identity)
     default_persona_id: Optional[int] = None
     has_login: bool = False  # True if the workflow authenticates (login/2FA detected) — gates persona UI
+    has_twofa: bool = False  # True if a step enters a one-time code — runs need a persona with a 2FA method
     # Marketplace install PROXY (read-only mirror of an install). When
     # is_installed is True the recipe logic (steps/raw_replay/function code) is
     # OMITTED from the response — only the manifest + sanitized signatures are returned.
@@ -840,6 +847,7 @@ def workflow_to_response(
         repair_count=getattr(workflow, 'repair_count', 0),
         default_persona_id=getattr(workflow, 'default_persona_id', None),
         has_login=_workflow_has_login(workflow.steps, workflow.form_data, workflow.credentials_encrypted),
+        has_twofa=any(isinstance(s, dict) and s.get("type") == "twofa" for s in (workflow.steps or [])),
         is_installed=_inst,
         source_listing_id=_source_listing_id,
         creator_name=_creator_name,
@@ -1241,6 +1249,17 @@ async def create_workflow(
     # so it is always a no-op. Backend-only.
     await robots_guard.enforce(request.entry_url, False)
 
+    # Default persona must exist — a dangling id would 404 every run at dispatch.
+    # Rejected loudly: attaching the persona is the request's point (frontends
+    # sent this field for months while Pydantic silently ate it).
+    if request.default_persona_id is not None:
+        from models.persona import Persona
+        if (await db.get(Persona, request.default_persona_id)) is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="default_persona_id does not reference an existing persona",
+            )
+
     workflow = AutomationWorkflow(
         name=request.name,
         description=request.description,
@@ -1256,6 +1275,7 @@ async def create_workflow(
         headless=request.headless,
         fast_mode=request.fast_mode,
         captcha_blocked=has_captcha_step,
+        default_persona_id=request.default_persona_id,
         trusted_agents_only=request.trusted_agents_only,
         session_persistence=request.session_persistence,
         session_ttl_seconds=request.session_ttl_seconds,
@@ -1635,6 +1655,18 @@ async def update_workflow(
         workflow.headless = request.headless
     if request.fast_mode is not None:
         workflow.fast_mode = request.fast_mode
+
+    # Default persona attach/detach. `model_fields_set` distinguishes an explicit
+    # null (detach) from the field being absent; an id must reference an existing persona.
+    if "default_persona_id" in request.model_fields_set:
+        if request.default_persona_id is not None:
+            from models.persona import Persona
+            if (await db.get(Persona, request.default_persona_id)) is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="default_persona_id does not reference an existing persona",
+                )
+        workflow.default_persona_id = request.default_persona_id
 
     # Handle schedule settings (structured recurrence, SPEC §2/§3).
     from services.schedule_recurrence import (
@@ -3070,6 +3102,7 @@ def _order_run_candidates(
     traffic_type: str,
     fast_eligible: bool,
     preferred_agent_id: Optional[str] = None,
+    exclude_agents: Optional[set] = None,
 ) -> Optional[dict]:
     """Order recorder candidates for a WORKFLOW RUN by speed class + load.
 
@@ -3087,6 +3120,15 @@ def _order_run_candidates(
     usable = [c for c in candidates if c.get('available', 0) > 0]
     if not usable:
         return None
+
+    # ANTI-AFFINITY: a crawl shard requeued after a host BLOCKED a specific agent
+    # carries that agent in exclude_agents — steer the retry to a DIFFERENT agent/IP.
+    # Fall back to the full pool if excluding would leave nothing (a single-agent
+    # fleet must still make progress rather than strand the shard forever).
+    if exclude_agents:
+        _remaining = [c for c in usable if c.get('agent_id') not in exclude_agents]
+        if _remaining:
+            usable = _remaining
 
     if preferred_agent_id:
         for c in usable:
@@ -3129,6 +3171,7 @@ async def _pick_recorder(
     is_scheduled: bool = False,
     traffic_type: str = "direct",
     required_tier: str = None,
+    exclude_agents: Optional[set] = None,
 ) -> Optional[dict]:
     """Find best available recorder agent for workflow execution.
 
@@ -3149,6 +3192,13 @@ async def _pick_recorder(
       - 'cloud':  direct WS → HTTP pool
       - 'auto':   user-hosted WS → direct WS → HTTP pool (per-workflow default)
       - scheduled: HTTP pool → direct WS (if idle)
+
+    ``exclude_agents`` are agents this work was just REFUSED on — a crawl shard
+    carries the agents whose IPs a host blocked (`_avoid_agents`). They are a
+    PREFERENCE, not a filter: retrying a blocked URL from the same IP is pointless,
+    but stranding it because that IP is the only one connected is worse (a
+    single-agent self-host would never retry at all). So they lose every tie and are
+    picked only when nothing else is free.
 
     Returns dict with agent_id, recorder_url, via ('websocket' or 'http'),
     or None if no recorders available.
@@ -3216,12 +3266,13 @@ async def _pick_recorder(
         return shared or infra
 
     def _best_from_ws(candidates: list) -> Optional[dict]:
-        """Pick best WS candidate: affinity → speed-class/load policy."""
+        """Pick best WS candidate: anti-affinity → affinity → speed-class/load policy."""
         return _order_run_candidates(
             candidates,
             traffic_type=traffic_type,
             fast_eligible=fast_eligible,
             preferred_agent_id=preferred_agent_id,
+            exclude_agents=exclude_agents,
         )
 
     def _ws_to_result(rec: dict) -> dict:
@@ -3274,7 +3325,7 @@ async def _pick_recorder(
         # SCHEDULED: prefer HTTP pool, then the direct fleet, then user-hosted.
         if is_scheduled:
             # Try HTTP pool first (no need for persistent connection)
-            http_pick = (await _pick_http_pool_recorder(db, preferred_agent_id, trusted_only, traffic_type=traffic_type, fast_eligible=fast_eligible)) if http_allowed else None
+            http_pick = (await _pick_http_pool_recorder(db, preferred_agent_id, trusted_only, traffic_type=traffic_type, fast_eligible=fast_eligible, exclude_agents=exclude_agents)) if http_allowed else None
             if http_pick:
                 logger.info(f"[_pick_recorder] scheduled → HTTP pool: {http_pick['agent_id']}")
                 return http_pick
@@ -3307,7 +3358,7 @@ async def _pick_recorder(
             if pick:
                 logger.info(f"[_pick_recorder] cloud → direct WS: {pick['agent_id']}")
                 return _ws_to_result(pick)
-            http_pick = (await _pick_http_pool_recorder(db, preferred_agent_id, trusted_only, traffic_type=traffic_type, fast_eligible=fast_eligible)) if http_allowed else None
+            http_pick = (await _pick_http_pool_recorder(db, preferred_agent_id, trusted_only, traffic_type=traffic_type, fast_eligible=fast_eligible, exclude_agents=exclude_agents)) if http_allowed else None
             if http_pick:
                 logger.info(f"[_pick_recorder] cloud → HTTP pool: {http_pick['agent_id']}")
                 return http_pick
@@ -3324,7 +3375,7 @@ async def _pick_recorder(
             logger.info(f"[_pick_recorder] auto → direct WS: {pick['agent_id']}")
             return _ws_to_result(pick)
 
-        http_pick = (await _pick_http_pool_recorder(db, preferred_agent_id, trusted_only, traffic_type=traffic_type, fast_eligible=fast_eligible)) if http_allowed else None
+        http_pick = (await _pick_http_pool_recorder(db, preferred_agent_id, trusted_only, traffic_type=traffic_type, fast_eligible=fast_eligible, exclude_agents=exclude_agents)) if http_allowed else None
         if http_pick:
             logger.info(f"[_pick_recorder] auto → HTTP pool: {http_pick['agent_id']}")
             return http_pick
@@ -3343,11 +3394,15 @@ async def _pick_http_pool_recorder(
     trusted_only: bool,
     traffic_type: str = "direct",
     fast_eligible: bool = False,
+    exclude_agents: Optional[set] = None,
 ) -> Optional[dict]:
     """Pick best HTTP-pool infrastructure recorder from DB (Tier 2).
 
     These are infra recorders that register via heartbeat but don't maintain
     a persistent WS connection. They accept tasks via HTTP push with JWT auth.
+
+    ``exclude_agents`` — agents this work was just refused on; see `_pick_recorder`.
+    A preference, not a filter: they are dropped unless nothing else is free.
     """
     from models.agent import Agent as AgentModel, AgentStatus as AS, Platform
     from routers.user_recorder_ws import _connections  # To exclude WS-connected agents
@@ -3412,6 +3467,7 @@ async def _pick_http_pool_recorder(
         traffic_type=traffic_type,
         fast_eligible=fast_eligible,
         preferred_agent_id=preferred_agent_id,
+        exclude_agents=exclude_agents,
     )
 
 
@@ -3896,6 +3952,26 @@ async def _dispatch_to_recorder_or_queue(
     # Self-host: single-user coordinator has no cloud plan tiers, so there is no
     # premium-feature gate (CAPTCHA / 2FA are ungated) and no plan-based concurrency
     # cap. Concurrency is governed by the local Runtime governor, not here.
+
+    # --- 2FA pre-flight: a workflow that ENTERS a one-time code can only pass its
+    # challenge with an OTP source (a persona minting TOTP / reading email).
+    # INTERACTIVE runs get an instant, actionable 422 before an agent is engaged.
+    # Background triggers (schedules/webhooks) deliberately fall through: the
+    # engines' own pre-flight fails the run visibly, whereas raising here would be
+    # swallowed by the scheduler loop.
+    if _interactive and not persona_cfg:
+        if any(
+            isinstance(s, dict) and s.get("type") == "twofa"
+            for s in (getattr(workflow, "steps", None) or [])
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "This workflow enters a 2FA code when signing in, but no persona is "
+                    "attached. Attach a persona with a 2FA method (or import its 2FA "
+                    "secret) so runs can enter codes automatically."
+                ),
+            )
 
     # FORM_DATA + CREDENTIALS — OWN RUNS ONLY.
     # Consumer runs already resolved merged_form_data + folded their (consumer-only)

@@ -11,6 +11,7 @@ import { apiErrorMessage } from '../../api/client';
 import toast from 'react-hot-toast';
 import { Q } from '../../stores/queryKeys';
 import { Expand } from '../../components/ui/Expand';
+import { Button, EmptyHero } from '../../components/ui';
 import clsx from 'clsx';
 import {
   CheckCircleIcon,
@@ -111,29 +112,23 @@ export const AutomationRunsPage: React.FC = () => {
             {initialLoading && <RowsSkeleton rows={7} label={t('Loading runs…')} />}
 
             {loadFailed && (
-              <div className="flex flex-col items-center justify-center min-h-[50vh] text-center">
-                <div className="w-12 h-12 rounded-2xl bg-canvas border border-border flex items-center justify-center mb-4">
-                  <ExclamationTriangleIcon className="h-6 w-6 text-tertiary" />
-                </div>
-                <p className="text-sm font-medium text-ink">{t("Couldn't load runs")}</p>
-                <p className="text-xs text-secondary mt-1">{error}</p>
-                <button
-                  onClick={() => refresh()}
-                  className="mt-4 px-4 py-2 bg-accent-strong text-accent-on text-sm font-semibold rounded-lg shadow-sm hover:bg-accent-strong/90 transition-colors"
-                >
-                  {t('Retry')}
-                </button>
-              </div>
+              <EmptyHero
+                icon={ExclamationTriangleIcon}
+                title={t("Couldn't load runs")}
+                description={error}
+                className="min-h-[50vh]"
+              >
+                <Button onClick={() => refresh()} size="sm">{t('Retry')}</Button>
+              </EmptyHero>
             )}
 
             {!initialLoading && !loadFailed && executionList.length === 0 && (
-          <div className="flex flex-col items-center justify-center min-h-[50vh] text-center">
-            <div className="w-12 h-12 rounded-2xl bg-canvas border border-border flex items-center justify-center mb-4">
-              <ClockIcon className="h-6 w-6 text-tertiary" />
-            </div>
-            <p className="text-sm font-medium text-ink">{t('No runs yet')}</p>
-            <p className="text-xs text-secondary mt-1">{t("This automation hasn't been triggered yet. Once its trigger fires, runs will appear here.")}</p>
-          </div>
+          <EmptyHero
+            icon={ClockIcon}
+            title={t('No runs yet')}
+            description={t("This automation hasn't been triggered yet. Once its trigger fires, runs will appear here.")}
+            className="min-h-[50vh]"
+          />
         )}
 
         {!initialLoading && !loadFailed && executionList.length > 0 && (

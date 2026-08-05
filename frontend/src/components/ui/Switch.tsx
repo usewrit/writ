@@ -7,7 +7,7 @@ import clsx from 'clsx';
  * headless mode, autoscale…).
  *
  * Why it exists: the app grew ~a dozen bespoke `<button>` toggles, several with
- * hardcoded `bg-zinc-*` / `bg-white` that don't invert in dark mode. This one
+ * hardcoded `bg-zinc-*` / `bg-surface` that don't invert in dark mode. This one
  * paints from the same tokens as the rest of the DNA (`bg-ink` on, `bg-border`
  * off, `bg-surface` knob) and inherits the theme.
  *

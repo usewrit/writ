@@ -302,7 +302,7 @@ export const ActivityIndicator: React.FC<{ floating?: boolean }> = ({ floating =
             // "live" dot + count + label + shadow, so a running job is unmissable
             // in the corner.
             ? 'flex items-center gap-2 h-10 rounded-full bg-accent-strong pl-3 pr-4 text-accent-on shadow-lg ring-1 ring-black/10 hover:bg-accent-strong/90 active:scale-[0.98] transition-all'
-            : 'relative shrink-0 rounded-md p-1.5 text-zinc-400 hover:bg-white/80 hover:text-ink transition-colors',
+            : 'relative shrink-0 rounded-md p-1.5 text-tertiary hover:bg-surface/80 hover:text-ink transition-colors',
         )}
       >
         {floating ? (

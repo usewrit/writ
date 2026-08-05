@@ -197,7 +197,7 @@ const McpSection: React.FC = () => {
           body={
             <Trans>
               Expose a workflow as an MCP tool so Claude Code, Claude Desktop, or any MCP client can
-              call it with a <code className="bg-zinc-100 px-1 py-0.5 rounded text-[10px]">wt_*</code> API
+              call it with a <code className="bg-hover px-1 py-0.5 rounded text-[10px]">wt_*</code> API
               key. Use the <span className="text-secondary font-medium">Publish / Call this</span> panel on a workflow.
             </Trans>
           }
@@ -274,7 +274,7 @@ const McpSection: React.FC = () => {
                     className="grid grid-cols-1 @rail/stage:grid-cols-12 gap-1 @rail/stage:gap-3 px-4 py-3 hover:bg-chrome transition-colors"
                   >
                     <div className="@rail/stage:col-span-3 min-w-0 flex items-center">
-                      <span className="text-[11px] font-mono text-ink bg-zinc-100 px-1.5 py-0.5 rounded truncate">
+                      <span className="text-[11px] font-mono text-ink bg-hover px-1.5 py-0.5 rounded truncate">
                         {tool.tool_name}
                       </span>
                     </div>
@@ -440,7 +440,7 @@ const WebhooksSection: React.FC = () => {
           title={t('No incoming webhooks')}
           body={
             <Trans>
-              An incoming webhook is a <code className="bg-zinc-100 px-1 py-0.5 rounded text-[10px]">Webhook received</code> trigger
+              An incoming webhook is a <code className="bg-hover px-1 py-0.5 rounded text-[10px]">Webhook received</code> trigger
               block in an automation. When an external system POSTs to its URL, the automation runs. Add
               a <span className="text-secondary font-medium">Webhook received</span> trigger in the automation builder to create one.
             </Trans>

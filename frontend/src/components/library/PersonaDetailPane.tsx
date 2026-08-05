@@ -25,6 +25,7 @@ import type { Persona, TwoFactorMethod, PersonaRun } from '../../types/api';
 import { formatRelativeTime, formatDate } from '../../utils/format';
 import { tintStyle } from '../../utils/tint';
 import { statusStyle } from '../../utils/statusStyle';
+import { EmptyHero } from '../ui';
 
 const TWOFA_LABELS: Record<TwoFactorMethod, string> = {
   none: 'No 2FA',
@@ -128,15 +129,12 @@ export const PersonaDetailPane: React.FC<PersonaDetailPaneProps> = ({ persona: p
 
   if (!p) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center text-center px-6">
-        <div className="w-12 h-12 rounded-2xl bg-chrome border border-border flex items-center justify-center mb-4">
-          <IdentificationIcon className="h-6 w-6 text-tertiary" />
-        </div>
-        <p className="text-sm font-medium text-ink">{t('Select a persona')}</p>
-        <p className="text-xs text-secondary mt-1 max-w-xs">
-          {t('Pick one on the left to see its saved session, 2FA, and where it’s used.')}
-        </p>
-      </div>
+      <EmptyHero
+        icon={IdentificationIcon}
+        title={t('Select a persona')}
+        description={t('Pick one on the left to see its saved session, 2FA, and where it’s used.')}
+        className="flex-1"
+      />
     );
   }
 

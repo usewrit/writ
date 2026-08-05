@@ -958,7 +958,7 @@ export const TemplateWizard: React.FC<TemplateWizardProps> = ({ spec, onCancel }
   );
 };
 
-const inputCls = 'w-full px-3 py-2 bg-white border border-border rounded-lg text-sm text-ink focus:border-border-strong outline-none transition-colors';
+const inputCls = 'w-full px-3 py-2 bg-surface border border-border rounded-lg text-sm text-ink focus:border-border-strong outline-none transition-colors';
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (

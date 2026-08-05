@@ -58,7 +58,7 @@ export const RunSettingsCard: React.FC<{
   };
 
   return (
-    <div className="bg-white border border-zinc-200/80 rounded-xl overflow-hidden divide-y divide-zinc-100">
+    <div className="bg-surface border border-border/80 rounded-xl overflow-hidden divide-y divide-zinc-100">
       <Row label={t('Timeout')} desc={t('Give up if a run takes longer than this')}>
         <Select<number>
           size="sm"

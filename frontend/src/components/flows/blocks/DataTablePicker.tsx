@@ -43,7 +43,7 @@ export const DataTablePicker: React.FC<DataTablePickerProps> = ({
 
   return (
     <div className="space-y-2">
-      <label className="flex items-center gap-1.5 text-xs font-medium text-zinc-500">
+      <label className="flex items-center gap-1.5 text-xs font-medium text-secondary">
         <TableCellsIcon className="w-4 h-4" />
         {label || t('Data source')}
       </label>
@@ -63,18 +63,18 @@ export const DataTablePicker: React.FC<DataTablePickerProps> = ({
       />
 
       {value != null && (
-        <div className="rounded-lg border border-zinc-200 bg-canvas overflow-hidden">
+        <div className="rounded-lg border border-border bg-canvas overflow-hidden">
           {previewLoading ? (
-            <div className="px-3 py-3 text-[11px] text-zinc-400">{t('Loading preview…')}</div>
+            <div className="px-3 py-3 text-[11px] text-tertiary">{t('Loading preview…')}</div>
           ) : columns.length === 0 ? (
-            <div className="px-3 py-3 text-[11px] text-zinc-400">{t('No extracted data yet.')}</div>
+            <div className="px-3 py-3 text-[11px] text-tertiary">{t('No extracted data yet.')}</div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-[11px]">
                 <thead>
-                  <tr className="border-b border-zinc-200">
+                  <tr className="border-b border-border">
                     {columns.map((c) => (
-                      <th key={c} className="px-2.5 py-1.5 text-left font-medium text-zinc-500 whitespace-nowrap">
+                      <th key={c} className="px-2.5 py-1.5 text-left font-medium text-secondary whitespace-nowrap">
                         {c}
                       </th>
                     ))}
@@ -82,9 +82,9 @@ export const DataTablePicker: React.FC<DataTablePickerProps> = ({
                 </thead>
                 <tbody>
                   {rows.slice(0, 3).map((row, i) => (
-                    <tr key={i} className="border-b border-zinc-200 last:border-0">
+                    <tr key={i} className="border-b border-border last:border-0">
                       {columns.map((c) => (
-                        <td key={c} className="px-2.5 py-1.5 text-zinc-900 whitespace-nowrap max-w-[160px] truncate">
+                        <td key={c} className="px-2.5 py-1.5 text-ink whitespace-nowrap max-w-[160px] truncate">
                           {formatCell(row[c])}
                         </td>
                       ))}
@@ -92,7 +92,7 @@ export const DataTablePicker: React.FC<DataTablePickerProps> = ({
                   ))}
                   {rows.length === 0 && (
                     <tr>
-                      <td colSpan={columns.length} className="px-2.5 py-1.5 text-zinc-400">
+                      <td colSpan={columns.length} className="px-2.5 py-1.5 text-tertiary">
                         {t('Columns detected — no sample rows.')}
                       </td>
                     </tr>

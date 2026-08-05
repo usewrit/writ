@@ -295,7 +295,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose, o
                     autoComplete="off"
                     spellCheck={false}
                   />
-                  <kbd className="text-[10px] text-zinc-300 font-mono shrink-0">esc</kbd>
+                  <kbd className="text-[10px] text-tertiary font-mono shrink-0">esc</kbd>
                 </div>
 
                 {/* Results */}
@@ -319,7 +319,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose, o
                           onClick={() => select(result)}
                           onMouseEnter={() => setActiveIndex(index)}
                           className={`flex items-center gap-2.5 w-full px-4 py-2 text-left text-[13px] transition-colors ${
-                            active ? 'bg-zinc-100 text-ink' : 'text-secondary'
+                            active ? 'bg-hover text-ink' : 'text-secondary'
                           }`}
                         >
                           <Icon className={`w-4 h-4 shrink-0 ${active ? 'text-ink' : 'text-tertiary'}`} />
@@ -347,8 +347,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose, o
                   {/* Empty state */}
                   {q && !entityLoading && !entityError && results.length === 0 && (
                     <div className="flex flex-col items-center justify-center py-8 text-center">
-                      <div className="w-9 h-9 rounded-xl bg-zinc-100 border border-zinc-200 flex items-center justify-center mb-2">
-                        <MagnifyingGlassIcon className="h-4 w-4 text-zinc-400" />
+                      <div className="w-9 h-9 rounded-xl bg-hover border border-border flex items-center justify-center mb-2">
+                        <MagnifyingGlassIcon className="h-4 w-4 text-tertiary" />
                       </div>
                       <p className="text-[12px] font-medium text-ink">{t('No results')}</p>
                       <p className="text-[11px] text-tertiary mt-0.5">
@@ -361,13 +361,13 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose, o
                 {/* Footer hints */}
                 <div className="flex items-center gap-3 px-4 py-2 border-t border-border">
                   <span className="text-[10px] text-tertiary">
-                    <kbd className="font-mono text-zinc-400">↑↓</kbd> {t('navigate')}
+                    <kbd className="font-mono text-tertiary">↑↓</kbd> {t('navigate')}
                   </span>
                   <span className="text-[10px] text-tertiary">
-                    <kbd className="font-mono text-zinc-400">↵</kbd> {t('open')}
+                    <kbd className="font-mono text-tertiary">↵</kbd> {t('open')}
                   </span>
                   <span className="text-[10px] text-tertiary">
-                    <kbd className="font-mono text-zinc-400">esc</kbd> {t('close')}
+                    <kbd className="font-mono text-tertiary">esc</kbd> {t('close')}
                   </span>
                 </div>
               </Dialog.Panel>

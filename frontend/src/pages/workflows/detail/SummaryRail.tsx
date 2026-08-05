@@ -134,14 +134,14 @@ export const SummaryRail: React.FC<SummaryRailProps> = ({
     <aside
       data-tour="wf-detail-rail"
       className={clsx(
-        'hidden @rail/stage:flex flex-col shrink-0 border-l border-border bg-white transition-[width] duration-200',
+        'hidden @rail/stage:flex flex-col shrink-0 border-l border-border bg-surface transition-[width] duration-200',
         collapsed ? 'w-[44px]' : 'w-[264px]',
       )}
     >
       {collapsed ? (
         <button
           onClick={toggleCollapsed}
-          className="flex flex-col items-center gap-2 pt-3 text-zinc-400 hover:text-ink transition-colors"
+          className="flex flex-col items-center gap-2 pt-3 text-tertiary hover:text-ink transition-colors"
           title={t('Expand summary')}
         >
           <ChevronDoubleLeftIcon className="w-4 h-4" />
@@ -151,7 +151,7 @@ export const SummaryRail: React.FC<SummaryRailProps> = ({
         <>
           <div className="flex items-center justify-between h-11 px-3 border-b border-border shrink-0">
             <span className="text-[12px] font-semibold text-ink">{t('At a glance')}</span>
-            <button onClick={toggleCollapsed} className="p-1 text-zinc-400 hover:text-ink transition-colors" title={t('Collapse')}>
+            <button onClick={toggleCollapsed} className="p-1 text-tertiary hover:text-ink transition-colors" title={t('Collapse')}>
               <ChevronDoubleRightIcon className="w-4 h-4" />
             </button>
           </div>
@@ -173,7 +173,7 @@ export const SummaryRail: React.FC<SummaryRailProps> = ({
                     <button
                       onClick={onStop}
                       disabled={busy}
-                      className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 text-[11px] font-medium text-secondary border border-zinc-200/80 rounded-lg hover:bg-chrome disabled:opacity-50 transition-colors"
+                      className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 text-[11px] font-medium text-secondary border border-border/80 rounded-lg hover:bg-chrome disabled:opacity-50 transition-colors"
                     >
                       <StopIcon className="w-3 h-3" />
                       {t('Stop run')}
@@ -217,7 +217,7 @@ export const SummaryRail: React.FC<SummaryRailProps> = ({
                     onClick={() => onNavigateTab('connect')}
                     className="w-full flex items-center gap-2 px-1 py-1 rounded-md hover:bg-chrome transition-colors"
                   >
-                    <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', e.on ? 'bg-ink' : 'border border-zinc-300')} />
+                    <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', e.on ? 'bg-ink' : 'border border-border')} />
                     <span className="text-[12px] text-ink flex-1 text-left">{e.label}</span>
                     <span className="text-[10px] text-tertiary">{e.on ? t('On') : t('Off')}</span>
                   </button>

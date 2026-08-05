@@ -581,6 +581,15 @@ export const FinalizeStep: React.FC = () => {
                   onChange={(id) => dispatch({ type: 'UPDATE_CONFIG', updates: { defaultPersonaId: id } })}
                   allowClear
                 />
+
+                {!state.config.defaultPersonaId
+                  && (state.config.recordedSteps || []).some((s) => s?.type === 'twofa') && (
+                  <div className="rounded-lg border border-border bg-hover/40 px-3 py-2">
+                    <p className="text-[11px] text-secondary">
+                      {t('This workflow enters a 2FA code — without a persona holding the 2FA secret, unattended runs will stop at the challenge.')}
+                    </p>
+                  </div>
+                )}
                 {isAiSession && (
                   <p className="text-[11px] text-tertiary">
                     {t('The AI signs in as this identity (credentials + 2FA handled automatically). Leave empty to provide secrets manually.')}

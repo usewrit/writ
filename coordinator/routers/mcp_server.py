@@ -1,14 +1,25 @@
 """
 Native MCP server for the self-hosted coordinator.
 
-Exposes the OSS **operate** surface — the same replay / run / data / schedule /
-crawl capabilities the desktop daemon serves at ``POST /mcp`` — over a single
-Streamable-HTTP MCP endpoint. There are NO build / AI / concierge / marketplace
-tools here (those are cloud- or desktop-AI features): this server only drives
-workflows the owner already recorded and saved. It turns the self-host
-coordinator into an MCP tool provider that any MCP client (Claude Code, Claude
-Desktop, Cursor, …) can attach to, via the bundled ``writ-mcp`` Node connector
-or directly over Streamable HTTP.
+Exposes the OSS surface — the same capabilities the desktop daemon serves at
+``POST /mcp`` — over a single Streamable-HTTP MCP endpoint, in two families:
+
+  **build**    record / browser — ``writ_browser_use``, ``writ_record_website``,
+               ``writ_build``, ``writ_website_to_api`` open a live browser on a
+               fleet agent that the CONNECTED CLIENT drives turn-by-turn
+               (``writ_browser_act`` / ``_context`` / ``_network``) and freezes
+               into a saved workflow (``writ_browser_save``). The client is the
+               brain: there is no coordinator-side AI, no concierge, no
+               autonomous loop, and no model key of ours in the path.
+  **operate**  replay / run / data / search / export / runs / schedule /
+               expose-API / crawl / monitors / automations.
+
+There is no marketplace here — that is a cloud feature — so a build proposes the
+owner's OWN matching workflows before recording, and nothing else.
+
+It turns the self-host coordinator into an MCP tool provider that any MCP client
+(Claude Code, Claude Desktop, Cursor, …) can attach to, via the bundled
+``writ-mcp`` Node connector or directly over Streamable HTTP.
 
 Public surfaces
 ---------------
@@ -741,8 +752,9 @@ async def _tool_create_monitor(token: str, args: dict) -> dict:
 
     A monitor watches a URL — optionally a specific CSS selector's text — and
     fires a `change_detected` event when it changes. Wire that event to an action
-    with writ_wire_monitor. Backed by POST /api/targets (plan limits + the
-    per-plan minimum interval are enforced there).
+    with writ_wire_monitor. Backed by POST /api/targets; selfhost enforces no
+    plan interval floor — an omitted interval falls back to the instance's
+    global check period.
     """
     url = (args.get("url") or "").strip()
     if not url:
@@ -843,15 +855,171 @@ async def _tool_wire_monitor(token: str, args: dict) -> dict:
     })
 
 
-# ── Un-guided record-build tools (client is the brain) ───────────────────────
-# writ_record_* open a live browser recording session on a fleet agent and let
-# the connected client drive it freely; structured interactions are recorded as
-# workflow steps, then saved as a runnable workflow. No coordinator guidance.
+# ── Un-guided record / browser tools (the client is the brain) ───────────────
+# These open a live browser session on a fleet agent and let the connected client
+# drive it freely; structured interactions are recorded as workflow steps, then
+# saved as a runnable workflow. No coordinator guidance, no coordinator AI.
+#
+# FOUR front doors, same loop — the name tells the model what it is FOR:
+#   writ_browser_use      do a web task now; saving is optional
+#   writ_record_website   record a repeatable task on a site
+#   writ_build            build a reusable workflow (generic)
+#   writ_website_to_api   turn a site with no practical API into a callable one
+# They differ only in framing and in the ladder they walk before recording.
+
+# Request-phrasing words that carry no signal when matching a build goal against
+# the owner's own library. Mirrors the cloud/desktop tokenizer so all three
+# surfaces rank an existing workflow the same way.
+_GOAL_STOPWORDS = {
+    "the", "and", "for", "that", "this", "with", "from", "api", "apis", "get",
+    "data", "rest", "call", "want", "une", "les", "des", "pour", "avec", "que",
+    "qui", "veux",
+}
+
+
+def _goal_terms(goal: str) -> list[str]:
+    """Up to six distinctive lowercase terms from a build goal."""
+    out: list[str] = []
+    for raw in re.split(r"[^0-9A-Za-z.\-]+", goal or ""):
+        term = raw.strip(".-").lower()
+        if len(term) < 3 or term in _GOAL_STOPWORDS or term in out:
+            continue
+        out.append(term)
+        if len(out) == 6:
+            break
+    return out
+
+
+def _url_host(url: str) -> Optional[str]:
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(url or "").hostname or "").lower()
+    except ValueError:
+        return None
+    return host[4:] if host.startswith("www.") else (host or None)
+
+
+def _match_own_workflows(rows: list[dict], goal: str, host: Optional[str]) -> list[dict]:
+    """The owner's OWN saved workflows that already match this goal.
+
+    An entry-url HOST match qualifies outright; otherwise most of the goal's
+    distinctive terms must appear in the name/description/entry-url. Deliberately
+    conservative — a weak match must never hijack a build.
+    """
+    terms = _goal_terms(goal)
+    scored: list[tuple[float, dict]] = []
+    for w in rows:
+        hay = " ".join(str(w.get(k) or "").lower()
+                       for k in ("name", "description", "entry_url"))
+        matched = sum(1 for t in terms if t in hay)
+        coverage = (matched / len(terms)) if terms else 0.0
+        host_match = bool(host and host in str(w.get("entry_url") or "").lower())
+        if not (host_match or (coverage >= 0.6 and matched >= 2)):
+            continue
+        scored.append((coverage * 3.0 + (2.0 if host_match else 0.0), {
+            "workflow_id": w.get("id"),
+            "name": w.get("name"),
+            "description": w.get("description"),
+            "inputs": list((w.get("form_data") or {}).keys()),
+        }))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [item for _score, item in scored[:3]]
+
+
+_API_INTENT_PHRASES = (
+    "website to api", "site to api", "turn this website into an api",
+    "turn the website into an api", "transform this website to api",
+    "transform the website to api", "build an api", "create an api",
+    "make an api", "expose as an api", "expose it as an api",
+    "callable api", "api endpoint", "structured api",
+)
+
+
+def _goal_requests_api(args: dict) -> bool:
+    """Classify API-builder intent from the goal itself.
+
+    A connected model does not always pick the specialized start tool, so a
+    generic writ_build / writ_record_website call must not silently skip the API
+    framing. Mirrors the cloud/desktop classifier.
+    """
+    goal = str(args.get("goal") or "").lower()
+    return any(phrase in goal for phrase in _API_INTENT_PHRASES)
+
+
+async def _browser_start(token: str, args: dict, mode: str, *, api: bool) -> dict:
+    """Shared front door for the four start tools.
+
+    BUILD LADDER for API intent — cheapest answer first, recording last:
+      1. the owner's OWN saved workflows (instant, free) — `skip_existing` skips;
+      2. open a browser and record.
+    Checked BEFORE the browser opens, so a declined proposal costs nothing. There
+    is no marketplace rung on a self-hosted coordinator — that is a cloud feature.
+    """
+    from services import mcp_record
+
+    goal = str(args.get("goal") or "").strip()
+    url = (args.get("url") or "").strip()
+    if mode != mcp_record.MODE_USE and not goal:
+        raise _Upstream(400, "`goal` is required for a record/build session.")
+    if not url:
+        if mode != mcp_record.MODE_USE:
+            raise _Upstream(400, "`url` is required for a record/build session.")
+        # writ_browser_use may start blank and navigate — this browser is the
+        # owner's own fleet, so there is no origin to pre-screen against.
+        url = "about:blank"
+
+    if api and not args.get("skip_existing"):
+        rows = await _list_workflows(token)
+        matches = _match_own_workflows(rows, goal, _url_host(url))
+        if matches:
+            return _content({
+                "status": "existing_workflows",
+                "message": ("This coordinator already has workflows matching the goal — "
+                            "replaying one is instant and needs no browser."),
+                "goal": goal,
+                "workflows": matches,
+                "next": ("Propose these to the user FIRST. If one fits, run it with "
+                         "writ_run_workflow, or read what it already collected with "
+                         "writ_workflow_data. If none fits, call this tool again with "
+                         "skip_existing=true to record a new one."),
+            })
+
+    try:
+        res = await mcp_record.start(url, args.get("agent_id"), mode=mode, goal=goal)
+    except mcp_record.RecordError as e:
+        return _content(f"Error: {e}", is_error=True)
+    return _content(res)
+
+
+async def _tool_browser_use(token: str, args: dict) -> dict:
+    from services import mcp_record
+    return await _browser_start(token, args, mcp_record.MODE_USE, api=False)
+
+
+async def _tool_record_website(token: str, args: dict) -> dict:
+    from services import mcp_record
+    return await _browser_start(token, args, mcp_record.MODE_RECORD, api=_goal_requests_api(args))
+
+
+async def _tool_build(token: str, args: dict) -> dict:
+    from services import mcp_record
+    return await _browser_start(token, args, mcp_record.MODE_RECORD, api=_goal_requests_api(args))
+
+
+async def _tool_website_to_api(token: str, args: dict) -> dict:
+    from services import mcp_record
+    return await _browser_start(token, args, mcp_record.MODE_API, api=True)
+
 
 async def _tool_record_start(token: str, args: dict) -> dict:
+    """Legacy front door: same as writ_record_website, but its schema only ever
+    required `url`, so it must keep working without a `goal`."""
     from services import mcp_record
     try:
-        return _content(await mcp_record.start(args.get("url"), args.get("agent_id")))
+        return _content(await mcp_record.start(
+            args.get("url"), args.get("agent_id"),
+            mode=mcp_record.MODE_RECORD, goal=str(args.get("goal") or "").strip(),
+        ))
     except mcp_record.RecordError as e:
         return _content(f"Error: {e}", is_error=True)
 
@@ -859,7 +1027,10 @@ async def _tool_record_start(token: str, args: dict) -> dict:
 async def _tool_record_act(token: str, args: dict) -> dict:
     from services import mcp_record
     try:
-        return _content(await mcp_record.act(args.get("session_id"), args.get("actions")))
+        return _content(await mcp_record.act(
+            args.get("session_id"), args.get("actions"),
+            inputs=args.get("inputs") if isinstance(args.get("inputs"), dict) else None,
+        ))
     except mcp_record.RecordError as e:
         return _content(f"Error: {e}", is_error=True)
 
@@ -867,7 +1038,12 @@ async def _tool_record_act(token: str, args: dict) -> dict:
 async def _tool_record_context(token: str, args: dict) -> dict:
     from services import mcp_record
     try:
-        return _content(await mcp_record.context(args.get("session_id")))
+        return _content(await mcp_record.context(
+            args.get("session_id"),
+            section=args.get("section") or "page",
+            offset=int(args.get("offset") or 0),
+            max_chars=int(args.get("max_chars") or 8000),
+        ))
     except mcp_record.RecordError as e:
         return _content(f"Error: {e}", is_error=True)
 
@@ -875,37 +1051,65 @@ async def _tool_record_context(token: str, args: dict) -> dict:
 async def _tool_record_network(token: str, args: dict) -> dict:
     from services import mcp_record
     try:
-        return _content(await mcp_record.network(args.get("session_id")))
+        return _content(await mcp_record.network(
+            args.get("session_id"),
+            operation=args.get("operation") or "search",
+            query=args.get("query") or args.get("url") or "",
+            method=args.get("method"),
+            index=int(args["index"]) if args.get("index") is not None else None,
+            offset=int(args.get("offset") or 0),
+            max_chars=int(args.get("max_chars") or 8000),
+        ))
     except mcp_record.RecordError as e:
         return _content(f"Error: {e}", is_error=True)
+
+
+def _concise_name(goal: str) -> str:
+    """A short, human workflow name from the session goal (desktop parity)."""
+    text = " ".join((goal or "").split())
+    if not text:
+        return "Browser workflow"
+    if len(text) <= 60:
+        return text[:1].upper() + text[1:]
+    cut = text[:60].rsplit(" ", 1)[0]
+    return (cut[:1].upper() + cut[1:]) or "Browser workflow"
 
 
 async def _tool_record_save(token: str, args: dict) -> dict:
     from services import mcp_record
     sid = args.get("session_id")
-    name = (args.get("name") or "").strip()
-    if not name:
-        return _content("Error: writ_record_save requires a `name`.", is_error=True)
     try:
         payload = await mcp_record.finalize(sid)
     except mcp_record.RecordError as e:
         return _content(f"Error: {e}", is_error=True)
+    # A name is no longer mandatory: fall back to the goal the session was opened
+    # with, so a client that just finished a task can save without inventing one.
+    name = (args.get("name") or "").strip() or _concise_name(payload.get("goal") or "")
     body = {
         "name": name,
         "workflow_type": "recorded",
         "entry_url": payload["entry_url"],
         "steps": payload["steps"],
     }
+    if args.get("description"):
+        body["description"] = str(args["description"])[:2000]
     try:
         created = await _call("POST", "/api/automation/workflows", token, json_body=body)
     except _Upstream as ue:
         return _content(f"Error saving workflow: {ue.detail}", is_error=True)
-    await mcp_record.cancel(sid)  # close the session now that it's persisted
+    if args.get("keep_open") is not True:
+        await mcp_record.cancel(sid)  # close the session now that it's persisted
     return _content({
         "workflow_id": (created or {}).get("id"),
         "name": (created or {}).get("name") or name,
         "steps": len(payload["steps"]),
-        "note": "Saved. Run it any time with writ_run_workflow or its run_<name> tool.",
+        "browser": ("still open — call writ_browser_cancel when finished"
+                    if args.get("keep_open") is True else "closed"),
+        "next": (
+            "Saved. It now runs on demand with writ_run_workflow (or its own run_<name> "
+            "tool) with no model in the loop, can be scheduled with writ_set_schedule, and "
+            "can be exposed as a REST endpoint with writ_expose_workflow_api."
+        ),
     })
 
 
@@ -913,22 +1117,6 @@ async def _tool_record_cancel(token: str, args: dict) -> dict:
     from services import mcp_record
     try:
         return _content(await mcp_record.cancel(args.get("session_id")))
-    except mcp_record.RecordError as e:
-        return _content(f"Error: {e}", is_error=True)
-
-
-# ── Browser-use front door (Writ IS your browser) ────────────────────────────
-# writ_browser_use opens the SAME un-guided fleet browser session as the record
-# tools, but framed as "do a task": complete the user's request in the browser,
-# ask them when needed, and save a clean workflow ONLY on demand. It shares the
-# writ_browser_* act/context/network/save/cancel loop (parity with the desktop
-# daemon), so every AI browsing need routes through Writ on this surface too.
-
-async def _tool_browser_use(token: str, args: dict) -> dict:
-    from services import mcp_record
-    url = (args.get("url") or "").strip() or "about:blank"
-    try:
-        return _content(await mcp_record.start(url, args.get("agent_id"), mode="use"))
     except mcp_record.RecordError as e:
         return _content(f"Error: {e}", is_error=True)
 
@@ -1124,12 +1312,12 @@ _STATIC_TOOLS: list[dict] = [
             "Create a MONITOR — a target Writ checks on a schedule and that fires a "
             "change_detected event when the page (or a specific CSS selector's text) changes. "
             "Use when the user wants to WATCH a URL for changes/updates. Returns the monitor id "
-            "for writ_wire_monitor. The interval is subject to the account's plan minimum."
+            "for writ_wire_monitor. Omit interval_minutes to use the instance's global check period."
         ),
         "inputSchema": {"type": "object", "properties": {
             "url": {"type": "string", "description": "URL to monitor (required)."},
             "selector": {"type": "string", "description": "CSS selector for content-change monitoring; omit for uptime/status monitoring."},
-            "interval_minutes": {"type": "integer", "description": "How often to check, in minutes (clamped up to the plan minimum)."},
+            "interval_minutes": {"type": "integer", "description": "How often to check, in minutes (minimum 1; omit to use the instance's global check period)."},
             "requires_browser": {"type": "boolean", "description": "Render with a real browser (JS) instead of plain HTTP."},
             "enabled": {"type": "boolean", "description": "Start the monitor enabled (default true)."}}, "required": ["url"]},
         "_handler": _tool_create_monitor,
@@ -1184,11 +1372,24 @@ _STATIC_TOOLS: list[dict] = [
             "fields:{text:'.text', author:'.author'}} yields one row per matching element. Without "
             "`fields` it returns the plain text of `selector`.\n"
             "Batch a few related actions, look at the returned observation + results, then decide the next batch. "
+            "SECRETS: send any user-supplied value under `inputs` — or on the fill itself with `data_key` — "
+            "and it is held server-side: it reaches the page, but comes back to you as its {{placeholder}}, "
+            "and the SAVED step keeps the placeholder instead of the value, so the workflow re-substitutes "
+            "per run. Never invent a credential; ask the user in chat. "
             "For logins that demand a one-time 2FA code, tell the user to complete that step in the Writ app "
             "(un-guided recording has no server-side code minting)."
         ),
         "inputSchema": {"type": "object", "properties": {
             "session_id": {"type": "string"},
+            "inputs": {
+                "type": "object",
+                "description": (
+                    "Values held server-side for {{placeholder}} substitution, e.g. "
+                    "{\"city\":\"Paris\"}. Secrets belong here or on a fill's data_key — never "
+                    "hardcoded into a step."
+                ),
+                "additionalProperties": {"type": "string"},
+            },
             "actions": {
                 "type": "array",
                 "description": "Ordered action objects — see the tool description for the full vocabulary.",
@@ -1224,6 +1425,14 @@ _STATIC_TOOLS: list[dict] = [
                         },
                         "limit": {"type": "integer", "description": "extract_data: max rows to return (default 100)."},
                         "index": {"type": "integer", "description": "Tab index for switch_tab."},
+                        "data_key": {
+                            "type": "string",
+                            "description": (
+                                "fill: name this value instead of hardcoding it. The value is held "
+                                "server-side and the saved step keeps {{data_key}} (or "
+                                "{{secret:data_key}} for a credential-looking name)."
+                            ),
+                        },
                     },
                     "required": ["action"],
                 },
@@ -1232,24 +1441,61 @@ _STATIC_TOOLS: list[dict] = [
     },
     {
         "name": "writ_record_context",
-        "description": "Get a fresh page observation for a record session (current URL, visible fields, buttons, page text) without changing the page.",
+        "description": (
+            "Read context for a browser session. section=page (default) re-reads the LIVE page — "
+            "current URL, visible fields, buttons, page text — without changing it. "
+            "section=explorer pages through Writ's full recording policy; section=concierge_api "
+            "pages through the API-builder policy. Read the policy before committing to a "
+            "workflow shape."
+        ),
         "inputSchema": {"type": "object", "properties": {
-            "session_id": {"type": "string"}}, "required": ["session_id"]},
+            "session_id": {"type": "string"},
+            "section": {"type": "string", "enum": ["page", "explorer", "concierge_api"],
+                        "description": "page (default) | explorer | concierge_api"},
+            "offset": {"type": "integer", "minimum": 0, "description": "Paging offset for the policy sections."},
+            "max_chars": {"type": "integer", "description": "Characters per page (1000–10000, default 8000)."},
+        }, "required": ["session_id"]},
         "_handler": _tool_record_context,
     },
     {
         "name": "writ_record_network",
-        "description": "List the API/XHR calls captured while recording — a matching JSON endpoint may let the workflow skip UI scraping.",
+        "description": (
+            "Search or read the API/XHR calls captured while browsing — how you find a site's "
+            "real backend instead of scraping its HTML. operation=search lists matching calls "
+            "(filter with `query` / `method`); operation=detail returns one call in full by "
+            "`index`, including request/response headers and bodies. Indices are stable for the "
+            "session, so one from an earlier search still resolves later — only the oldest calls "
+            "age out of the retained window, and asking for one of those says so rather than "
+            "returning a different call. Held credential values are replaced with their "
+            "placeholder in the output."
+        ),
         "inputSchema": {"type": "object", "properties": {
-            "session_id": {"type": "string"}}, "required": ["session_id"]},
+            "session_id": {"type": "string"},
+            "operation": {"type": "string", "enum": ["search", "detail"],
+                          "description": "search (default) | detail. list/get are aliases."},
+            "query": {"type": "string", "description": "Substring filter across method, url, status, and bodies."},
+            "method": {"type": "string", "description": "Filter by HTTP method."},
+            "index": {"type": "integer", "minimum": 0, "description": "Which call to read, for operation=detail."},
+            "offset": {"type": "integer", "minimum": 0},
+            "max_chars": {"type": "integer"},
+        }, "required": ["session_id"]},
         "_handler": _tool_record_network,
     },
     {
         "name": "writ_record_save",
-        "description": "Finish a record session and save everything recorded so far as a runnable workflow. Returns the new workflow_id.",
+        "description": (
+            "Finish a browser session and save everything recorded so far as a runnable "
+            "workflow. It then replays on demand with no model in the loop, gains its own "
+            "run_<name> tool, and can be scheduled or exposed as REST. Only save once the task "
+            "actually worked on the live page — verify first. Returns the new workflow_id."
+        ),
         "inputSchema": {"type": "object", "properties": {
             "session_id": {"type": "string"},
-            "name": {"type": "string", "description": "Name for the saved workflow (required)."}}, "required": ["session_id", "name"]},
+            "name": {"type": "string", "description": "Name for the saved workflow (defaults to the session goal)."},
+            "description": {"type": "string"},
+            "keep_open": {"type": "boolean", "description": (
+                "Leave the browser open after saving (default false — saving closes it).")},
+        }, "required": ["session_id"]},
         "_handler": _tool_record_save,
     },
     {
@@ -1275,6 +1521,18 @@ def _browser_alias(base_name: str, new_name: str, description: str) -> dict:
     return {**src, "name": new_name, "description": description}
 
 
+def _build_schema(goal_description: str) -> dict:
+    """Shared schema for the three workflow-producing start tools."""
+    return {"type": "object", "properties": {
+        "goal": {"type": "string", "description": goal_description},
+        "url": {"type": "string", "description": "Website URL to start on (required)."},
+        "agent_id": {"type": "string", "description": "Optional specific fleet agent; omit to auto-pick."},
+        "skip_existing": {"type": "boolean", "description": (
+            "API builds first propose this coordinator's OWN matching workflows (replaying is "
+            "instant and needs no browser); set true after the user declined those.")},
+    }, "required": ["goal", "url"]}
+
+
 _STATIC_TOOLS += [
     {
         "name": "writ_browser_use",
@@ -1297,8 +1555,52 @@ _STATIC_TOOLS += [
         ),
         "inputSchema": {"type": "object", "properties": {
             "url": {"type": "string", "description": "Starting URL to open (recommended). Omit to start blank and navigate with writ_browser_act."},
+            "goal": {"type": "string", "description": (
+                "What to do in the browser, in plain language — the user's directive. Optional; "
+                "you can also just open a page and drive turn-by-turn.")},
             "agent_id": {"type": "string", "description": "Optional specific fleet agent; omit to auto-pick."}}},
         "_handler": _tool_browser_use,
+    },
+    {
+        "name": "writ_record_website",
+        "description": (
+            "Start RECORDING a website task with you as the AI. Use whenever the user asks to "
+            "record, capture, teach, automate, or repeat actions on a website. Opens a live "
+            "browser on a connected fleet agent and returns a page observation; drive it with "
+            "writ_browser_act and call writ_browser_save when the goal is complete — the saved "
+            "workflow then replays on demand with no model in the loop, can be scheduled, and "
+            "becomes its own run_<name> tool on this server."
+        ),
+        "inputSchema": _build_schema(
+            "What should be recorded on the website, in plain language"),
+        "_handler": _tool_record_website,
+    },
+    {
+        "name": "writ_build",
+        "description": (
+            "Start building a reusable browser workflow with you as the AI. Opens a live browser "
+            "on a connected fleet agent and returns an observation; continue with "
+            "writ_browser_act and finish with writ_browser_save. Use for repeatable web tasks "
+            "when no more specific Writ start tool applies."
+        ),
+        "inputSchema": _build_schema("What to automate, in plain language"),
+        "_handler": _tool_build,
+    },
+    {
+        "name": "writ_website_to_api",
+        "description": (
+            "Start turning a website into a callable API with you as the AI — the answer when a "
+            "service exposes NO official/public/practical API but the user wants its data or "
+            "actions programmatically. Opens a live browser; drive the page so it issues its "
+            "real requests, inspect them with writ_browser_network (search, then detail), verify "
+            "with evaluate_js, then writ_browser_save. The first call may instead return "
+            "existing_workflows — this coordinator's OWN workflows already matching the goal; "
+            "propose replaying those first, or pass skip_existing=true to record fresh. "
+            "writ_expose_workflow_api then hands back a REST URL."
+        ),
+        "inputSchema": _build_schema(
+            "What the API should return or do, in plain language"),
+        "_handler": _tool_website_to_api,
     },
     _browser_alias(
         "writ_record_act", "writ_browser_act",
@@ -1375,23 +1677,27 @@ _INSTRUCTIONS = (
     "the task; call writ_browser_save ONLY if the user wants to reuse it as a workflow "
     "(then it replays at zero AI cost via writ_run_workflow), or writ_browser_cancel to "
     "close without saving.\n\n"
-    "BUILD a new workflow by RECORDING (un-guided) — the same engine framed as "
-    "build-a-workflow (writ_record_start/act/save). Use it when the explicit goal is to "
-    "PRODUCE a reusable workflow; use writ_browser_use when the goal is to DO a task and "
-    "maybe keep it. When the user wants a web task "
-    "you have no saved workflow for, record one yourself: writ_record_start(url) "
-    "opens a live browser on a fleet agent and returns the page observation "
-    "(URL, fields, buttons, text); writ_record_act(session_id, actions) drives it — "
-    "your structured interactions (navigate/click/fill/select/press_key) are "
-    "RECORDED as reusable steps, and evaluate_js/read_text let you inspect the page. "
-    "Look at the observation each turn, decide the next actions, and repeat, exactly "
-    "as a person clicking through the flow would. YOU are the brain — there is NO "
-    "guidance or discovery engine here; drive deliberately, verify with the "
-    "observation, and ask the USER directly for any clarification (a value to type, "
-    "whether to log in, which result to pick). Finish with writ_record_save("
-    "session_id, name) to save it as a runnable workflow (then it replays at zero AI "
-    "cost via writ_run_workflow). Use writ_record_context / writ_record_network to "
-    "inspect, writ_record_cancel to abandon.\n\n"
+    "BUILD a new workflow by RECORDING (un-guided) — the SAME live browser, framed "
+    "around producing something reusable. Pick the front door by intent: "
+    "writ_record_website (repeat a task on a site), writ_website_to_api (a site with "
+    "no practical API — it proposes the owner's own matching workflows before "
+    "recording), writ_build (anything else). Each takes a goal + url, opens the "
+    "browser, and hands you the page; drive it with writ_browser_act, read the "
+    "recording policy page-by-page with writ_browser_context(section=explorer) (or "
+    "section=concierge_api for an API build), inspect the site's real backend calls "
+    "with writ_browser_network, and finish with writ_browser_save. YOU are the brain "
+    "— there is NO guidance or discovery engine here; drive deliberately, confirm "
+    "every selector against the observation before relying on it, and ask the USER "
+    "directly for any clarification (a value to type, whether to log in, which result "
+    "to pick). Pass user-supplied values under `inputs`, or on a fill with `data_key`, "
+    "so they are held server-side and the SAVED step keeps a {{placeholder}} rather "
+    "than the value — never hardcode a credential into a step, and never invent one. "
+    "ALWAYS close a session you are finished with (writ_browser_save or "
+    "writ_browser_cancel): an open session holds a real fleet browser. The legacy "
+    "writ_record_* names remain as aliases of the same loop.\n\n"
+    "ORDER OF PREFERENCE — replay a saved workflow > record a new one > browse ad "
+    "hoc. The build tools walk that ladder for you and will propose the cheaper rung "
+    "before opening a browser.\n\n"
     "DISAMBIGUATION — you may ALSO have the Writ DESKTOP APP's MCP connected (the "
     "official single-user app; its server is named just \"Writ\"). Both can build, "
     "but differently: the desktop app's build is AI-GUIDED (it has its own discovery/"
@@ -1410,7 +1716,9 @@ _INSTRUCTIONS = (
 _PRIVILEGED_HANDLERS = {
     _tool_record_start, _tool_record_act, _tool_record_context,
     _tool_record_network, _tool_record_save, _tool_record_cancel,
-    _tool_browser_use,
+    # Every front door onto a live browser belongs here — a start tool that is
+    # merely NAMED differently still seizes a fleet browser.
+    _tool_browser_use, _tool_record_website, _tool_build, _tool_website_to_api,
 }
 
 

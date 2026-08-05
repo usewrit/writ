@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import { useRequireAuth } from '../hooks/useAuth';
 import { useQuery } from '../hooks/useQuery';
 import { Modal } from '../components/ui/Modal';
-import { Select, ViewSwitch, ScrollArea } from '../components/ui';
+import { Select, ViewSwitch, ScrollArea, Button, EmptyHero } from '../components/ui';
 import { filesApi, StoredFile, FileSource } from '../api/files';
 import { fileTypeIcon } from '../utils/fileIcon';
 import { apiErrorMessage } from '../api/client';
@@ -441,29 +441,25 @@ export const Files: React.FC = () => {
               <RowsSkeleton rows={8} label={t('Loading files')} />
             </div>
           ) : visible.length === 0 ? (
-            <div className="flex flex-1 flex-col items-center justify-center text-center px-6">
-              <div className="w-12 h-12 rounded-2xl bg-hover border border-border flex items-center justify-center mb-4">
-                <DocumentDuplicateIcon className="h-6 w-6 text-tertiary" />
-              </div>
-              <p className="text-sm font-medium text-ink">
-                {search || source ? t('No files match your search') : t('No files yet')}
-              </p>
-              <p className="text-xs text-secondary mt-1 max-w-xs">
-                {search || source
-                  ? t('Try a different filter')
-                  : t('Upload a file to use it in an upload step or pass it to a workflow run.')}
-              </p>
+            <EmptyHero
+              icon={DocumentDuplicateIcon}
+              title={search || source ? t('No files match your search') : t('No files yet')}
+              description={search || source
+                ? t('Try a different filter')
+                : t('Upload a file to use it in an upload step or pass it to a workflow run.')}
+              className="flex-1"
+            >
               {!search && !source && (
-                <button
+                <Button
                   onClick={() => fileInputRef.current?.click()}
                   disabled={uploadDisabled}
                   title={overQuota ? t('Storage full — free up space first') : undefined}
-                  className="mt-4 px-4 py-2 bg-accent-strong text-accent-on text-sm font-semibold rounded-lg shadow-sm hover:bg-accent-strong/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  size="sm"
                 >
                   {t('Upload your first file')}
-                </button>
+                </Button>
               )}
-            </div>
+            </EmptyHero>
           ) : (
             <ScrollArea className="flex-1" viewportClassName={viewMode === 'grid' ? 'p-3 sm:p-4' : 'px-2 py-2'}>
               {viewMode === 'grid' ? (

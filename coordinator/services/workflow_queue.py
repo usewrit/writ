@@ -316,6 +316,14 @@ async def queue_processor_loop():
                                 _persisted_et = "auto"
                             if _persisted_et != "local":
                                 workflow._runtime_execution_target = "cloud"
+                        # A requeued crawl shard carries the agents whose IP the host
+                        # just refused (`_avoid_agents`, stamped by the crawl
+                        # orchestrator's block-requeue). Retrying those URLs from the
+                        # same IP is what the requeue exists to avoid — so steer the
+                        # retry elsewhere when anything else is free.
+                        _avoid_agents = {
+                            str(a) for a in (_ctx0.get("_avoid_agents") or []) if a
+                        }
                         recorder = await cap_mgr.acquire_slot(
                             workflow, traffic,
                             required_tier=_req_tier,
@@ -323,6 +331,7 @@ async def queue_processor_loop():
                             running_override=cap_mgr.running_override_for(
                                 running_tally, capacity, _req_tier
                             ),
+                            exclude_agents=_avoid_agents or None,
                         )
                         if not recorder:
                             break  # class saturated / no agent right now → next class
@@ -363,11 +372,44 @@ async def queue_processor_loop():
                                 if _own_persona:
                                     byo_proxy_cfg = PersonaService.resolve_proxy(_own_persona)
                                     if _is_crawl_shard:
-                                        # Warm session cookies for the authenticated crawl.
-                                        # None when the persona has no session / it expired —
-                                        # the crawl then fetches logged-OUT (degraded), never
-                                        # blocked. Rides config.session_state to the agent.
+                                        # Warm session for the authenticated crawl — cookies,
+                                        # DOM storage and any captured auth headers. Rides
+                                        # config.session_state to the agent, which applies it
+                                        # on BOTH its HTTP and browser lanes.
                                         session_state = PersonaService.load_session(_own_persona)
+                                        # MID-CRAWL EXPIRY. The seeder verified the session
+                                        # before fan-out, but a long crawl outlives it: by the
+                                        # time this shard dispatches, load_session can return
+                                        # None (absent OR expired). This used to degrade to a
+                                        # logged-OUT fetch, which banks a batch of login walls
+                                        # as if it were page content — silently, with the
+                                        # crawl still reporting success. Fail the shard
+                                        # instead, so the crawl surfaces a real error.
+                                        if not session_state:
+                                            logger.warning(
+                                                f"[Queue] crawl shard {task.id}: persona "
+                                                f"{_own_persona.id} session expired mid-crawl "
+                                                f"— refusing to fetch logged-out"
+                                            )
+                                            await _release_queue_usage(db, task)
+                                            await db.commit()
+                                            # Settle through the crawl-native path: the
+                                            # orchestrator incremented this crawl's in-flight
+                                            # counter at mint and only complete_shard_task
+                                            # decrements it and re-pumps.
+                                            from services.crawl_orchestrator import (
+                                                complete_shard_task,
+                                            )
+                                            await complete_shard_task(
+                                                task.id, int(ctx["_crawl_id"]),
+                                                success=False,
+                                                error=(
+                                                    "The login session for this crawl's persona "
+                                                    "expired while it was running. Re-link the "
+                                                    "login and start the crawl again."
+                                                ),
+                                            )
+                                            continue
                             except Exception as _bp_e:
                                 logger.warning(
                                     f"[Queue] persona resolve failed for task {task.id}: {_bp_e}"

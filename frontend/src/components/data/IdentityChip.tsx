@@ -120,7 +120,7 @@ export const IdentityChip: React.FC<{
                   <span
                     className={clsx(
                       'flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border',
-                      on ? 'border-ink bg-ink text-white' : 'border-zinc-300 bg-surface',
+                      on ? 'border-ink bg-ink text-white' : 'border-border bg-surface',
                     )}
                   >
                     {on && <CheckIcon className="h-2.5 w-2.5" />}

@@ -17,7 +17,6 @@ import {
   ArrowTopRightOnSquareIcon,
   CheckCircleIcon,
   SparklesIcon,
-  CpuChipIcon,
   RocketLaunchIcon,
   FlagIcon,
   ShieldCheckIcon,
@@ -68,14 +67,20 @@ export const STEP_TYPES: StepTypeMeta[] = [
   { type: 'wait_for_change',  label: 'Wait for Change',Icon: ArrowPathIcon,              group: 'Control',     description: 'Wait until a selector or region changes' },
   { type: 'end_point',        label: 'End Point',      Icon: FlagIcon,                   group: 'Control',     description: 'Mark workflow completion' },
   { type: 'captcha',          label: 'Captcha',        Icon: ShieldCheckIcon,            group: 'Control',     description: 'Solve a captcha challenge' },
+  { type: 'twofa',            label: 'Enter 2FA code', Icon: ShieldCheckIcon,            group: 'Control',     description: 'Enter the one-time 2FA sign-in code', internal: true },
   { type: 'extract',          label: 'Extract',        Icon: ArrowTopRightOnSquareIcon,  group: 'Data',        description: 'Read data from an element' },
   { type: 'evaluate',         label: 'Evaluate JS',    Icon: CodeBracketIcon,            group: 'Data',        description: 'Run JavaScript on the page' },
   { type: 'api_call',         label: 'API Call',       Icon: LinkIcon,                   group: 'Data',        description: 'Make an HTTP request' },
   { type: 'login_post',       label: 'Sign-in request',Icon: ShieldCheckIcon,            group: 'Data',        description: 'Authenticate via a request (no form)', internal: true },
   { type: 'wait_for_download',label: 'Wait for Download',Icon: ArrowDownTrayIcon,        group: 'Data',        description: 'Capture a file the page downloads' },
-  { type: 'ai_fill',          label: 'AI Fill',        Icon: SparklesIcon,               group: 'AI',          description: 'AI fills a form from instructions' },
-  { type: 'ai_continue',      label: 'AI Continue',    Icon: CpuChipIcon,                group: 'AI',          description: 'AI performs a task autonomously' },
-  { type: 'ai_navigate',      label: 'AI Navigate',    Icon: RocketLaunchIcon,           group: 'AI',          description: 'AI navigates toward a goal' },
+  // ONE authorable AI step. `AI Fill` / `AI Continue` / `AI Navigate` were three names for
+  // the same idea — "describe it, the AI does it" — so the palette now offers `ai_continue`
+  // only. `ai_navigate` is the older wire spelling of that SAME step and executes the
+  // identical agent-brain path; `ai_fill` is the superseded one-shot form fill. Both stay in
+  // the catalog, hidden from the palette, so steps saved under them still render and edit.
+  { type: 'ai_continue',      label: 'AI Task',        Icon: SparklesIcon,               group: 'AI',          description: 'Describe a task — the AI does it on the page' },
+  { type: 'ai_navigate',      label: 'AI Task (goal)', Icon: RocketLaunchIcon,           group: 'AI',          description: 'Older spelling of AI Task — runs the same step', internal: true },
+  { type: 'ai_fill',          label: 'AI Fill (legacy)', Icon: SparklesIcon,             group: 'AI',          description: 'Superseded one-shot form fill — use AI Task', internal: true },
   { type: 'wait_for_tab',     label: 'Tab Opened by Site', Icon: ArrowTopRightOnSquareIcon, group: 'Tabs',        description: 'Wait for the site to open a new tab (popup / target=_blank)' },
   { type: 'open_tab',         label: 'Open New Tab',   Icon: PlusIcon,                   group: 'Tabs',        description: 'Open a new tab yourself and go to a URL' },
   { type: 'tab_closed',       label: 'Tab Closed',     Icon: XMarkIcon,                  group: 'Tabs',        description: 'Return to the parent tab' },
@@ -210,16 +215,22 @@ export function getStepInfo(step: WorkflowStep): StepInfo {
       if (config.variable) details.push({ label: i18n.t('Variable'), value: config.variable });
       break;
     }
-    case 'ai_navigate':
-      if (config.goal) details.push({ label: i18n.t('Goal'), value: config.goal });
-      if (config.url) details.push({ label: i18n.t('Start'), value: config.url, mono: true });
-      if (config.use_vision !== false) badges.push(i18n.t('Vision'));
-      break;
+    // One merged AI step, two wire spellings: `task` is what the editor writes, `goal`
+    // what steps saved as `ai_navigate` carry. Both execute the same agent brain, so both
+    // summarise identically. No `Vision` badge: the brain screenshots on demand — the old
+    // `use_vision` flag only ever reached the retired eager-screenshot loop.
     case 'ai_continue':
-      if (config.task) details.push({ label: i18n.t('Task'), value: config.task });
-      if (config.max_actions) badges.push(i18n.t('Max {{n}}', { n: config.max_actions }));
+    case 'ai_navigate': {
+      const task = config.task || config.goal || '';
+      if (task) details.push({ label: i18n.t('Task'), value: task });
+      if (config.url) details.push({ label: i18n.t('Start'), value: config.url, mono: true });
+      const maxSteps = config.max_actions || config.max_steps;
+      if (maxSteps) badges.push(i18n.t('Max {{n}}', { n: maxSteps }));
       badges.push(i18n.t('Autonomous'));
       break;
+    }
+    // Superseded one-shot form fill — still replays exactly as recorded, so it keeps its
+    // own summary rather than borrowing the agent step's.
     case 'ai_fill':
       if (config.instruction) details.push({ label: i18n.t('Instruction'), value: config.instruction });
       badges.push(i18n.t('AI powered'));
@@ -340,7 +351,6 @@ export function createStep(type: StepType): WorkflowStep {
   switch (type) {
     case 'wait': step.config = { duration: 1000 }; break;
     case 'ai_continue': step.config = { max_actions: 10 }; break;
-    case 'ai_navigate': step.config = { use_vision: true }; break;
     case 'end_point': step.config = { condition_type: 'immediate' }; break;
     case 'api_call': step.config = { method: 'GET' }; break;
     case 'extract': step.config = { attribute: 'textContent' }; break;

@@ -23,7 +23,7 @@ interface ToolRailProps {
 const Section: React.FC<{ title: string; right?: React.ReactNode; children: React.ReactNode }> = ({ title, right, children }) => (
   <div className="px-3 py-3 border-b border-border last:border-b-0">
     <div className="flex items-center justify-between mb-2 px-1">
-      <span className="uppercase tracking-wider text-[10px] font-semibold text-zinc-400">{title}</span>
+      <span className="uppercase tracking-wider text-[10px] font-semibold text-tertiary">{title}</span>
       {right}
     </div>
     {children}
@@ -52,7 +52,7 @@ const RailBody: React.FC<{ rail: ReturnType<typeof useToolRail>; config: RailCon
       <Section
         title={t('Views')}
         right={rail.activeFilterCount > 0 ? (
-          <button onClick={rail.clearAll} className="text-[10px] text-zinc-400 hover:text-ink transition-colors">{t('Clear')}</button>
+          <button onClick={rail.clearAll} className="text-[10px] text-tertiary hover:text-ink transition-colors">{t('Clear')}</button>
         ) : undefined}
       >
         <div className="space-y-0.5">
@@ -66,12 +66,12 @@ const RailBody: React.FC<{ rail: ReturnType<typeof useToolRail>; config: RailCon
                 onClick={() => rail.setView(v.id)}
                 className={clsx(
                   'flex items-center gap-2.5 w-full px-2 py-[6px] rounded-md text-[13px] transition-colors',
-                  active ? 'bg-zinc-100 text-ink font-medium' : 'text-zinc-500 hover:text-ink hover:bg-hover',
+                  active ? 'bg-hover text-ink font-medium' : 'text-secondary hover:text-ink hover:bg-hover',
                 )}
               >
-                <Icon className={clsx('w-4 h-4 shrink-0', active ? 'text-ink' : 'text-zinc-400')} />
+                <Icon className={clsx('w-4 h-4 shrink-0', active ? 'text-ink' : 'text-tertiary')} />
                 <span className="flex-1 text-left truncate">{t(v.label)}</span>
-                <span className={clsx('text-[11px] tabular-nums', active ? 'text-zinc-500' : 'text-zinc-400')}>{count}</span>
+                <span className={clsx('text-[11px] tabular-nums', active ? 'text-secondary' : 'text-tertiary')}>{count}</span>
               </button>
             );
           })}
@@ -100,11 +100,11 @@ const RailBody: React.FC<{ rail: ReturnType<typeof useToolRail>; config: RailCon
                     'inline-flex items-center gap-1.5 pl-2 pr-1.5 py-1 rounded-full text-[11px] border transition-colors',
                     selected
                       ? 'bg-ink text-white border-ink'
-                      : 'bg-white text-zinc-500 border-zinc-200 hover:border-zinc-300 hover:text-ink',
+                      : 'bg-surface text-secondary border-border hover:border-border-strong hover:text-ink',
                   )}
                 >
                   {t(o.label)}
-                  <span className={clsx('tabular-nums', selected ? 'text-white/70' : 'text-zinc-400')}>{count}</span>
+                  <span className={clsx('tabular-nums', selected ? 'text-white/70' : 'text-tertiary')}>{count}</span>
                 </button>
               );
             })}
@@ -119,11 +119,11 @@ const RailBody: React.FC<{ rail: ReturnType<typeof useToolRail>; config: RailCon
           {config.stats.map((s) => {
             const r = s.compute(items);
             return (
-              <div key={s.id} className="rounded-lg border border-zinc-200/70 bg-white px-2.5 py-2">
-                <div className="text-[10px] text-zinc-400 truncate">{t(s.label)}</div>
+              <div key={s.id} className="rounded-lg border border-border/70 bg-surface px-2.5 py-2">
+                <div className="text-[10px] text-tertiary truncate">{t(s.label)}</div>
                 <div className="text-[15px] font-semibold text-ink tabular-nums leading-tight mt-0.5">{r.value}</div>
                 {typeof r.ratio === 'number' && (
-                  <div className="mt-1.5 h-1 bg-zinc-100 rounded-full overflow-hidden">
+                  <div className="mt-1.5 h-1 bg-hover rounded-full overflow-hidden">
                     <div className="h-full bg-ink rounded-full transition-all" style={{ width: `${r.ratio}%` }} />
                   </div>
                 )}
@@ -136,7 +136,7 @@ const RailBody: React.FC<{ rail: ReturnType<typeof useToolRail>; config: RailCon
       {/* Activity */}
       <Section title={config.activityTitle}>
         {activity.length === 0 ? (
-          <p className="text-[11px] text-zinc-400 px-1 py-1">{t('No recent activity')}</p>
+          <p className="text-[11px] text-tertiary px-1 py-1">{t('No recent activity')}</p>
         ) : (
           <div className="space-y-px">
             {activity.map((a) => (
@@ -144,9 +144,9 @@ const RailBody: React.FC<{ rail: ReturnType<typeof useToolRail>; config: RailCon
                 <Dot ok={a.ok} />
                 <div className="flex-1 min-w-0">
                   <div className="text-[12px] text-ink truncate">{a.title}</div>
-                  {a.subtitle && <div className="text-[10px] text-zinc-400 truncate">{a.subtitle}</div>}
+                  {a.subtitle && <div className="text-[10px] text-tertiary truncate">{a.subtitle}</div>}
                 </div>
-                {a.time && <span className="text-[10px] text-zinc-400 shrink-0">{formatRelativeTime(a.time)}</span>}
+                {a.time && <span className="text-[10px] text-tertiary shrink-0">{formatRelativeTime(a.time)}</span>}
               </div>
             ))}
           </div>
@@ -174,14 +174,14 @@ export const ToolRail: React.FC<ToolRailProps> = ({ config, items, onFilterChang
           // so `lg:` kept it docked while it ate most of a narrow card. Below
           // `rail` it becomes the same floating button + sheet already used on a
           // narrow window.
-          'hidden @rail/stage:flex flex-col shrink-0 border-l border-border bg-white transition-[width] duration-200',
+          'hidden @rail/stage:flex flex-col shrink-0 border-l border-border bg-surface transition-[width] duration-200',
           rail.collapsed ? 'w-[44px]' : 'w-[264px]',
         )}
       >
         {rail.collapsed ? (
           <button
             onClick={rail.toggleCollapsed}
-            className="flex flex-col items-center gap-2 pt-3 text-zinc-400 hover:text-ink transition-colors"
+            className="flex flex-col items-center gap-2 pt-3 text-tertiary hover:text-ink transition-colors"
             title={t('Expand insights')}
           >
             <ChevronDoubleLeftIcon className="w-4 h-4" />
@@ -193,7 +193,7 @@ export const ToolRail: React.FC<ToolRailProps> = ({ config, items, onFilterChang
           <>
             <div className="flex items-center justify-between h-11 px-3 border-b border-border shrink-0">
               <span className="text-[12px] font-semibold text-ink">{t('Insights')}</span>
-              <button onClick={rail.toggleCollapsed} className="p-1 text-zinc-400 hover:text-ink transition-colors" title={t('Collapse')}>
+              <button onClick={rail.toggleCollapsed} className="p-1 text-tertiary hover:text-ink transition-colors" title={t('Collapse')}>
                 <ChevronDoubleRightIcon className="w-4 h-4" />
               </button>
             </div>
@@ -210,7 +210,7 @@ export const ToolRail: React.FC<ToolRailProps> = ({ config, items, onFilterChang
         <AdjustmentsHorizontalIcon className="w-4 h-4" />
         {t('Insights')}
         {rail.activeFilterCount > 0 && (
-          <span className="ml-0.5 w-4 h-4 rounded-full bg-white text-ink text-[10px] font-bold flex items-center justify-center">{rail.activeFilterCount}</span>
+          <span className="ml-0.5 w-4 h-4 rounded-full bg-surface text-ink text-[10px] font-bold flex items-center justify-center">{rail.activeFilterCount}</span>
         )}
       </button>
 
@@ -220,10 +220,10 @@ export const ToolRail: React.FC<ToolRailProps> = ({ config, items, onFilterChang
           {/* max-w-[85%] of the CARD, not 85vw of the window — this sheet is now
               absolutely positioned inside the content card (see the drawer's
               `absolute`, not `fixed`, wrapper above). */}
-          <aside className="relative w-[280px] max-w-[85%] bg-white flex flex-col shadow-xl animate-fade-in">
+          <aside className="relative w-[280px] max-w-[85%] bg-surface flex flex-col shadow-xl animate-fade-in">
             <div className="flex items-center justify-between h-12 px-3 border-b border-border shrink-0">
               <span className="text-[12px] font-semibold text-ink">{t('Insights')}</span>
-              <button onClick={() => setMobileOpen(false)} className="p-1 text-zinc-400 hover:text-ink">
+              <button onClick={() => setMobileOpen(false)} className="p-1 text-tertiary hover:text-ink">
                 <XMarkIcon className="w-5 h-5" />
               </button>
             </div>

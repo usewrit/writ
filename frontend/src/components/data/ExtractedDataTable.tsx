@@ -30,7 +30,7 @@ import {
 } from '@heroicons/react/24/outline';
 import { Modal } from '../ui/Modal';
 import { DatasetApiModal } from './DatasetApiModal';
-import { Select, Expand } from '../ui';
+import { Select, Expand, EmptyHero, Button } from '../ui';
 import { useQuery } from '../../hooks/useQuery';
 import { Q } from '../../stores/queryKeys';
 import { automationApi } from '../../api/endpoints';
@@ -477,7 +477,7 @@ const SelectBox: React.FC<{
     onMouseEnter={onMouseEnter}
     className={clsx(
       'flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors',
-      checked || indeterminate ? 'border-ink bg-ink text-white' : 'border-zinc-300 bg-surface hover:border-zinc-400',
+      checked || indeterminate ? 'border-ink bg-ink text-white' : 'border-border bg-surface hover:border-border-strong',
     )}
   >
     {indeterminate ? <MinusIcon className="h-3 w-3" /> : checked ? <CheckIcon className="h-3 w-3" /> : null}
@@ -506,7 +506,7 @@ const ScopeChip: React.FC<{ active: boolean; label: string; count: number; mono?
     onClick={onClick}
     className={clsx(
       'inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1 text-[12px] transition-colors',
-      active ? 'border-ink bg-ink text-white' : 'border-border bg-surface text-secondary hover:border-zinc-400 hover:text-ink',
+      active ? 'border-accent/40 bg-accent/10 text-accent-strong' : 'border-border bg-surface text-secondary hover:border-border-strong hover:text-ink',
     )}
     title={label}
   >
@@ -514,7 +514,7 @@ const ScopeChip: React.FC<{ active: boolean; label: string; count: number; mono?
     <span
       className={clsx(
         'rounded-full px-1.5 py-px text-[10px] tabular-nums',
-        active ? 'bg-white/20 text-white' : 'bg-canvas text-tertiary',
+        active ? 'bg-accent/15 text-accent-strong' : 'bg-canvas text-tertiary',
       )}
     >
       {count}
@@ -1311,7 +1311,7 @@ export const ExtractedDataTable: React.FC<Props> = ({ workflowId, isCrawl = fals
       {resizable && (
         <div
           onMouseDown={startResize(col)}
-          className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-zinc-300/70"
+          className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-active/70"
         />
       )}
     </th>
@@ -1909,14 +1909,14 @@ export const ExtractedDataTable: React.FC<Props> = ({ workflowId, isCrawl = fals
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder={t('Search extracted data…')}
-            className="w-full rounded-lg border border-border bg-surface py-1.5 pl-8 pr-3 text-[12px] text-ink placeholder:text-tertiary focus:border-zinc-400 focus:outline-none"
+            className="w-full rounded-lg border border-border bg-surface py-1.5 pl-8 pr-3 text-[12px] text-ink placeholder:text-tertiary focus:border-border-strong focus:outline-none"
           />
         </div>
         <button
           onClick={() => setShowRunInfo((v) => !v)}
           className={clsx(
             'inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[12px] font-medium transition-colors',
-            showRunInfo ? 'border-zinc-400 bg-hover text-ink' : 'border-border text-secondary hover:text-ink',
+            showRunInfo ? 'border-border-strong bg-hover text-ink' : 'border-border text-secondary hover:text-ink',
           )}
           title={
             effLens === 'latest'
@@ -1980,7 +1980,7 @@ export const ExtractedDataTable: React.FC<Props> = ({ workflowId, isCrawl = fals
                         <span
                           className={clsx(
                             'flex h-4 w-4 shrink-0 items-center justify-center rounded border',
-                            on ? 'border-ink bg-ink text-white' : 'border-zinc-300 bg-surface',
+                            on ? 'border-ink bg-ink text-white' : 'border-border bg-surface',
                           )}
                         >
                           {on && <CheckIcon className="h-3 w-3" />}
@@ -2324,20 +2324,20 @@ export const ExtractedDataTable: React.FC<Props> = ({ workflowId, isCrawl = fals
       {(loading || !tableEnabled) && !data ? (
         <RowsSkeleton rows={6} label={t('Loading data')} />
       ) : pristineEmpty ? (
-        <div className="flex flex-col items-center justify-center rounded-xl border border-border bg-surface px-6 py-12 text-center">
-          <TableCellsIcon className="h-6 w-6 text-tertiary" />
-          <p className="mt-3 text-[13px] font-medium text-ink">{t('No extracted data yet')}</p>
-          <p className="mt-1 max-w-sm text-[11px] text-tertiary">
-            {t('When this workflow runs and extracts data, every run’s results land here as a sortable table.')}
-          </p>
-        </div>
+        <EmptyHero
+          icon={TableCellsIcon}
+          title={t('No extracted data yet')}
+          description={t('When this workflow runs and extracts data, every run’s results land here as a sortable table.')}
+          className="rounded-xl border border-border bg-surface py-12"
+        />
       ) : !loading && viewTotal === 0 && hasFiltersOrSearch ? (
-        <div className="rounded-xl border border-border bg-surface px-6 py-10 text-center">
-          <p className="text-[13px] text-secondary">{t('No rows match your search or filters.')}</p>
-          <button onClick={clearAll} className="mt-2 text-[12px] font-medium text-ink underline-offset-2 hover:underline">
-            {t('Clear all')}
-          </button>
-        </div>
+        <EmptyHero
+          icon={TableCellsIcon}
+          title={t('No rows match your search or filters.')}
+          className="rounded-xl border border-border bg-surface py-10"
+        >
+          <Button size="sm" variant="ghost" onClick={clearAll}>{t('Clear all')}</Button>
+        </EmptyHero>
       ) : view === 'cards' ? (
         <div className={clsx('overflow-hidden rounded-xl border border-border bg-surface', maximized && CARD_SHELL_MAX)}>
           <div className={clsx('divide-y divide-border', maximized && 'min-h-0 flex-1 overflow-y-auto')}>
@@ -3086,7 +3086,7 @@ const RawRecord: React.FC<{
                       <button
                         key={c.path}
                         onClick={() => onOpenCollection(c.path)}
-                        className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-0.5 text-[11px] font-medium text-secondary transition-colors hover:border-zinc-400 hover:text-ink"
+                        className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-0.5 text-[11px] font-medium text-secondary transition-colors hover:border-border-strong hover:text-ink"
                         title={t('Open {{path}} as a selectable collection', { path: c.path })}
                       >
                         <RectangleStackIcon className="h-3 w-3" />

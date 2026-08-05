@@ -102,7 +102,7 @@ export const DetailTab: React.FC<DetailTabProps> = ({
             <div className="flex items-center gap-3 px-4 py-3">
               <span className="relative flex w-2 h-2 shrink-0">
                 {activeSession && <span className="absolute inline-flex w-full h-full rounded-full bg-emerald-500 opacity-60 animate-status-pulse" />}
-                <span className={clsx('relative inline-flex w-2 h-2 rounded-full', activeSession ? 'bg-emerald-500' : 'bg-zinc-300')} />
+                <span className={clsx('relative inline-flex w-2 h-2 rounded-full', activeSession ? 'bg-emerald-500' : 'bg-active')} />
               </span>
               <div className="flex-1 min-w-0">
                 <p className="text-[13px] font-medium text-ink">{activeSession ? t('Session active') : t('No active session')}</p>
@@ -200,7 +200,7 @@ export const DetailTab: React.FC<DetailTabProps> = ({
                 >
                   <span className={clsx(
                     'w-2 h-2 rounded-full shrink-0',
-                    ['starting', 'running'].includes(s.status) ? 'bg-emerald-500 animate-status-pulse' : s.status === 'failed' ? 'bg-red-500' : s.status === 'ended' ? 'bg-zinc-300' : 'bg-emerald-500',
+                    ['starting', 'running'].includes(s.status) ? 'bg-emerald-500 animate-status-pulse' : s.status === 'failed' ? 'bg-red-500' : s.status === 'ended' ? 'bg-active' : 'bg-emerald-500',
                   )} />
                   <span className="text-[13px] text-ink capitalize">{s.status}</span>
                   <span className="text-[11px] text-tertiary">{t('{{n}} events', { n: s.events_emitted ?? 0 })}</span>

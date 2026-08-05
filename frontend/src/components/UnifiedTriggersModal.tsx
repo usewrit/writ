@@ -24,6 +24,9 @@ import {
   SparklesIcon,
   ArrowsRightLeftIcon,
   CheckIcon,
+  LockClosedIcon,
+  EyeIcon,
+  LightBulbIcon,
 } from '@heroicons/react/24/outline';
 import toast from 'react-hot-toast';
 import clsx from 'clsx';
@@ -31,6 +34,7 @@ import { useTranslation } from 'react-i18next';
 import { triggersApi, aiSessionsApi, selectorsApi, automationApi, recipientsApi, webhookTriggersApi, targetsApi } from '../api/endpoints';
 import { UserGroupIcon, LinkIcon, ClipboardIcon, ClipboardDocumentCheckIcon, ArrowUturnLeftIcon } from '@heroicons/react/24/outline';
 import { ConfirmDialog } from './ConfirmDialog';
+import { channelMeta } from './notifications/channelMeta';
 import { Checkbox, NumberInput, Select, Switch } from './ui';
 import { uiLocale } from '../utils/format';
 
@@ -959,13 +963,13 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                 <div>
                   <p className="text-ink mb-1">{t('From Content Change:')}</p>
                   <div className="flex flex-wrap gap-1">
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{content}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{diff_snippet}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{extracted.price}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{extracted.status}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{extracted.*}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{selector_name}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{change_detected_at}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{content}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{diff_snippet}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{extracted.price}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{extracted.status}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{extracted.*}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{selector_name}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{change_detected_at}}'}</code>
                   </div>
                 </div>
               )}
@@ -975,17 +979,17 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                 <div>
                   <p className="text-ink mb-1">{t('From AI Session:')}</p>
                   <div className="flex flex-wrap gap-1">
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{session_id}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{session_name}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{session_status}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{success}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{session_steps_taken}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{session_duration_seconds}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{session_error}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{session_started_at}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{session_completed_at}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{ai_result.*}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{ai_extracted.*}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{session_id}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{session_name}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{session_status}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{success}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{session_steps_taken}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{session_duration_seconds}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{session_error}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{session_started_at}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{session_completed_at}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{ai_result.*}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{ai_extracted.*}}'}</code>
                   </div>
                 </div>
               )}
@@ -995,16 +999,16 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                 <div>
                   <p className="text-ink mb-1">{t('From Workflow:')}</p>
                   <div className="flex flex-wrap gap-1">
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{workflow_id}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{workflow_name}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{workflow_status}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{success}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{workflow_steps_completed}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{workflow_duration_seconds}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{workflow_error}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{workflow_started_at}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{workflow_completed_at}}'}</code>
-                    <code className="bg-zinc-100 text-ink px-1 py-0.5 rounded">{'{{result.*}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{workflow_id}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{workflow_name}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{workflow_status}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{success}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{workflow_steps_completed}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{workflow_duration_seconds}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{workflow_error}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{workflow_started_at}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{workflow_completed_at}}'}</code>
+                    <code className="bg-hover text-ink px-1 py-0.5 rounded">{'{{result.*}}'}</code>
                   </div>
                 </div>
               )}
@@ -1042,8 +1046,8 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                     className={clsx(
                       'p-2 rounded-lg border text-left transition-all',
                       block.blockType === et.value
-                        ? 'border-zinc-300 bg-zinc-100 ring-1 ring-ink/20'
-                        : 'border-border bg-hover/50 hover:border-border'
+                        ? 'border-border bg-hover ring-1 ring-ink/20'
+                        : 'border-border bg-hover/50 hover:border-border-strong'
                     )}
                   >
                     <div className="text-xs font-medium text-ink">{t(et.label)}</div>
@@ -1124,7 +1128,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                   placeholder={t('Any workflow')}
                   options={[
                     { value: 0, label: t('Any workflow') },
-                    ...workflows.map(w => ({ value: Number(w.id), label: w.is_installed ? `🔒 ${w.name}` : w.name })),
+                    ...workflows.map(w => ({ value: Number(w.id), label: w.name, icon: w.is_installed ? <LockClosedIcon className="h-3.5 w-3.5 text-tertiary" aria-hidden="true" /> : undefined })),
                   ]}
                   className="w-full"
                 />
@@ -1132,7 +1136,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
             )}
             {block.blockType === 'webhook_received' && (
               <div className="space-y-3">
-                <div className="p-3 bg-zinc-100 border border-border rounded-lg">
+                <div className="p-3 bg-hover border border-border rounded-lg">
                   <div className="flex items-center gap-2 mb-2">
                     <LinkIcon className="h-4 w-4 text-secondary" />
                     <span className="text-xs font-medium text-secondary">{t('Webhook Entry Point')}</span>
@@ -1163,7 +1167,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                       <div>
                         <div className="text-[10px] text-ink mb-0.5">{t('Wait for extracted data:')}</div>
                         <div className="flex items-center gap-2">
-                          <code className="flex-1 text-xs text-ink bg-surface border border-zinc-300 px-2 py-1.5 rounded truncate">
+                          <code className="flex-1 text-xs text-ink bg-surface border border-border px-2 py-1.5 rounded truncate">
                             {webhookTriggersApi.getWebhookUrl(block.config.webhook_trigger_token)}?wait=true
                           </code>
                           <button type="button" onClick={() => {
@@ -1194,7 +1198,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                             type="text"
                             value={block.config.custom_path || ''}
                             onChange={e => updateBlockConfig(block.id, { ...block.config, custom_path: e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '') })}
-                            className="flex-1 px-3 py-2 bg-surface border border-border rounded-r-lg text-sm text-ink placeholder-zinc-500"
+                            className="flex-1 px-3 py-2 bg-surface border border-border rounded-r-lg text-sm text-ink placeholder-tertiary"
                             placeholder="googlepoptimes"
                           />
                         </div>
@@ -1212,7 +1216,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                           type="text"
                           value={block.config.webhook_secret || ''}
                           onChange={e => updateBlockConfig(block.id, { ...block.config, webhook_secret: e.target.value })}
-                          className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-sm text-ink placeholder-zinc-500"
+                          className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-sm text-ink placeholder-tertiary"
                           placeholder={t('For HMAC signature verification')}
                         />
                       </div>
@@ -1243,7 +1247,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
           <div className="space-y-3">
             {/* Show auto-linked session info */}
             {linkedSession ? (
-              <div className="flex items-center gap-2 text-sm text-ink bg-zinc-100 px-3 py-2 rounded-lg border border-zinc-300">
+              <div className="flex items-center gap-2 text-sm text-ink bg-hover px-3 py-2 rounded-lg border border-border">
                 <CpuChipIcon className="h-4 w-4" />
                 <span>{t('Linked to:')} <strong>{linkedSession.name}</strong></span>
               </div>
@@ -1269,9 +1273,9 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                 <label className="block text-xs text-secondary">{t('When status is:')}</label>
                 <div className="flex gap-2">
                   {[
-                    { value: 'any', label: t('Always'), color: 'bg-zinc-200' },
-                    { value: 'success', label: t('✓ Success Only'), color: 'bg-green-100' },
-                    { value: 'error', label: t('✗ Error Only'), color: 'bg-red-100' },
+                    { value: 'any', label: t('Always'), color: 'bg-active' },
+                    { value: 'success', label: t('Success Only'), color: 'bg-green-100' },
+                    { value: 'error', label: t('Error Only'), color: 'bg-red-100' },
                   ].map(opt => (
                     <button
                       key={opt.value}
@@ -1281,7 +1285,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                         'px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
                         (block.config.status_condition || 'any') === opt.value
                           ? `${opt.color} text-ink ring-2 ring-white/20`
-                          : 'bg-hover text-secondary hover:bg-hover'
+                          : 'bg-hover text-secondary hover:bg-active'
                       )}
                     >
                       {t(opt.label)}
@@ -1304,7 +1308,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
           <div className="space-y-3">
             {/* Show auto-linked workflow info */}
             {linkedWorkflow ? (
-              <div className="flex items-center gap-2 text-sm text-ink bg-zinc-100 px-3 py-2 rounded-lg border border-zinc-300">
+              <div className="flex items-center gap-2 text-sm text-ink bg-hover px-3 py-2 rounded-lg border border-border">
                 <Cog6ToothIcon className="h-4 w-4" />
                 <span>{t('Linked to:')} <strong>{linkedWorkflow.name}</strong></span>
               </div>
@@ -1317,7 +1321,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                   placeholder={t('Any workflow')}
                   options={[
                     { value: 0, label: t('Any workflow') },
-                    ...workflows.map(w => ({ value: Number(w.id), label: w.is_installed ? `🔒 ${w.name}` : w.name })),
+                    ...workflows.map(w => ({ value: Number(w.id), label: w.name, icon: w.is_installed ? <LockClosedIcon className="h-3.5 w-3.5 text-tertiary" aria-hidden="true" /> : undefined })),
                   ]}
                   className="w-full"
                 />
@@ -1330,9 +1334,9 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                 <label className="block text-xs text-secondary">{t('When status is:')}</label>
                 <div className="flex gap-2">
                   {[
-                    { value: 'any', label: t('Always'), color: 'bg-zinc-200' },
-                    { value: 'success', label: t('✓ Success Only'), color: 'bg-green-100' },
-                    { value: 'error', label: t('✗ Error Only'), color: 'bg-red-100' },
+                    { value: 'any', label: t('Always'), color: 'bg-active' },
+                    { value: 'success', label: t('Success Only'), color: 'bg-green-100' },
+                    { value: 'error', label: t('Error Only'), color: 'bg-red-100' },
                   ].map(opt => (
                     <button
                       key={opt.value}
@@ -1342,7 +1346,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                         'px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
                         (block.config.status_condition || 'any') === opt.value
                           ? `${opt.color} text-ink ring-2 ring-white/20`
-                          : 'bg-hover text-secondary hover:bg-hover'
+                          : 'bg-hover text-secondary hover:bg-active'
                       )}
                     >
                       {t(opt.label)}
@@ -1392,7 +1396,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                     key={i}
                     type="button"
                     onClick={() => applyPreset(preset)}
-                    className="px-2 py-1 text-xs bg-hover hover:bg-zinc-200 text-ink rounded transition-colors"
+                    className="px-2 py-1 text-xs bg-hover hover:bg-active text-ink rounded transition-colors"
                   >
                     {t(preset.label)}
                   </button>
@@ -1605,12 +1609,13 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
               <label className="text-xs font-medium text-secondary mb-2 block">{t('Notification Channels')}</label>
               <div className="flex flex-wrap gap-1.5">
                 {[
-                  { key: 'pushover', label: t('Pushover'), icon: '📱', color: 'cyan' },
-                  { key: 'email', label: t('Email'), icon: '✉️', color: 'amber' },
-                  { key: 'twilio', label: t('SMS'), icon: '💬', color: 'green' },
-                  { key: 'whatsapp', label: t('WhatsApp'), icon: '📲', color: 'emerald' },
-                  { key: 'webhook', label: t('Webhook'), icon: '🔗', color: 'purple' },
+                  { key: 'pushover', color: 'cyan' },
+                  { key: 'email', color: 'amber' },
+                  { key: 'twilio', color: 'green' },
+                  { key: 'whatsapp', color: 'emerald' },
+                  { key: 'webhook', color: 'purple' },
                 ].map(channel => {
+                  const { Icon, label } = channelMeta(channel.key);
                   const isSelected = (block.config.channels || []).includes(channel.key);
                   return (
                     <button
@@ -1628,17 +1633,17 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                         isSelected
                           ? clsx(
                               'border-transparent',
-                              channel.color === 'cyan' && 'bg-zinc-100 text-ink',
-                              channel.color === 'amber' && 'bg-zinc-100 text-secondary',
-                              channel.color === 'green' && 'bg-zinc-100 text-ink',
-                              channel.color === 'emerald' && 'bg-zinc-100 text-ink',
-                              channel.color === 'purple' && 'bg-zinc-100 text-ink',
+                              channel.color === 'cyan' && 'bg-hover text-ink',
+                              channel.color === 'amber' && 'bg-hover text-secondary',
+                              channel.color === 'green' && 'bg-hover text-ink',
+                              channel.color === 'emerald' && 'bg-hover text-ink',
+                              channel.color === 'purple' && 'bg-hover text-ink',
                             )
-                          : 'border-border bg-hover/50 text-tertiary hover:border-border hover:text-secondary'
+                          : 'border-border bg-hover/50 text-tertiary hover:border-border-strong hover:text-secondary'
                       )}
                     >
-                      <span>{channel.icon}</span>
-                      <span>{t(channel.label)}</span>
+                      <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>{t(label)}</span>
                       {isSelected && <CheckIcon className="h-3 w-3" />}
                     </button>
                   );
@@ -1662,7 +1667,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                       <UserGroupIcon className="h-4 w-4 text-secondary" />
                       {t('Recipients')}
                       {selectedRecipients.length > 0 && (
-                        <span className="px-1.5 py-0.5 rounded-full bg-zinc-100 text-ink text-[10px]">
+                        <span className="px-1.5 py-0.5 rounded-full bg-hover text-ink text-[10px]">
                           {t('{{n}} selected', { n: selectedRecipients.length })}
                         </span>
                       )}
@@ -1685,7 +1690,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                             .map(r => `${r.provider}:${r.id}`);
                           updateBlockConfig(block.id, { ...block.config, recipients: matchingRecipients });
                         }}
-                        className="text-[10px] text-ink hover:text-ink"
+                        className="text-[10px] text-ink"
                       >
                         {t('Select All ({{n}})', { n: totalAvailable })}
                       </button>
@@ -1700,13 +1705,14 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                     <div className="space-y-2">
                       {channelsWithRecipients.map((channel: string) => {
                         const channelRecipients = availableRecipients.filter(r => r.provider === channel);
+                        const { Icon: ChannelIcon } = channelMeta(channel);
                         const channelLabel = {
-                          pushover: { name: t('Pushover'), color: 'cyan', icon: '📱' },
-                          email: { name: t('Email'), color: 'amber', icon: '✉️' },
-                          twilio: { name: t('SMS'), color: 'green', icon: '💬' },
-                          whatsapp: { name: t('WhatsApp'), color: 'emerald', icon: '📲' },
-                          signal: { name: t('Signal'), color: 'blue', icon: '🔒' },
-                        }[channel] || { name: channel, color: 'zinc', icon: '📨' };
+                          pushover: { name: t('Pushover'), color: 'cyan' },
+                          email: { name: t('Email'), color: 'amber' },
+                          twilio: { name: t('SMS'), color: 'green' },
+                          whatsapp: { name: t('WhatsApp'), color: 'emerald' },
+                          signal: { name: t('Signal'), color: 'blue' },
+                        }[channel] || { name: channel, color: 'zinc' };
 
                         const selectedInChannel = channelRecipients.filter(r =>
                           selectedRecipients.includes(`${r.provider}:${r.id}`)
@@ -1715,7 +1721,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                         return (
                           <div key={channel} className="space-y-1">
                             <div className="flex items-center gap-2">
-                              <span className="text-[10px]">{channelLabel.icon}</span>
+                              <ChannelIcon className="h-3 w-3 text-tertiary" aria-hidden="true" />
                               <span className={clsx(
                                 'text-[10px] font-medium',
                                 channelLabel.color === 'cyan' && 'text-ink',
@@ -1750,13 +1756,13 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                                       isSelected
                                         ? clsx(
                                             'border-transparent',
-                                            channelLabel.color === 'cyan' && 'bg-zinc-100 text-ink',
-                                            channelLabel.color === 'amber' && 'bg-zinc-100 text-secondary',
-                                            channelLabel.color === 'green' && 'bg-zinc-100 text-ink',
-                                            channelLabel.color === 'emerald' && 'bg-zinc-100 text-ink',
-                                            channelLabel.color === 'blue' && 'bg-zinc-100 text-ink',
+                                            channelLabel.color === 'cyan' && 'bg-hover text-ink',
+                                            channelLabel.color === 'amber' && 'bg-hover text-secondary',
+                                            channelLabel.color === 'green' && 'bg-hover text-ink',
+                                            channelLabel.color === 'emerald' && 'bg-hover text-ink',
+                                            channelLabel.color === 'blue' && 'bg-hover text-ink',
                                           )
-                                        : 'border-border bg-hover/50 text-tertiary hover:border-border hover:text-secondary'
+                                        : 'border-border bg-hover/50 text-tertiary hover:border-border-strong hover:text-secondary'
                                     )}
                                   >
                                     {isSelected && <CheckIcon className="h-3 w-3" />}
@@ -1981,7 +1987,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                     const newFormData = { ...block.config.form_data, [`field_${Object.keys(block.config.form_data || {}).length + 1}`]: '' };
                     updateBlockConfig(block.id, { ...block.config, form_data: newFormData });
                   }}
-                  className="text-xs text-ink hover:text-ink flex items-center gap-1"
+                  className="text-xs text-ink flex items-center gap-1"
                 >
                   <PlusIcon className="h-3 w-3" /> {t('Add Form Field')}
                 </button>
@@ -2022,12 +2028,12 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
               <Checkbox
                 checked={block.config.secured || false}
                 onChange={e => updateBlockConfig(block.id, { ...block.config, secured: e.target.checked })}
-                label={<span className="text-xs text-ink">🔒 {t('Secured Mode')}</span>}
+                label={<span className="flex items-center gap-1.5 text-xs text-ink"><LockClosedIcon className="h-3.5 w-3.5 text-tertiary" aria-hidden="true" />{t('Secured Mode')}</span>}
               />
               <Checkbox
                 checked={block.config.use_vision !== false}
                 onChange={e => updateBlockConfig(block.id, { ...block.config, use_vision: e.target.checked })}
-                label={<span className="text-xs text-ink">👁️ {t('Use Vision')}</span>}
+                label={<span className="flex items-center gap-1.5 text-xs text-ink"><EyeIcon className="h-3.5 w-3.5 text-tertiary" aria-hidden="true" />{t('Use Vision')}</span>}
               />
             </div>
 
@@ -2049,7 +2055,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
               size="sm"
               className="w-full"
               placeholder={t('Select workflow...')}
-              options={workflows.map(w => ({ value: Number(w.id), label: w.is_installed ? `🔒 ${w.name}` : w.name }))}
+              options={workflows.map(w => ({ value: Number(w.id), label: w.name, icon: w.is_installed ? <LockClosedIcon className="h-3.5 w-3.5 text-tertiary" aria-hidden="true" /> : undefined }))}
             />
 
             {/* Block-specific placeholder hints */}
@@ -2129,11 +2135,11 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
         {/* The Block */}
         <div className={clsx(
           'relative p-4 rounded-xl border transition-all',
-          color === 'blue' && 'bg-zinc-100 border-zinc-300',
-          color === 'yellow' && 'bg-zinc-100 border-border',
-          color === 'purple' && 'bg-zinc-100 border-zinc-300',
-          color === 'green' && 'bg-zinc-100 border-zinc-300',
-          color === 'gray' && 'bg-zinc-100 border-zinc-300',
+          color === 'blue' && 'bg-hover border-border',
+          color === 'yellow' && 'bg-hover border-border',
+          color === 'purple' && 'bg-hover border-border',
+          color === 'green' && 'bg-hover border-border',
+          color === 'gray' && 'bg-hover border-border',
         )}>
           {/* Block Header */}
           <div className="flex items-center justify-between mb-3">
@@ -2141,19 +2147,19 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
               <div className={clsx(
                 'w-7 h-7 rounded-lg flex items-center justify-center',
                 color === 'blue' && 'bg-ink',
-                color === 'yellow' && 'bg-zinc-100',
+                color === 'yellow' && 'bg-hover',
                 color === 'purple' && 'bg-ink',
-                color === 'green' && 'bg-zinc-100',
-                color === 'gray' && 'bg-zinc-200',
+                color === 'green' && 'bg-hover',
+                color === 'gray' && 'bg-active',
               )}>
                 <Icon className="h-4 w-4 text-ink" />
               </div>
               <span className="text-sm font-medium text-ink">{label}</span>
               <span className={clsx(
                 'text-xs px-2 py-0.5 rounded-full',
-                block.type === 'event' && 'bg-zinc-100 text-ink',
-                block.type === 'condition' && 'bg-zinc-100 text-secondary',
-                block.type === 'action' && 'bg-zinc-200 text-ink',
+                block.type === 'event' && 'bg-hover text-ink',
+                block.type === 'condition' && 'bg-hover text-secondary',
+                block.type === 'action' && 'bg-active text-ink',
               )}>
                 {block.type}
               </span>
@@ -2178,11 +2184,11 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
           {/* Vertical connector line */}
           <div className={clsx(
             'absolute left-1/2 top-0 bottom-0 w-0.5 -translate-x-1/2',
-            color === 'blue' && 'bg-zinc-100',
-            color === 'yellow' && 'bg-zinc-100',
-            color === 'purple' && 'bg-zinc-100',
-            color === 'green' && 'bg-zinc-100',
-            color === 'gray' && 'bg-zinc-200',
+            color === 'blue' && 'bg-hover',
+            color === 'yellow' && 'bg-hover',
+            color === 'purple' && 'bg-hover',
+            color === 'green' && 'bg-hover',
+            color === 'gray' && 'bg-active',
           )} />
 
           <Disclosure>
@@ -2190,8 +2196,8 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
               <div className="relative z-10">
                 <Disclosure.Button className={clsx(
                   'w-8 h-8 rounded-full flex items-center justify-center transition-all',
-                  'bg-hover hover:bg-zinc-200 text-ink hover:text-ink',
-                  open && 'bg-zinc-200 ring-2 ring-zinc-500'
+                  'bg-hover hover:bg-active text-ink',
+                  open && 'bg-active ring-2 ring-zinc-500'
                 )}>
                   <PlusIcon className="h-5 w-5" />
                 </Disclosure.Button>
@@ -2238,9 +2244,9 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                     <div className={clsx(
                       'w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold',
                       branchIdx === 0 && 'bg-ink text-ink',
-                      branchIdx === 1 && 'bg-zinc-100 text-ink',
+                      branchIdx === 1 && 'bg-hover text-ink',
                       branchIdx === 2 && 'bg-ink text-ink',
-                      branchIdx >= 3 && 'bg-zinc-100 text-ink',
+                      branchIdx >= 3 && 'bg-hover text-ink',
                     )}>
                       {branchIdx + 1}
                     </div>
@@ -2249,10 +2255,10 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                   {/* Branch content */}
                   <div className={clsx(
                     'p-2 rounded-lg border-l-2',
-                    branchIdx === 0 && 'border-zinc-300 bg-zinc-100',
-                    branchIdx === 1 && 'border-zinc-300 bg-zinc-100',
-                    branchIdx === 2 && 'border-zinc-300 bg-zinc-100',
-                    branchIdx >= 3 && 'border-border bg-zinc-100',
+                    branchIdx === 0 && 'border-border bg-hover',
+                    branchIdx === 1 && 'border-border bg-hover',
+                    branchIdx === 2 && 'border-border bg-hover',
+                    branchIdx >= 3 && 'border-border bg-hover',
                   )}>
                     {renderBlockNode(child, depth + 1)}
                   </div>
@@ -2283,7 +2289,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
       <>
         {/* Recommended section */}
         {recommendedBlocks.length > 0 && (
-          <div className="p-2 bg-zinc-100 border-b border-border">
+          <div className="p-2 bg-hover border-b border-border">
             <div className="text-xs text-ink px-2 py-1 font-medium flex items-center gap-1">
               <SparklesIcon className="h-3 w-3" /> {t('Recommended Next')}
             </div>
@@ -2302,8 +2308,8 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                   <div className={clsx(
                     'w-8 h-8 rounded-lg flex items-center justify-center',
                     availableBlock.color === 'purple' && 'bg-ink',
-                    availableBlock.color === 'green' && 'bg-zinc-100',
-                    availableBlock.color === 'gray' && 'bg-zinc-200',
+                    availableBlock.color === 'green' && 'bg-hover',
+                    availableBlock.color === 'gray' && 'bg-active',
                   )}>
                     <AvailIcon className="h-4 w-4 text-ink" />
                   </div>
@@ -2464,7 +2470,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
 
                 {/* Content Change placeholders */}
                 {flowBlocks.some(b => b.blockType === 'change_detected') && (
-                  <div className="p-3 bg-zinc-100 rounded-lg border border-zinc-300">
+                  <div className="p-3 bg-hover rounded-lg border border-border">
                     <p className="text-ink font-medium mb-2 flex items-center gap-1">
                       <BoltIcon className="h-3.5 w-3.5" /> {t('Content Change Event')}
                     </p>
@@ -2472,27 +2478,27 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                       <div>
                         <p className="text-tertiary text-[10px] uppercase mb-1">{t('Extracted Data')}</p>
                         <div className="flex flex-wrap gap-1">
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{extracted.price}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{extracted.status}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{extracted.title}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{extracted.*}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{extracted.price}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{extracted.status}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{extracted.title}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{extracted.*}}'}</code>
                         </div>
                       </div>
                       <div>
                         <p className="text-tertiary text-[10px] uppercase mb-1">{t('Change Details')}</p>
                         <div className="flex flex-wrap gap-1">
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{content}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{diff_snippet}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{selector_name}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{selector_id}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{content}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{diff_snippet}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{selector_name}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{selector_id}}'}</code>
                         </div>
                       </div>
                       <div>
                         <p className="text-tertiary text-[10px] uppercase mb-1">{t('When Change Was Detected')}</p>
                         <div className="flex flex-wrap gap-1">
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('ISO timestamp of when change was detected')}>{'{{change_detected_at}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('Date only (YYYY-MM-DD)')}>{'{{change_detected_date}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('Time only (HH:MM:SS)')}>{'{{change_detected_time}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('ISO timestamp of when change was detected')}>{'{{change_detected_at}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('Date only (YYYY-MM-DD)')}>{'{{change_detected_date}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('Time only (HH:MM:SS)')}>{'{{change_detected_time}}'}</code>
                         </div>
                       </div>
                     </div>
@@ -2501,22 +2507,22 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
 
                 {/* Notification placeholders */}
                 {flowBlocks.some(b => b.blockType === 'notification') && (
-                  <div className="p-3 bg-zinc-100 rounded-lg border border-border">
+                  <div className="p-3 bg-hover rounded-lg border border-border">
                     <p className="text-secondary font-medium mb-2 flex items-center gap-1">
                       <BellIcon className="h-3.5 w-3.5" /> {t('Notification Results')}
                     </p>
                     <div className="flex flex-wrap gap-1">
-                      <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{notification_status}}'}</code>
-                      <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{notification_sent}}'}</code>
-                      <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{notification_failed}}'}</code>
-                      <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{notification_message}}'}</code>
+                      <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{notification_status}}'}</code>
+                      <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{notification_sent}}'}</code>
+                      <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{notification_failed}}'}</code>
+                      <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{notification_message}}'}</code>
                     </div>
                   </div>
                 )}
 
                 {/* AI Session placeholders */}
                 {flowBlocks.some(b => b.blockType === 'ai_session' || b.blockType === 'ai_session_completed' || b.blockType === 'ai_session_started') && (
-                  <div className="p-3 bg-zinc-100 rounded-lg border border-zinc-300">
+                  <div className="p-3 bg-hover rounded-lg border border-border">
                     <p className="text-ink font-medium mb-2 flex items-center gap-1">
                       <CpuChipIcon className="h-3.5 w-3.5" /> {t('AI Session')}
                     </p>
@@ -2524,47 +2530,47 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                       <div>
                         <p className="text-tertiary text-[10px] uppercase mb-1">{t('Session Info')}</p>
                         <div className="flex flex-wrap gap-1">
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{session_id}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{session_name}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{ai_session_id}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{ai_session_name}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{task_id}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{session_id}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{session_name}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{ai_session_id}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{ai_session_name}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{task_id}}'}</code>
                         </div>
                       </div>
                       <div>
                         <p className="text-tertiary text-[10px] uppercase mb-1">{t('Status (after completion)')}</p>
                         <div className="flex flex-wrap gap-1">
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{session_status}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{success}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{status}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('Error message if failed')}>{'{{error}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('Error message if failed')}>{'{{session_error}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{session_status}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{success}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{status}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('Error message if failed')}>{'{{error}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('Error message if failed')}>{'{{session_error}}'}</code>
                         </div>
                       </div>
                       <div>
                         <p className="text-tertiary text-[10px] uppercase mb-1">{t('Execution Metrics')}</p>
                         <div className="flex flex-wrap gap-1">
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('Number of steps the AI took')}>{'{{session_steps_taken}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('Number of steps')}>{'{{steps_taken}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('Duration in milliseconds')}>{'{{duration_ms}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('Duration in milliseconds')}>{'{{session_duration_ms}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('How long the session ran')}>{'{{session_duration_seconds}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('Number of steps the AI took')}>{'{{session_steps_taken}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('Number of steps')}>{'{{steps_taken}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('Duration in milliseconds')}>{'{{duration_ms}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('Duration in milliseconds')}>{'{{session_duration_ms}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('How long the session ran')}>{'{{session_duration_seconds}}'}</code>
                         </div>
                       </div>
                       <div>
                         <p className="text-tertiary text-[10px] uppercase mb-1">{t('Results & Extracted Data')}</p>
                         <div className="flex flex-wrap gap-1">
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{final_url}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{ai_result.final_url}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{ai_result.extracted_data}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{extracted_*}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{final_url}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{ai_result.final_url}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{ai_result.extracted_data}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{extracted_*}}'}</code>
                         </div>
                       </div>
                       <div>
                         <p className="text-tertiary text-[10px] uppercase mb-1">{t('Timestamps')}</p>
                         <div className="flex flex-wrap gap-1">
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('ISO timestamp when AI session started')}>{'{{session_started_at}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('ISO timestamp when AI session completed')}>{'{{session_completed_at}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('ISO timestamp when AI session started')}>{'{{session_started_at}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('ISO timestamp when AI session completed')}>{'{{session_completed_at}}'}</code>
                         </div>
                       </div>
                     </div>
@@ -2573,7 +2579,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
 
                 {/* Workflow placeholders */}
                 {flowBlocks.some(b => b.blockType === 'workflow' || b.blockType === 'workflow_completed' || b.blockType === 'workflow_started') && (
-                  <div className="p-3 bg-zinc-100 rounded-lg border border-zinc-300">
+                  <div className="p-3 bg-hover rounded-lg border border-border">
                     <p className="text-ink font-medium mb-2 flex items-center gap-1">
                       <Cog6ToothIcon className="h-3.5 w-3.5" /> {t('Workflow')}
                     </p>
@@ -2581,42 +2587,42 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                       <div>
                         <p className="text-tertiary text-[10px] uppercase mb-1">{t('Workflow Info')}</p>
                         <div className="flex flex-wrap gap-1">
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{workflow_id}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{workflow_name}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{workflow_task_id}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{task_id}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{workflow_id}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{workflow_name}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{workflow_task_id}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{task_id}}'}</code>
                         </div>
                       </div>
                       <div>
                         <p className="text-tertiary text-[10px] uppercase mb-1">{t('Status (after completion)')}</p>
                         <div className="flex flex-wrap gap-1">
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{workflow_status}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{success}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{status}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('Error message if failed')}>{'{{error}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('Error message if failed')}>{'{{workflow_error}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{workflow_status}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{success}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{status}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('Error message if failed')}>{'{{error}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('Error message if failed')}>{'{{workflow_error}}'}</code>
                         </div>
                       </div>
                       <div>
                         <p className="text-tertiary text-[10px] uppercase mb-1">{t('Execution Metrics')}</p>
                         <div className="flex flex-wrap gap-1">
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('Number of workflow steps completed')}>{'{{workflow_steps_completed}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('Number of steps')}>{'{{steps_completed}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('Duration in milliseconds')}>{'{{duration_ms}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('Duration in seconds')}>{'{{duration_seconds}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('Number of workflow steps completed')}>{'{{workflow_steps_completed}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('Number of steps')}>{'{{steps_completed}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('Duration in milliseconds')}>{'{{duration_ms}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('Duration in seconds')}>{'{{duration_seconds}}'}</code>
                         </div>
                       </div>
                       <div>
                         <p className="text-tertiary text-[10px] uppercase mb-1">{t('Results')}</p>
                         <div className="flex flex-wrap gap-1">
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded">{'{{result.*}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded">{'{{result.*}}'}</code>
                         </div>
                       </div>
                       <div>
                         <p className="text-tertiary text-[10px] uppercase mb-1">{t('Timestamps')}</p>
                         <div className="flex flex-wrap gap-1">
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('ISO timestamp when workflow started')}>{'{{workflow_started_at}}'}</code>
-                          <code className="bg-zinc-100 text-ink px-1.5 py-0.5 rounded" title={t('ISO timestamp when workflow completed')}>{'{{workflow_completed_at}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('ISO timestamp when workflow started')}>{'{{workflow_started_at}}'}</code>
+                          <code className="bg-hover text-ink px-1.5 py-0.5 rounded" title={t('ISO timestamp when workflow completed')}>{'{{workflow_completed_at}}'}</code>
                         </div>
                       </div>
                     </div>
@@ -2626,7 +2632,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
 
               {/* Branch-scoped placeholders - show when there could be parallel branches */}
               {flowBlocks.filter(b => b.type === 'action').length > 1 && (
-                <div className="mt-4 p-3 bg-zinc-100 rounded-lg border border-border">
+                <div className="mt-4 p-3 bg-hover rounded-lg border border-border">
                   <p className="text-secondary font-medium mb-2 flex items-center gap-1">
                     <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
@@ -2640,35 +2646,35 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                     <div>
                       <p className="text-tertiary text-[10px] uppercase mb-1">{t('Within Your Branch (no prefix needed)')}</p>
                       <div className="flex flex-wrap gap-1">
-                        <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{session_name}}'}</code>
-                        <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{session_status}}'}</code>
-                        <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{success}}'}</code>
+                        <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{session_name}}'}</code>
+                        <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{session_status}}'}</code>
+                        <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{success}}'}</code>
                       </div>
                     </div>
                     <div>
                       <p className="text-tertiary text-[10px] uppercase mb-1">{t('Access Other Branches')}</p>
                       <div className="flex flex-wrap gap-1">
-                        <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{branch1.session_name}}'}</code>
-                        <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{branch2.session_status}}'}</code>
-                        <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{branch1.success}}'}</code>
+                        <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{branch1.session_name}}'}</code>
+                        <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{branch2.session_status}}'}</code>
+                        <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{branch1.success}}'}</code>
                       </div>
                     </div>
                     <div>
                       <p className="text-tertiary text-[10px] uppercase mb-1">{t('Available in Each Branch')}</p>
                       <div className="flex flex-wrap gap-1">
-                        <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{task_id}}'}</code>
-                        <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{ai_session_id}}'}</code>
-                        <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{notification_sent}}'}</code>
-                        <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{workflow_id}}'}</code>
-                        <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{duration_ms}}'}</code>
-                        <code className="bg-zinc-100 text-secondary px-1.5 py-0.5 rounded">{'{{error}}'}</code>
+                        <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{task_id}}'}</code>
+                        <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{ai_session_id}}'}</code>
+                        <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{notification_sent}}'}</code>
+                        <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{workflow_id}}'}</code>
+                        <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{duration_ms}}'}</code>
+                        <code className="bg-hover text-secondary px-1.5 py-0.5 rounded">{'{{error}}'}</code>
                       </div>
                     </div>
                   </div>
                 </div>
               )}
 
-              <div className="mt-4 p-3 bg-zinc-100 rounded-lg border border-border">
+              <div className="mt-4 p-3 bg-hover rounded-lg border border-border">
                 <p className="text-ink font-medium mb-1">{t('Chain Data Flow')}</p>
                 <p className="text-tertiary">
                   {t('Data from ALL previous blocks flows through the entire chain. After an AI session completes, you can still use')} <code className="text-ink">{'{{extracted.price}}'}</code> {t('from the original change detection alongside')} <code className="text-ink">{'{{session_status}}'}</code> {t('from the AI result.')}
@@ -2702,7 +2708,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
           type="button"
           onClick={handleSave}
           disabled={saving || !formData.name.trim() || flowBlocks.filter(b => b.type === 'action').length === 0}
-          className="px-6 py-2 bg-ink hover:bg-ink disabled:bg-hover disabled:text-tertiary text-ink rounded-lg font-medium flex items-center gap-2"
+          className="px-6 py-2 bg-ink hover:bg-ink/90 disabled:bg-hover disabled:text-tertiary text-ink rounded-lg font-medium flex items-center gap-2"
         >
           {saving && <ArrowPathIcon className="h-4 w-4 animate-spin" />}
           {editingTrigger ? t('Update Trigger') : t('Create Trigger')}
@@ -2715,12 +2721,12 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
   const getEventTypeInfo = (eventType: string) => {
     const info = EVENT_TYPES.find(e => e.value === eventType);
     const colors: Record<string, string> = {
-      'change_detected': 'bg-zinc-100 text-ink border-zinc-300',
-      'webhook_received': 'bg-zinc-100 text-secondary border-border',
-      'ai_session_started': 'bg-zinc-100 text-ink border-zinc-300',
-      'ai_session_completed': 'bg-zinc-100 text-ink border-zinc-300',
-      'workflow_started': 'bg-zinc-100 text-ink border-zinc-300',
-      'workflow_completed': 'bg-zinc-100 text-ink border-zinc-300',
+      'change_detected': 'bg-hover text-ink border-border',
+      'webhook_received': 'bg-hover text-secondary border-border',
+      'ai_session_started': 'bg-hover text-ink border-border',
+      'ai_session_completed': 'bg-hover text-ink border-border',
+      'workflow_started': 'bg-hover text-ink border-border',
+      'workflow_completed': 'bg-hover text-ink border-border',
     };
     return { label: info?.label || eventType, color: colors[eventType] || 'bg-hover text-ink' };
   };
@@ -2760,9 +2766,9 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                     key={i}
                     className={clsx(
                       'flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium',
-                      action.type === 'notification' && 'bg-zinc-100 text-ink',
-                      action.type === 'ai_session' && 'bg-zinc-100 text-ink',
-                      action.type === 'workflow' && 'bg-zinc-100 text-ink'
+                      action.type === 'notification' && 'bg-hover text-ink',
+                      action.type === 'ai_session' && 'bg-hover text-ink',
+                      action.type === 'workflow' && 'bg-hover text-ink'
                     )}
                   >
                     <Icon className="h-3 w-3" />
@@ -2798,13 +2804,13 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                 : webhookTriggersApi.getWebhookUrl(trigger.webhook_trigger_token);
 
               return (
-                <div className="mt-3 p-2 bg-zinc-100 border border-border rounded-lg space-y-1.5">
+                <div className="mt-3 p-2 bg-hover border border-border rounded-lg space-y-1.5">
                   {/* Primary URL */}
                   <div className="flex items-center gap-2">
                     <LinkIcon className="h-4 w-4 text-secondary flex-shrink-0" />
                     <code className="text-xs text-secondary truncate flex-1">{primaryUrl}</code>
                     <button onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(primaryUrl); toast.success(t('Copied')); }}
-                      className="p-1 hover:bg-zinc-100 rounded transition-colors flex-shrink-0" title={t('Copy URL')}>
+                      className="p-1 hover:bg-hover rounded transition-colors flex-shrink-0" title={t('Copy URL')}>
                       <ClipboardIcon className="h-4 w-4 text-secondary" />
                     </button>
                   </div>
@@ -2943,7 +2949,7 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                 <div className="px-6 py-4 border-b border-border bg-surface/80 backdrop-blur sticky top-0 z-10">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
-                      <div className="p-2 bg-zinc-100 rounded-xl">
+                      <div className="p-2 bg-hover rounded-xl">
                         <BoltIcon className="h-6 w-6 text-secondary" />
                       </div>
                       <div>
@@ -2972,14 +2978,14 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                     <div className="space-y-6">
                       {triggers.length === 0 ? (
                         <div className="text-center py-16">
-                          <BoltIcon className="h-16 w-16 text-zinc-700 mx-auto mb-4" />
+                          <BoltIcon className="h-16 w-16 text-ink mx-auto mb-4" />
                           <h3 className="text-lg font-medium text-ink">{t('No triggers configured')}</h3>
                           <p className="text-tertiary mt-2 max-w-sm mx-auto">
                             {t('Create triggers to automate notifications, AI sessions, and workflows when events occur.')}
                           </p>
                           <button
                             onClick={() => { setIsCreating(true); resetForm(); }}
-                            className="mt-6 px-6 py-3 bg-ink hover:bg-ink text-ink rounded-xl font-medium inline-flex items-center gap-2"
+                            className="mt-6 px-6 py-3 bg-ink hover:bg-ink/90 text-ink rounded-xl font-medium inline-flex items-center gap-2"
                           >
                             <PlusIcon className="h-5 w-5" />
                             {t('Create First Trigger')}
@@ -3019,9 +3025,9 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
                                               key={ai}
                                               className={clsx(
                                                 'text-xs px-2 py-1 rounded',
-                                                a.type === 'notification' && 'bg-zinc-100 text-ink',
-                                                a.type === 'ai_session' && 'bg-zinc-100 text-ink',
-                                                a.type === 'workflow' && 'bg-zinc-100 text-ink'
+                                                a.type === 'notification' && 'bg-hover text-ink',
+                                                a.type === 'ai_session' && 'bg-hover text-ink',
+                                                a.type === 'workflow' && 'bg-hover text-ink'
                                               )}
                                             >
                                               {actionType?.label && t(actionType.label)}
@@ -3037,15 +3043,16 @@ export const UnifiedTriggersModal: React.FC<UnifiedTriggersModalProps> = ({
 
                             {/* Helpful hints */}
                             <div className="mt-4 pt-3 border-t border-border/50">
-                              <p className="text-xs text-tertiary">
-                                💡 <strong>{t('Tip:')}</strong> {t('Chain triggers to create automation workflows. For example:')}
+                              <p className="flex items-start gap-1.5 text-xs text-tertiary">
+                                <LightBulbIcon className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                                <span><strong>{t('Tip:')}</strong> {t('Chain triggers to create automation workflows. For example:')}</span>
                               </p>
                               <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                                <span className="bg-zinc-100 text-ink px-2 py-1 rounded">{t('Content Change')}</span>
+                                <span className="bg-hover text-ink px-2 py-1 rounded">{t('Content Change')}</span>
                                 <span className="text-tertiary">→</span>
-                                <span className="bg-zinc-100 text-ink px-2 py-1 rounded">{t('AI Session')}</span>
+                                <span className="bg-hover text-ink px-2 py-1 rounded">{t('AI Session')}</span>
                                 <span className="text-tertiary">→</span>
-                                <span className="bg-zinc-100 text-ink px-2 py-1 rounded">{t('Notification')}</span>
+                                <span className="bg-hover text-ink px-2 py-1 rounded">{t('Notification')}</span>
                               </div>
                             </div>
                           </div>
@@ -3185,7 +3192,7 @@ const UnifiedTriggersModalInner: React.FC<{
     <div className="p-6">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-3">
-          <div className="p-2 bg-zinc-100 rounded-xl">
+          <div className="p-2 bg-hover rounded-xl">
             <BoltIcon className="h-5 w-5 text-secondary" />
           </div>
           <div>
@@ -3197,7 +3204,7 @@ const UnifiedTriggersModalInner: React.FC<{
         </div>
         <button
           onClick={() => setShowModal(true)}
-          className="px-4 py-2 bg-ink hover:bg-ink text-ink rounded-lg text-sm font-medium inline-flex items-center gap-2 transition-colors"
+          className="px-4 py-2 bg-ink hover:bg-ink/90 text-ink rounded-lg text-sm font-medium inline-flex items-center gap-2 transition-colors"
         >
           <PlusIcon className="h-4 w-4" />
           {triggerCount > 0 ? t('Manage Triggers') : t('Add Trigger')}
@@ -3206,7 +3213,7 @@ const UnifiedTriggersModalInner: React.FC<{
 
       {triggerCount === 0 && (
         <div className="text-center py-8 text-tertiary text-sm">
-          <BoltIcon className="h-10 w-10 mx-auto mb-3 text-zinc-700" />
+          <BoltIcon className="h-10 w-10 mx-auto mb-3 text-ink" />
           <p>{t('Create triggers to automate actions when events occur.')}</p>
           <p className="text-xs mt-1 text-tertiary">{t('Notifications, AI sessions, workflow chains, and more.')}</p>
         </div>

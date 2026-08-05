@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useRequireAuth } from '../hooks/useAuth';
 import { useQuery } from '../hooks/useQuery';
 import { Modal } from '../components/ui/Modal';
-import { Select, ScrollArea } from '../components/ui';
+import { Select, ScrollArea, Button, EmptyHero } from '../components/ui';
 import { vaultApi } from '../api/endpoints';
 import { seedTint, tintStyle } from '../utils/tint';
 import {
@@ -158,11 +158,12 @@ const SecretDetailPane: React.FC<{ s: any | null; onEdit: (s: any) => void; onDe
   const { t } = useTranslation();
   if (!s) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center text-center px-6">
-        <div className="w-12 h-12 rounded-2xl bg-hover border border-border flex items-center justify-center mb-4"><LockClosedIcon className="h-6 w-6 text-tertiary" /></div>
-        <p className="text-sm font-medium text-ink">{t('Select a secret')}</p>
-        <p className="text-xs text-secondary mt-1 max-w-xs">{t('Pick one on the left to copy its reference for use in a workflow.')}</p>
-      </div>
+      <EmptyHero
+        icon={LockClosedIcon}
+        title={t('Select a secret')}
+        description={t('Pick one on the left to copy its reference for use in a workflow.')}
+        className="flex-1"
+      />
     );
   }
   const Icon = s.is_credential ? UserCircleIcon : LockClosedIcon;
@@ -341,12 +342,14 @@ export const SecretsPage: React.FC = () => {
             <ShelfSkeleton label={t('Loading secrets')} />
           ) : all.length === 0 ? (
             <div className="flex flex-1 flex-col bg-surface">
-              <div className="flex flex-1 flex-col items-center justify-center text-center px-6">
-                <div className="w-12 h-12 rounded-2xl bg-hover border border-border flex items-center justify-center mb-4"><LockClosedIcon className="h-6 w-6 text-tertiary" /></div>
-                <p className="text-sm font-medium text-ink">{t('No secrets yet')}</p>
-                <p className="text-xs text-secondary mt-1 max-w-sm">{t('Create a secret to securely store credentials your workflows reference with {{vault:name}}.')}</p>
-                <button onClick={() => setShowCreate(true)} className="mt-4 px-4 py-2 bg-accent-strong text-accent-on text-sm font-semibold rounded-lg shadow-sm hover:bg-accent-strong/90 transition-colors">{t('Create your first secret')}</button>
-              </div>
+              <EmptyHero
+                icon={LockClosedIcon}
+                title={t('No secrets yet')}
+                description={t('Create a secret to securely store credentials your workflows reference with {{vault:name}}.')}
+                className="flex-1"
+              >
+                <Button onClick={() => setShowCreate(true)} size="sm">{t('Create your first secret')}</Button>
+              </EmptyHero>
             </div>
           ) : (
             <div className={SHELF_CONTAINER}>

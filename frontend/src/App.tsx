@@ -58,7 +58,7 @@ const NotificationsPage = lazyNamed(() => import('./components/notifications/Not
 
 const RouteFallback: React.FC = () => (
   <div className="fallback-in flex h-full min-h-[40vh] w-full items-center justify-center">
-    <div className="h-6 w-6 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-800" />
+    <div className="h-6 w-6 animate-spin rounded-full border-2 border-border border-t-zinc-800" />
   </div>
 );
 

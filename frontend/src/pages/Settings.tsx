@@ -7,6 +7,7 @@ import {
   SparklesIcon,
   BellIcon,
   CircleStackIcon,
+  ArrowsRightLeftIcon,
   GlobeAltIcon,
   ShieldCheckIcon,
   Cog6ToothIcon,
@@ -24,6 +25,7 @@ import { NetworkSection } from '../components/settings/NetworkSection';
 import { SecuritySection } from '../components/settings/SecuritySection';
 import { GeneralSection } from '../components/settings/GeneralSection';
 
+import { TransferSettingsSection } from '../components/transfer/TransferSettingsSection';
 // ─────────────────────────────────────────────────────────────────────────────
 // Settings (self-host coordinator) — the desktop-modeled section surface,
 // adapted to the single-owner build. Every tab here EDITS something in place,
@@ -42,6 +44,7 @@ type TabId =
   | 'runtime'
   | 'notifications'
   | 'data'
+  | 'transfer'
   | 'network'
   | 'security'
   | 'general';
@@ -52,6 +55,7 @@ const TABS: { id: TabId; label: string; icon: typeof UserCircleIcon }[] = [
   { id: 'runtime', label: 'Runtime', icon: AdjustmentsHorizontalIcon },
   { id: 'notifications', label: 'Notifications', icon: BellIcon },
   { id: 'data', label: 'Data & Retention', icon: CircleStackIcon },
+  { id: 'transfer', label: 'Import & export', icon: ArrowsRightLeftIcon },
   { id: 'network', label: 'Network', icon: GlobeAltIcon },
   { id: 'security', label: 'Security', icon: ShieldCheckIcon },
   { id: 'general', label: 'General', icon: Cog6ToothIcon },
@@ -91,7 +95,7 @@ export const Settings: React.FC = () => {
                   // (index.css) also eases box-shadow, so the active pill
                   // settles instead of snapping.
                   'flex items-center gap-1.5 px-2.5 py-1 text-[12px] font-medium rounded-md whitespace-nowrap',
-                  active ? 'bg-zinc-100 text-ink' : 'text-secondary hover:text-ink',
+                  active ? 'bg-hover text-ink' : 'text-secondary hover:text-ink',
                 )}
               >
                 <tab.icon className="w-3.5 h-3.5" />
@@ -111,6 +115,8 @@ export const Settings: React.FC = () => {
           {activeTab === 'runtime' && <RuntimeSection />}
           {activeTab === 'notifications' && <NotificationsSection />}
           {activeTab === 'data' && <DataRetentionSection />}
+
+          {activeTab === 'transfer' && <TransferSettingsSection />}
           {activeTab === 'network' && <NetworkSection />}
           {activeTab === 'security' && <SecuritySection />}
           {activeTab === 'general' && <GeneralSection />}

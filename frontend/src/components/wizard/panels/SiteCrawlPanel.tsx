@@ -229,7 +229,14 @@ export const SiteCrawlPanel: React.FC<{ onSubmit?: () => void }> = ({ onSubmit }
     setMapBusy(true);
     setMapError(null);
     try {
-      const res = await crawlApi.map({ url, search: c.crawlIntent.trim() || undefined, limit: 200 });
+      const res = await crawlApi.map({
+        url,
+        search: c.crawlIntent.trim() || undefined,
+        limit: 200,
+        // Map as the chosen login identity: the picker must offer the pages the
+        // crawl will actually reach, not a logged-out visitor's view.
+        persona_id: c.crawlPersonaId ?? undefined,
+      });
       setMapUrls(res.urls);
     } catch (e: any) {
       setMapError(e?.response?.data?.detail || t('Could not map the site.'));

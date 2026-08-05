@@ -27,7 +27,7 @@ export function StepTypePalette({ onSelect, onCancel, embedded = false }: { onSe
   // the palette is hosted inside a roomy modal that already provides those — the modal
   // frames it and scrolls, so the grid gets full width instead of being squeezed.
   return (
-    <div className={clsx(!embedded && 'my-2 bg-white border border-zinc-300 rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.06)] overflow-hidden')}>
+    <div className={clsx(!embedded && 'my-2 bg-surface border border-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.06)] overflow-hidden')}>
       <div className={clsx('flex items-center gap-2 px-3 py-2', embedded ? 'border border-border rounded-lg bg-canvas' : 'border-b border-border')}>
         <MagnifyingGlassIcon className="w-3.5 h-3.5 text-tertiary shrink-0" />
         <input
@@ -55,7 +55,7 @@ export function StepTypePalette({ onSelect, onCancel, embedded = false }: { onSe
                   <button
                     key={st.type}
                     onClick={() => onSelect(st.type)}
-                    className="flex items-center gap-2 px-2.5 py-2 border border-zinc-200/80 rounded-lg text-left hover:border-ink/30 hover:bg-hover transition-colors"
+                    className="flex items-center gap-2 px-2.5 py-2 border border-border/80 rounded-lg text-left hover:border-ink/30 hover:bg-hover transition-colors"
                   >
                     <span className={clsx('w-5 h-5 rounded-md flex items-center justify-center shrink-0', GROUP_NODE_STYLE[st.group])}>
                       <st.Icon className="w-2.5 h-2.5" />

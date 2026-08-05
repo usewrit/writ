@@ -23,6 +23,7 @@ import {
   ClockIcon,
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
+import { Button, EmptyHero } from '../../components/ui';
 
 const hostOf = (url?: string): string | undefined => {
   if (!url) return undefined;
@@ -177,7 +178,7 @@ export const StreamingListPage: React.FC = () => {
         </div>
         <button
           onClick={(e) => { e.stopPropagation(); navigate(`/streaming/${session.session_key}`); }}
-          className="px-2.5 py-1 text-[11px] font-medium text-secondary border border-zinc-200 rounded-lg hover:bg-chrome hover:text-ink transition-colors shrink-0"
+          className="px-2.5 py-1 text-[11px] font-medium text-secondary border border-border rounded-lg hover:bg-chrome hover:text-ink transition-colors shrink-0"
         >
           {t('Open')}
         </button>
@@ -219,7 +220,7 @@ export const StreamingListPage: React.FC = () => {
                   onClick={() => setFilter(s)}
                   className={clsx(
                     'px-2.5 py-1 text-[12px] font-medium rounded-md transition-colors capitalize',
-                    filter === s ? 'bg-zinc-100 text-ink' : 'text-tertiary hover:text-secondary',
+                    filter === s ? 'bg-hover text-ink' : 'text-tertiary hover:text-secondary',
                   )}
                 >
                   {s || t('All')}
@@ -257,36 +258,26 @@ export const StreamingListPage: React.FC = () => {
 
             {/* Error state */}
             {loadFailed && (
-              <div className="flex flex-col items-center justify-center min-h-[50vh] text-center">
-                <div className="w-12 h-12 rounded-2xl bg-zinc-100 border border-zinc-200 flex items-center justify-center mb-4">
-                  <ExclamationTriangleIcon className="h-6 w-6 text-zinc-400" />
-                </div>
-                <p className="text-sm font-medium text-ink">{t("Couldn't load streaming sessions")}</p>
-                <p className="text-xs text-secondary mt-1">{sessionsError || workflowsError}</p>
-                <button
-                  onClick={() => refreshSessions()}
-                  className="mt-4 px-4 py-2 bg-accent-strong text-accent-on text-sm font-semibold shadow-sm rounded-lg hover:bg-accent-strong/90 transition-colors"
-                >
-                  {t('Retry')}
-                </button>
-              </div>
+              <EmptyHero
+                icon={ExclamationTriangleIcon}
+                title={t("Couldn't load streaming sessions")}
+                description={sessionsError || workflowsError}
+                className="min-h-[50vh]"
+              >
+                <Button onClick={() => refreshSessions()} size="sm">{t('Retry')}</Button>
+              </EmptyHero>
             )}
 
             {/* Empty state */}
             {!hasContent && !initialLoading && !loadFailed && (
-              <div className="flex flex-col items-center justify-center min-h-[50vh] text-center">
-                <div className="w-12 h-12 rounded-2xl bg-zinc-100 border border-zinc-200 flex items-center justify-center mb-4">
-                  <SignalIcon className="h-6 w-6 text-zinc-400" />
-                </div>
-                <p className="text-sm font-medium text-ink">{t('No streaming workflows yet')}</p>
-                <p className="text-xs text-secondary mt-1">{t('Create a streaming workflow to keep a browser session alive with callable handlers')}</p>
-                <button
-                  onClick={() => navigate('/workflows/new')}
-                  className="mt-4 px-4 py-2 bg-accent-strong text-accent-on text-sm font-semibold shadow-sm rounded-lg hover:bg-accent-strong/90 transition-colors"
-                >
-                  {t('New Streaming Workflow')}
-                </button>
-              </div>
+              <EmptyHero
+                icon={SignalIcon}
+                title={t('No streaming workflows yet')}
+                description={t('Create a streaming workflow to keep a browser session alive with callable handlers')}
+                className="min-h-[50vh]"
+              >
+                <Button onClick={() => navigate('/workflows/new')} size="sm">{t('New Streaming Workflow')}</Button>
+              </EmptyHero>
             )}
 
             {/* Live usage — see what's running and how it draws on your plan */}

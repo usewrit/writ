@@ -206,7 +206,7 @@ function Presets({ options, current, onPick, format }: {
             'px-2 py-0.5 text-[10px] font-medium rounded-full border transition-colors',
             String(current) === String(o)
               ? 'bg-ink text-white border-ink'
-              : 'border-zinc-200 text-tertiary hover:text-ink hover:border-ink/30',
+              : 'border-border text-tertiary hover:text-ink hover:border-ink/30',
           )}
         >
           {format ? format(o) : String(o)}
@@ -758,38 +758,38 @@ export const StepConfigForm: React.FC<StepConfigFormProps> = ({ step, onUpdate, 
       );
     }
 
+    // THE AI step, one form. `ai_continue` is what the palette adds; `ai_navigate` is the
+    // older wire spelling of the SAME step (it ran a second, weaker loop until both were
+    // pointed at the one agent brain) and so gets the identical form — writing back to its
+    // own `goal`/`max_steps` keys so an already-saved step keeps replaying on any engine
+    // that only knows those. No vision toggle: the brain screenshots when it decides it
+    // needs to look, so the flag never reached anything.
+    case 'ai_continue':
+    case 'ai_navigate': {
+      const legacyGoal = step.type === 'ai_navigate';
+      const taskKey = legacyGoal ? 'goal' : 'task';
+      const maxKey = legacyGoal ? 'max_steps' : 'max_actions';
+      return (
+        <>
+          <Field label={t('Task')} hint={t('Plain language. The AI reads the page and acts until the task is done.')}>
+            <TextArea value={c[taskKey] || ''} onChange={v => updateConfig(taskKey, v)} placeholder={t('Describe the task for the AI agent')} mono={false} />
+          </Field>
+          <Field label={t('Start URL')} hint={t('Optional — opened before the AI starts. Leave empty to continue on the current page.')}>
+            <TextInput value={c.url || ''} onChange={v => updateConfig('url', v)} placeholder="https://…" mono />
+          </Field>
+          <Field label={t('Max actions')} hint={t('Upper bound on how many actions the AI may take before the step gives up.')}>
+            <NumberInput value={c[maxKey] || 10} onChange={v => updateConfig(maxKey, v)} min={1} max={100} />
+          </Field>
+        </>
+      );
+    }
+
+    // Superseded one-shot form fill, kept editable for workflows that already use it.
     case 'ai_fill':
       return (
         <Field label={t('Instruction')}>
           <TextArea value={c.instruction || ''} onChange={v => updateConfig('instruction', v)} placeholder={t('Describe what to fill and how')} mono={false} />
         </Field>
-      );
-
-    case 'ai_continue':
-      return (
-        <>
-          <Field label={t('Task')}>
-            <TextArea value={c.task || ''} onChange={v => updateConfig('task', v)} placeholder={t('Describe the task for the AI agent')} mono={false} />
-          </Field>
-          <Field label={t('Max actions')}>
-            <NumberInput value={c.max_actions || 10} onChange={v => updateConfig('max_actions', v)} min={1} max={100} />
-          </Field>
-        </>
-      );
-
-    case 'ai_navigate':
-      return (
-        <>
-          <Field label={t('Start URL')}>
-            <TextInput value={c.url || ''} onChange={v => updateConfig('url', v)} placeholder="https://…" mono />
-          </Field>
-          <Field label={t('Goal')}>
-            <TextArea value={c.goal || ''} onChange={v => updateConfig('goal', v)} placeholder={t('Describe what the AI should achieve')} mono={false} />
-          </Field>
-          <div className="pl-[100px]">
-            <Toggle checked={c.use_vision !== false} onChange={v => updateConfig('use_vision', v)} label={t('Use vision (screenshots)')} />
-          </div>
-        </>
       );
 
     case 'end_point': {

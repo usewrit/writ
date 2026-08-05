@@ -9,7 +9,7 @@ import { formatRelativeTime, formatDate } from '../utils/format';
 import { Modal } from '../components/ui/Modal';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
-import { Expand, Select, Checkbox, SwapFade } from '../components/ui';
+import { Expand, Select, Checkbox, SwapFade, EmptyHero } from '../components/ui';
 import { ScrollArea } from '../components/ui/ScrollArea';
 import { apiKeysConfig } from '../components/toolrail/configs';
 import { tintStyle } from '../utils/tint';
@@ -293,13 +293,12 @@ const KeyDetailPane: React.FC<DetailProps> = ({
   const [now] = useState(() => Date.now());
   if (!k) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center text-center px-6">
-        <div className="w-12 h-12 rounded-2xl bg-hover border border-border flex items-center justify-center mb-4">
-          <KeyIcon className="h-6 w-6 text-tertiary" />
-        </div>
-        <p className="text-sm font-medium text-ink">{t('Select an API key')}</p>
-        <p className="text-xs text-secondary mt-1 max-w-xs">{t('Pick one on the left to see exactly what it can reach.')}</p>
-      </div>
+      <EmptyHero
+        icon={KeyIcon}
+        title={t('Select an API key')}
+        description={t('Pick one on the left to see exactly what it can reach.')}
+        className="flex-1"
+      />
     );
   }
 
@@ -634,18 +633,14 @@ export const ApiKeys: React.FC = () => {
       {loading && !apiKeys ? (
         <ShelfSkeleton label={t('Loading API keys')} rows={5} />
       ) : !hasKeys ? (
-        <div className="flex h-full flex-col items-center justify-center text-center px-6 bg-surface">
-          <div className="w-12 h-12 rounded-2xl bg-hover border border-border flex items-center justify-center mb-4">
-            <KeyIcon className="h-6 w-6 text-tertiary" />
-          </div>
-          <p className="text-sm font-medium text-ink">{t('No API keys yet')}</p>
-          <p className="text-xs text-secondary mt-1 max-w-md leading-relaxed">
-            {t('A key lets your own scripts and tools act on this account. Start from what the key is for — read your data, run your automations, or full access — then narrow it.')}
-          </p>
-          <button onClick={openCreateModal} className="mt-4 px-4 py-2 bg-accent-strong text-accent-on text-sm font-medium rounded-lg hover:bg-accent-strong/90 transition-colors">
-            {t('Create API Key')}
-          </button>
-        </div>
+        <EmptyHero
+          icon={KeyIcon}
+          title={t('No API keys yet')}
+          description={t('A key lets your own scripts and tools act on this account. Start from what the key is for — read your data, run your automations, or full access — then narrow it.')}
+          className="h-full bg-surface"
+        >
+          <Button onClick={openCreateModal} size="sm">{t('Create API Key')}</Button>
+        </EmptyHero>
       ) : (
         <div className={clsx('flex h-full', SHELF_CONTAINER)}>
           <div className={SHELF_LIST_COL}>

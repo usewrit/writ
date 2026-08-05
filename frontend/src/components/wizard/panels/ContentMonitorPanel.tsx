@@ -5,8 +5,10 @@ import {
   Squares2X2Icon,
   CodeBracketIcon,
   PhotoIcon,
+  ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline';
 import toast from 'react-hot-toast';
+import { toastIcon } from '../../ui/toastIcon';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import client from '../../../api/client';
@@ -92,7 +94,7 @@ export const ContentMonitorPanel: React.FC = () => {
       enabled: true,
     }]);
     if (info.matchCount && info.matchCount > 1) {
-      toast(t('Selector added — matches {{n}} elements, all are checked together', { n: info.matchCount }), { icon: '⚠️' });
+      toast(t('Selector added — matches {{n}} elements, all are checked together', { n: info.matchCount }), { icon: toastIcon(ExclamationTriangleIcon, 'text-amber-500') });
     } else {
       toast.success(t('Selector added'));
     }

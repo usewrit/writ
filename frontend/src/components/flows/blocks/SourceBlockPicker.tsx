@@ -397,7 +397,7 @@ export const SourceBlockPicker: React.FC<SourceBlockPickerProps> = ({ onSelected
                   <div className="text-sm font-medium text-ink truncate transition-colors">{mon.url}</div>
                   <div className="text-xs text-secondary mt-0.5">{i18n.t('Content monitor')}</div>
                 </div>
-                <div className={clsx('w-2 h-2 rounded-full shrink-0 ml-3', mon.enabled !== false ? 'bg-ink' : 'bg-zinc-300')} />
+                <div className={clsx('w-2 h-2 rounded-full shrink-0 ml-3', mon.enabled !== false ? 'bg-ink' : 'bg-active')} />
               </div>
             </button>
           ))}
@@ -470,7 +470,7 @@ export const SourceBlockPicker: React.FC<SourceBlockPickerProps> = ({ onSelected
                   <div className="text-sm font-medium text-ink truncate transition-colors">{t.url}</div>
                   <div className="text-xs text-secondary mt-0.5">{i18n.t('Content monitor')}</div>
                 </div>
-                <div className={clsx('w-2 h-2 rounded-full shrink-0 ml-3', t.enabled !== false ? 'bg-ink' : 'bg-zinc-300')} />
+                <div className={clsx('w-2 h-2 rounded-full shrink-0 ml-3', t.enabled !== false ? 'bg-ink' : 'bg-active')} />
               </div>
             </button>
           )} />
@@ -489,7 +489,7 @@ export const SourceBlockPicker: React.FC<SourceBlockPickerProps> = ({ onSelected
                     {w.steps && <span className="text-xs text-tertiary">{t('{{n}} steps', { n: w.steps.length })}</span>}
                   </div>
                 </div>
-                <div className={clsx('w-2 h-2 rounded-full shrink-0 ml-3', w.is_active ? 'bg-ink' : 'bg-zinc-300')} />
+                <div className={clsx('w-2 h-2 rounded-full shrink-0 ml-3', w.is_active ? 'bg-ink' : 'bg-active')} />
               </div>
             </button>
           )} />

@@ -81,6 +81,16 @@ RESOURCES: dict[str, dict] = {
         "actions": (READ, DELETE),
         "pinnable": True,
     },
+    "transfer": {
+        "label": "Import & export",
+        "description": (
+            "Packaging this install's assets into a portable file, and importing one. "
+            "Deliberately NOT in any preset: an export is a bulk read of everything the "
+            "install owns, so a key must be granted it explicitly."
+        ),
+        "actions": (READ, WRITE),
+        "pinnable": False,
+    },
     "crawl": {
         "label": "Crawls",
         "description": "Site-wide crawls — starting one consumes account usage",
@@ -224,21 +234,37 @@ def expand(scopes: Iterable[str]) -> set[str]:
 # is this for?", not "which of fifteen resources times four verbs?". Custom is
 # still there for the case the presets do not cover.
 
+#: Resources a PRESET never grants, even when the preset's rule would sweep them
+#: in. `transfer:read` is not "read a thing" — it packages every asset the install
+#: owns into one downloadable file, so a "Read-only" or "Run automations" key
+#: picking it up by pattern would hand bulk exfiltration to the least-privileged
+#: preset in the product. It stays available under Custom and Full access, where
+#: choosing it is a deliberate act.
+_PRESET_EXCLUDED_RESOURCES = frozenset({"transfer"})
+
+
+def _preset_scopes(*actions: str) -> list[str]:
+    """Scopes for a preset: every resource offering one of `actions`, minus the
+    resources presets must never sweep in."""
+    return sorted(
+        f"{r}:{a}"
+        for r, spec in RESOURCES.items()
+        if r not in _PRESET_EXCLUDED_RESOURCES
+        for a in actions
+        if a in spec["actions"]
+    )
+
+
 PRESETS: dict[str, dict] = {
     "read_only": {
         "label": "Read-only",
         "description": "See everything, change nothing. Safe for dashboards and reporting.",
-        "scopes": sorted(
-            f"{r}:{READ}" for r, spec in RESOURCES.items() if READ in spec["actions"]
-        ),
+        "scopes": _preset_scopes(READ),
     },
     "run": {
         "label": "Run automations",
         "description": "Read your data and trigger runs, crawls and scrapes — but not edit or delete anything.",
-        "scopes": sorted(
-            {f"{r}:{READ}" for r, spec in RESOURCES.items() if READ in spec["actions"]}
-            | {f"{r}:{EXECUTE}" for r, spec in RESOURCES.items() if EXECUTE in spec["actions"]}
-        ),
+        "scopes": _preset_scopes(READ, EXECUTE),
     },
     "full": {
         "label": "Full access",
@@ -373,6 +399,21 @@ def summarize(blob: Optional[dict]) -> str:
 # path segment and a trailing `*` for "anything below here".
 
 _ROUTE_RULES: tuple[tuple[str, str, str], ...] = (
+    # ── portable import/export (/api/transfer/*) ──
+    # An export reads EVERY selected asset, so it is gated on its own resource
+    # rather than on workflows:read — see DATA_PORTABILITY_SPEC §10. Most specific
+    # first: /imports/{}/commit must not be shadowed by /imports/{}.
+    ("POST",   "/api/transfer/export/preview",                "transfer:read"),
+    ("POST",   "/api/transfer/export",                        "transfer:read"),
+    ("POST",   "/api/transfer/inspect",                       "transfer:write"),
+    ("POST",   "/api/transfer/stage",                         "transfer:write"),
+    ("PUT",    "/api/transfer/imports/{}/plan",               "transfer:write"),
+    ("POST",   "/api/transfer/imports/{}/commit",             "transfer:write"),
+    ("POST",   "/api/transfer/imports/{}/undo",               "transfer:write"),
+    ("DELETE", "/api/transfer/imports/{}",                    "transfer:write"),
+    ("GET",    "/api/transfer/imports/{}",                    "transfer:read"),
+    ("GET",    "/api/transfer/imports",                       "transfer:read"),
+
     # ── public versioned API (/api/v1/*) ──
     ("POST",   "/api/v1/local-workflows/{}/run",              "workflows:execute"),
     ("GET",    "/api/v1/local-workflows",                     "workflows:read"),

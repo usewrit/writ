@@ -5,24 +5,10 @@ import { Q } from '../../stores/queryKeys';
 import { recipientsApi, triggersApi } from '../../api/endpoints';
 import { CrossRefBadge, computeFlowRefs } from './CrossRefBadge';
 import { statusStyle } from '../../utils/statusStyle';
+import { EmptyHero } from '../ui';
 import clsx from 'clsx';
-import {
-  BellIcon,
-  DevicePhoneMobileIcon,
-  EnvelopeIcon,
-  ChatBubbleLeftIcon,
-  LockClosedIcon,
-  LinkIcon,
-} from '@heroicons/react/24/outline';
-
-const PROVIDER_META: Record<string, { Icon: React.ElementType; label: string }> = {
-  pushover: { Icon: DevicePhoneMobileIcon, label: 'Pushover' },
-  email: { Icon: EnvelopeIcon, label: 'Email' },
-  twilio: { Icon: ChatBubbleLeftIcon, label: 'SMS' },
-  whatsapp: { Icon: ChatBubbleLeftIcon, label: 'WhatsApp' },
-  signal: { Icon: LockClosedIcon, label: 'Signal' },
-  webhook: { Icon: LinkIcon, label: 'Webhook' },
-};
+import { channelMeta } from '../notifications/channelMeta';
+import { BellIcon } from '@heroicons/react/24/outline';
 
 interface NotificationListProps {
   search: string;
@@ -60,24 +46,19 @@ export const NotificationList: React.FC<NotificationListProps> = ({ search }) =>
 
   if (recipientList.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[50vh] text-center">
-        <div className="w-12 h-12 rounded-2xl bg-chrome border border-border flex items-center justify-center mb-4">
-          <BellIcon className="h-6 w-6 text-tertiary" />
-        </div>
-        <p className="text-sm font-medium text-ink">
-          {search ? t('No notifications match your search') : t('No notification channels configured')}
-        </p>
-        <p className="text-xs text-secondary mt-1">
-          {search ? t('Try a different search term') : t('Set them up in Integrations')}
-        </p>
-      </div>
+      <EmptyHero
+        icon={BellIcon}
+        title={search ? t('No notifications match your search') : t('No notification channels configured')}
+        description={search ? t('Try a different search term') : t('Set them up in Integrations')}
+        className="min-h-[50vh]"
+      />
     );
   }
 
   return (
     <div className="grid gap-3">
       {recipientList.map((r: any) => {
-        const meta = PROVIDER_META[r.provider] || { Icon: BellIcon, label: r.provider };
+        const meta = channelMeta(r.provider);
         const ProviderIcon = meta.Icon;
         const flowRefs = computeFlowRefs(allFlows || [], (blocks) =>
           blocks.some((b: any) =>

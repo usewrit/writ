@@ -23,8 +23,9 @@ import {
   ComputerDesktopIcon,
   FolderIcon,
   FolderPlusIcon,
+  ClockIcon,
 } from '@heroicons/react/24/outline';
-import { Stagger, Select } from '../ui';
+import { Stagger, Select, Button, EmptyHero, toastIcon } from '../ui';
 import { ScrollArea } from '../ui/ScrollArea';
 import { tintStyle, workflowTint } from '../../utils/tint';
 import { TYPE_META } from '../../pages/workflows/detail/meta';
@@ -524,7 +525,7 @@ export const WorkflowList: React.FC<WorkflowListProps> = ({ search, onSearchChan
     try {
       const result = await automationApi.runWorkflow(w.id, target, w.default_persona_id ?? undefined, agentId);
       const msg = result.message || t('Workflow "{{name}}" dispatched — Task #{{taskId}}', { name: w.name, taskId: result.task_id });
-      if (result.queued) toast(msg, { icon: '⏳', duration: 6000 });
+      if (result.queued) toast(msg, { icon: toastIcon(ClockIcon), duration: 6000 });
       else toast.success(msg, { duration: 4000 });
       refresh();
     } catch (err: any) {
@@ -1164,17 +1165,14 @@ const CollectionsStrip: React.FC<{
 function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
   const { t } = useTranslation();
   return (
-    <div className="flex flex-1 min-h-0 w-full flex-col items-center justify-center bg-surface text-center px-6">
-      <div className="w-12 h-12 rounded-2xl bg-chrome border border-border flex items-center justify-center mb-4">
-        <ExclamationTriangleIcon className="h-6 w-6 text-tertiary" />
-      </div>
-      <p className="text-sm font-medium text-ink">{t("Couldn't load workflows")}</p>
-      <p className="text-xs text-secondary mt-1">{message}</p>
-      <button onClick={onRetry}
-        className="mt-4 px-4 py-2 bg-accent-strong text-accent-on text-sm font-medium rounded-lg hover:bg-accent-strong/90 transition-colors">
-        {t('Retry')}
-      </button>
-    </div>
+    <EmptyHero
+      icon={ExclamationTriangleIcon}
+      title={t("Couldn't load workflows")}
+      description={message}
+      className="flex-1 min-h-0 bg-surface"
+    >
+      <Button onClick={onRetry} size="sm">{t('Retry')}</Button>
+    </EmptyHero>
   );
 }
 
@@ -1182,21 +1180,16 @@ function EmptyState({ search, deviceWfCount = 0, onViewDevices }: { search: stri
   const { t } = useTranslation();
   const navigate = useNavigate();
   return (
-    <div className="flex flex-1 min-h-0 w-full flex-col items-center justify-center bg-surface text-center px-6">
-      <div className="w-12 h-12 rounded-2xl bg-chrome border border-border flex items-center justify-center mb-4">
-        <CursorArrowRaysIcon className="h-6 w-6 text-tertiary" />
-      </div>
-      <p className="text-sm font-medium text-ink">
-        {search ? t('No workflows match your search') : t('No workflows yet')}
-      </p>
-      <p className="text-xs text-secondary mt-1">
-        {search ? t('Try a different search term') : t('Record a workflow to automate any website')}
-      </p>
+    <EmptyHero
+      icon={CursorArrowRaysIcon}
+      title={search ? t('No workflows match your search') : t('No workflows yet')}
+      description={search ? t('Try a different search term') : t('Record a workflow to automate any website')}
+      className="flex-1 min-h-0 bg-surface"
+    >
       {!search && (
-        <button onClick={() => navigate('/workflows/new')}
-          className="mt-4 px-4 py-2 bg-accent-strong text-accent-on text-sm font-medium rounded-lg hover:bg-accent-strong/90 transition-colors">
+        <Button onClick={() => navigate('/workflows/new')} size="sm">
           {t('New Workflow')}
-        </button>
+        </Button>
       )}
       {/* This (Recorded / cloud) list is the default; when it's empty but the user
           has workflows on connected desktop devices, point them there. */}
@@ -1204,7 +1197,7 @@ function EmptyState({ search, deviceWfCount = 0, onViewDevices }: { search: stri
         <button
           type="button"
           onClick={onViewDevices}
-          className="mt-5 inline-flex items-center gap-2.5 rounded-xl border border-border bg-surface px-4 py-2.5 hover:border-ink/30 hover:bg-chrome/40 transition-colors"
+          className="inline-flex items-center gap-2.5 rounded-xl border border-border bg-surface px-4 py-2.5 hover:border-ink/30 hover:bg-chrome/40 transition-colors"
         >
           <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-chrome shrink-0">
             <ComputerDesktopIcon className="h-4 w-4 text-secondary" />
@@ -1216,6 +1209,6 @@ function EmptyState({ search, deviceWfCount = 0, onViewDevices }: { search: stri
           <ArrowRightIcon className="h-4 w-4 text-tertiary shrink-0" />
         </button>
       )}
-    </div>
+    </EmptyHero>
   );
 }

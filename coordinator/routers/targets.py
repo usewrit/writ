@@ -3,12 +3,12 @@ Targets router - URL monitoring target management endpoints.
 """
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Union, List, Literal
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, and_, distinct, func
+from sqlalchemy import select, delete, and_, or_, distinct, func
 from sqlalchemy.orm import load_only
 import re
 from urllib.parse import urljoin, urlparse
@@ -341,6 +341,61 @@ def _build_target_info(target, live: Optional[dict] = None) -> "TargetInfo":
     )
 
 
+def _parse_change_cursor(since: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO-8601 change cursor into an aware datetime.
+
+    Invalid input is REJECTED (422) rather than ignored. A cursor the server
+    quietly drops silently downgrades an incremental poll into a full re-read,
+    and the caller has no way to notice it just reprocessed its whole history.
+    """
+    if not since:
+        return None
+    raw = since.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid `since` cursor: expected an ISO-8601 timestamp",
+        )
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _apply_change_cursor(query, since_dt: Optional[datetime], since_id: Optional[int]):
+    """Order + filter a DetectedChange query for either read mode.
+
+    Without a cursor: newest-first, the browsing order the UI wants.
+
+    With a cursor: a keyset walk FORWARD in time, ordered by the very field the
+    cursor advances on. `(last_detected_at, id)` is compared as a pair because
+    `last_detected_at` is not unique — ordering on the timestamp alone lets two
+    rows sharing a millisecond straddle the limit boundary, and the one left
+    behind is never returned again.
+
+    Note `last_detected_at` moves when a change is re-detected, so a row the
+    caller already saw legitimately reappears with a later cursor value. That is
+    a new detection, not a duplicate; clients de-duplicate on (id, cursor), which
+    is exactly what the SDK `watch()` helpers do.
+    """
+    from models.detected_change import DetectedChange
+
+    if since_dt is None:
+        return query.order_by(
+            DetectedChange.last_detected_at.desc(), DetectedChange.id.desc()
+        )
+    return query.where(
+        or_(
+            DetectedChange.last_detected_at > since_dt,
+            and_(
+                DetectedChange.last_detected_at == since_dt,
+                DetectedChange.id > (since_id or 0),
+            ),
+        )
+    ).order_by(DetectedChange.last_detected_at.asc(), DetectedChange.id.asc())
+
+
 class TargetChangeInfo(BaseModel):
     """Response model for target change information."""
     id: str
@@ -350,6 +405,13 @@ class TargetChangeInfo(BaseModel):
     newContent: str
     diff: str
     detectedBy: str
+    # The two real timestamps behind `timestamp` (which is first_detected_at, kept
+    # under its original name for existing callers). Both are exposed because the
+    # feed is ORDERED by last_detected_at: without it a client re-sorting on
+    # `timestamp` silently disagrees with the server's paging order, and cursor
+    # paging has nothing to advance on.
+    firstDetectedAt: str
+    lastDetectedAt: str
     # Multi-selector support
     selectorId: Optional[int] = None
     selectorName: Optional[str] = None
@@ -841,6 +903,91 @@ async def update_target(
         )
 
 
+class TargetRunResult(BaseModel):
+    """Outcome of an out-of-schedule check request."""
+    ok: bool
+    dispatched: int
+    detail: Optional[str] = None
+
+
+@router.post(
+    "/{target_id}/run",
+    response_model=TargetRunResult,
+    summary="Check a target now",
+    description=(
+        "Trigger an immediate, out-of-schedule check of this monitor. The request "
+        "is queued for whichever agent(s) the target is assigned to and picked up "
+        "on their next poll; the result — and its report — flow through the normal "
+        "path. Monitors otherwise only run on their configured cadence."
+    ),
+)
+async def run_target_check_now(
+    target_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_api_key: dict = Depends(get_current_api_key),
+):
+    """On-demand "Check now".
+
+    Delivery rides the poll lane, not a push: each assigned agent has a Redis set
+    of target ids it should check immediately, which `POST /agents/poll` drains
+    into `check_now_target_ids`. That is the only channel an HTTP-poll agent
+    actually listens on — a DB flag never reaches it.
+
+    A monitor with no agent assigned yet answers `ok: false` with a reason rather
+    than pretending a check was queued.
+    """
+    check_api_key_scope(current_api_key, "checks", "write", target_id)
+    target = await _get_target_for_owner(db, target_id, current_api_key)
+    if target.enabled is False:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This monitor is paused — resume it before checking now.",
+        )
+
+    from models.target_assignment import TargetAssignment
+
+    rows = await db.execute(
+        select(TargetAssignment.agent_id).where(TargetAssignment.target_id == target_id)
+    )
+    agent_ids = [r[0] for r in rows.all()]
+    if not agent_ids:
+        return TargetRunResult(
+            ok=False,
+            dispatched=0,
+            detail="No agent is assigned to this monitor yet — it will run on its next scheduled cycle.",
+        )
+
+    try:
+        from utils.redis_client import get_redis
+        redis = get_redis()
+    except Exception as e:
+        logger.error(f"check_now unavailable (no redis): {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Check-now queue is unavailable — the monitor will run on its next scheduled cycle.",
+        )
+
+    dispatched = 0
+    for agent_id in agent_ids:
+        try:
+            key = f"check_now:{agent_id}"
+            await redis.sadd(key, target_id)
+            # A request nobody drains within the window is stale; expiring it
+            # keeps a long-offline agent from running a burst of old checks the
+            # moment it reconnects.
+            await redis.expire(key, 300)
+            dispatched += 1
+        except Exception as e:
+            logger.warning(f"check_now enqueue failed for agent {agent_id}: {e}")
+
+    if dispatched == 0:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not queue the check — the monitor will run on its next scheduled cycle.",
+        )
+    return TargetRunResult(ok=True, dispatched=dispatched)
+
+
 @router.get(
     "/changes/recent",
     response_model=list[RecentChangeInfo],
@@ -849,54 +996,70 @@ async def update_target(
 )
 async def list_recent_changes(
     limit: int = Query(50, ge=1, le=200),
+    since: Optional[str] = Query(
+        None,
+        description=(
+            "Keyset cursor: return only changes detected AFTER this ISO-8601 "
+            "timestamp, oldest-first. Advance it to the last row's "
+            "`last_detected_at` to walk the feed forward without gaps. Omit for "
+            "the newest-first browsing view."
+        ),
+    ),
+    since_id: Optional[int] = Query(
+        None,
+        ge=0,
+        description="Tie-breaker for rows sharing the `since` timestamp — the last row's `id`.",
+    ),
     db: AsyncSession = Depends(get_db),
     current_api_key: dict = Depends(get_current_api_key),
 ):
     """Global change feed powering the Monitors-list "what changed" preview +
-    the recently-changed group. Honours per-key check scoping.
-    Static path is declared BEFORE `/{target_id}/changes` so it never resolves as
-    a target id. Fails soft to [] — a feed hiccup must never blank the list."""
-    try:
-        check_api_key_scope(current_api_key, "checks", "read")
-        from models.detected_change import DetectedChange
-        from sqlalchemy.orm import selectinload
+    the recently-changed group, and the cursor lane every SDK `watch()` polls.
+    Honours per-key check scoping. Static path is declared BEFORE
+    `/{target_id}/changes` so it never resolves as a target id.
 
-        query = (
-            select(DetectedChange, Target.url)
-            .join(Target, Target.id == DetectedChange.target_id)
-            .options(selectinload(DetectedChange.target_selector))
-        )
+    Errors are RAISED, not swallowed. This route used to answer [] on any
+    exception so a hiccup could not blank the UI list; that made "nothing
+    changed" and "the query blew up" indistinguishable on the wire, which is
+    silent data loss for anything polling it. Presentation-layer fallback belongs
+    in the caller."""
+    check_api_key_scope(current_api_key, "checks", "read")
+    from models.detected_change import DetectedChange
+    from sqlalchemy.orm import selectinload
 
-        allowed_ids = filter_by_scope(current_api_key, "checks")
-        if allowed_ids is not None and len(allowed_ids) > 0:
-            query = query.where(DetectedChange.target_id.in_(allowed_ids))
-        elif allowed_ids is not None:
-            return []
+    since_dt = _parse_change_cursor(since)
 
-        query = query.order_by(DetectedChange.last_detected_at.desc()).limit(limit)
-        rows = (await db.execute(query)).all()
+    query = (
+        select(DetectedChange, Target.url)
+        .join(Target, Target.id == DetectedChange.target_id)
+        .options(selectinload(DetectedChange.target_selector))
+    )
 
-        out: list[RecentChangeInfo] = []
-        for change, url in rows:
-            sel_name = change.target_selector.name if (
-                change.target_selector_id and change.target_selector
-            ) else None
-            out.append(RecentChangeInfo(
-                id=change.id,
-                target_id=change.target_id,
-                target_url=url,
-                target_selector_id=change.target_selector_id,
-                selector_name=sel_name,
-                diff_snippet=(change.diff_snippet[:280] if change.diff_snippet else None),
-                first_detected_at=change.first_detected_at.isoformat(),
-                last_detected_at=change.last_detected_at.isoformat(),
-            ))
-        return out
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error fetching recent changes: {e}")
+    allowed_ids = filter_by_scope(current_api_key, "checks")
+    if allowed_ids is not None and len(allowed_ids) > 0:
+        query = query.where(DetectedChange.target_id.in_(allowed_ids))
+    elif allowed_ids is not None:
         return []
+
+    query = _apply_change_cursor(query, since_dt, since_id).limit(limit)
+    rows = (await db.execute(query)).all()
+
+    out: list[RecentChangeInfo] = []
+    for change, url in rows:
+        sel_name = change.target_selector.name if (
+            change.target_selector_id and change.target_selector
+        ) else None
+        out.append(RecentChangeInfo(
+            id=change.id,
+            target_id=change.target_id,
+            target_url=url,
+            target_selector_id=change.target_selector_id,
+            selector_name=sel_name,
+            diff_snippet=(change.diff_snippet[:280] if change.diff_snippet else None),
+            first_detected_at=change.first_detected_at.isoformat(),
+            last_detected_at=change.last_detected_at.isoformat(),
+        ))
+    return out
 
 
 @router.get(
@@ -907,14 +1070,26 @@ async def list_recent_changes(
 )
 async def get_target_changes(
     target_id: int,
-    limit: int = 100,
+    limit: int = Query(100, ge=1, le=1000),
+    since: Optional[str] = Query(
+        None,
+        description=(
+            "Keyset cursor: return only changes detected AFTER this ISO-8601 "
+            "timestamp, oldest-first. Advance it to the last row's "
+            "`lastDetectedAt`. Omit for the newest-first browsing view."
+        ),
+    ),
+    since_id: Optional[int] = Query(
+        None,
+        ge=0,
+        description="Tie-breaker for rows sharing the `since` timestamp — the last row's `id`.",
+    ),
     db: AsyncSession = Depends(get_db),
     current_api_key: dict = Depends(get_current_api_key),
 ):
     """
-    Get all detected changes for a target.
-
-    Returns reports where diff_snippet is not null, ordered by most recent first.
+    Get detected changes for a target, newest-first — or oldest-first from a
+    cursor when `since` is supplied (see `/changes/recent` for the walk).
     """
     try:
         check_api_key_scope(current_api_key, "checks", "read", target_id)
@@ -926,13 +1101,13 @@ async def get_target_changes(
         from models.target_selector import TargetSelector
         from sqlalchemy.orm import selectinload
 
+        since_dt = _parse_change_cursor(since)
         query = (
             select(DetectedChange)
             .options(selectinload(DetectedChange.target_selector))
             .where(DetectedChange.target_id == target_id)
-            .order_by(DetectedChange.last_detected_at.desc())
-            .limit(limit)
         )
+        query = _apply_change_cursor(query, since_dt, since_id).limit(limit)
 
         result = await db.execute(query)
         detected_changes = result.scalars().all()
@@ -970,6 +1145,8 @@ async def get_target_changes(
                 id=str(change.id),
                 targetId=str(change.target_id),
                 timestamp=change.first_detected_at.isoformat(),
+                firstDetectedAt=change.first_detected_at.isoformat(),
+                lastDetectedAt=change.last_detected_at.isoformat(),
                 oldContent=content_before or "",
                 newContent=content_after or "",
                 diff=change.diff_snippet or "No diff available",

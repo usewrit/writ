@@ -1,0 +1,87 @@
+name: Release gate (end-to-end)
+
+# The one check that crosses repository boundaries. `ci.yml` proves each piece
+# in isolation; this proves the sentence the README opens with:
+#
+#   docker compose up → create the owner → connect a RELEASED agent →
+#   record → replay → call it over REST and over MCP
+#
+# It is NOT on every push: it builds two images and downloads a real release
+# asset, so it runs where the answer actually matters —
+#
+#   * on a version tag, because that is the artifact people install;
+#   * on a schedule, because it depends on usewrit/writ-agent's published
+#     release, which can change without a single commit landing here — a broken
+#     asset name or checksum is otherwise discovered by a user, not by us;
+#   * on demand, for testing a fork or a candidate agent build.
+#
+# Anything that fails here is, by construction, something no unit test in either
+# repository can see.
+
+on:
+  push:
+    tags: ["v*"]
+  schedule:
+    # Weekly. The cross-repo dependency is the reason: nothing in this repo has
+    # to change for this gate to start failing.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      agent_repo:
+        description: "Agent repository whose published release to install"
+        required: false
+        default: "usewrit/writ-agent"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: compose → owner → released agent → record → replay → REST + MCP
+    runs-on: ubuntu-latest
+    # Generous: the first run builds the Playwright-based coordinator image and
+    # downloads a ~50 MB release archive. A tight timeout here would turn a slow
+    # runner into a "failure" and train people to re-run it until it passes.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner IS the agent's host — the agent runs outside the compose
+      # network and dials the published port back, exactly as an operator's
+      # machine does. Its browser needs the same system libraries any Playwright
+      # host needs; without them the agent starts and then cannot open a page,
+      # which is the failure mode this gate exists to catch, so install them
+      # rather than let it masquerade as a product bug.
+      - name: Install browser runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+            libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+            libgbm1 libasound2t64 libpango-1.0-0 libcairo2
+
+      - name: Run the release gate
+        env:
+          WRIT_AGENT_REPO: ${{ github.event.inputs.agent_repo || 'usewrit/writ-agent' }}
+        run: ./scripts/release-e2e.sh
+
+      # The agent log is the only record of what the published installer actually
+      # did. On a red run it is the first thing anyone wants and the hardest to
+      # reproduce locally, since it depends on a release asset that may since
+      # have been replaced.
+      - name: Collect diagnostics
+        if: failure()
+        run: |
+          echo "::group::coordinator"
+          docker compose logs --tail 200 coordinator || true
+          echo "::endgroup::"
+          echo "::group::doc-extract"
+          docker compose logs --tail 80 doc-extract || true
+          echo "::endgroup::"
+          echo "::group::agent"
+          cat ~/.writ/local-agent/agent.log 2>/dev/null || echo "no agent log"
+          echo "::endgroup::"

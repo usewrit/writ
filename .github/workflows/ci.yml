@@ -311,3 +311,70 @@ jobs:
             if (extra.length) { console.error("unexpected in tarball:", extra); process.exit(1); }
             console.log("tarball ok:", files.join(", "));
           '
+
+  # The Windows half of the quickstart. `scripts/gen-env.sh` is POSIX sh and
+  # needs openssl and sed, so a Windows operator cannot run the documented first
+  # step at all — `scripts/gen-env.ps1` is what they run instead. It therefore
+  # needs the same standing as the shell version, and the only honest way to
+  # check a PowerShell script is on Windows.
+  #
+  # This asserts the OUTPUT, not just that the script exits 0: a .env missing a
+  # secret, or carrying CRLF, produces a coordinator that fails to boot or
+  # silently fails to decrypt, with an error that points nowhere near here.
+  windows-quickstart:
+    name: Windows quickstart (gen-env.ps1)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate .env
+        shell: pwsh
+        run: .\scripts\gen-env.ps1
+
+      - name: Every required secret is present and well-formed
+        shell: pwsh
+        run: |
+          $raw = [System.IO.File]::ReadAllText('.env')
+
+          # CRLF is the failure this platform actually produces. Docker Compose's
+          # env_file parser keeps a trailing CR as part of the value, so every
+          # secret would gain an invisible \r and the Fernet key would stop being
+          # valid base64.
+          if ($raw.Contains("`r")) { throw '.env contains CR - Docker would fold it into every secret value' }
+
+          $required = @('WRIT_JWT_SECRET','API_SECRET_KEY','HMAC_SECRET_KEY',
+                        'RECORDER_AUTH_SECRET','INTERNAL_API_SECRET','GATEWAY_SECRET',
+                        'DOC_EXTRACT_SECRET','SECRET_ENCRYPTION_KEY')
+          foreach ($name in $required) {
+            if ($raw -notmatch "(?m)^$name=.+") { throw "$name missing from .env" }
+          }
+
+          # The seven hex secrets must be 64 hex characters (32 bytes).
+          foreach ($name in $required | Where-Object { $_ -ne 'SECRET_ENCRYPTION_KEY' }) {
+            $v = ([regex]::Match($raw, "(?m)^$name=(.+)$")).Groups[1].Value.Trim()
+            if ($v -notmatch '^[0-9a-f]{64}$') { throw "$name is not 32 bytes of hex: '$v'" }
+          }
+
+          # SECRET_ENCRYPTION_KEY must decode as a 32-byte urlsafe-base64 Fernet
+          # key. Length alone would pass on a key that cannot decrypt anything.
+          $fk = ([regex]::Match($raw, '(?m)^SECRET_ENCRYPTION_KEY=(.+)$')).Groups[1].Value.Trim()
+          if ($fk -match '[+/]') { throw 'SECRET_ENCRYPTION_KEY is not URL-safe base64' }
+          $bytes = [Convert]::FromBase64String($fk.Replace('-','+').Replace('_','/'))
+          if ($bytes.Length -ne 32) { throw "SECRET_ENCRYPTION_KEY decodes to $($bytes.Length) bytes, expected 32" }
+
+          Write-Host "all $($required.Count) secrets present, well-formed, LF-only"
+
+      - name: Refuses to clobber an existing .env without -Force
+        shell: pwsh
+        run: |
+          # Overwriting silently would destroy SECRET_ENCRYPTION_KEY, and every
+          # credential in the database becomes undecryptable with no way back.
+          $before = [System.IO.File]::ReadAllText('.env')
+          $failed = $false
+          try { .\scripts\gen-env.ps1 } catch { $failed = $true }
+          if (-not $failed) { throw 'gen-env.ps1 overwrote an existing .env without -Force' }
+          if ([System.IO.File]::ReadAllText('.env') -ne $before) { throw '.env was modified by the refused run' }
+
+          .\scripts\gen-env.ps1 -Force
+          if ([System.IO.File]::ReadAllText('.env') -eq $before) { throw '-Force did not regenerate the secrets' }
+          Write-Host "refuses without -Force, regenerates with it"

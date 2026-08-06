@@ -53,9 +53,19 @@ You need Docker. Nothing else. Three steps, and the third is the fun one.
 
 ### 1. Start the coordinator
 
+**macOS / Linux**
+
 ```bash
 git clone https://github.com/usewrit/writ.git && cd writ
 ./scripts/gen-env.sh
+docker compose up -d --build
+```
+
+**Windows** — Docker Desktop with the WSL 2 backend, then in PowerShell:
+
+```powershell
+git clone https://github.com/usewrit/writ.git; cd writ
+.\scripts\gen-env.ps1
 docker compose up -d --build
 ```
 
@@ -79,6 +89,11 @@ That installs the agent, enrols it, and starts it. The pairing code is single-us
 and expires in 15 minutes; everything else — the coordinator URL, the
 document-extractor address and its secret — the installer fetches for itself, so
 there is nothing else to paste or configure.
+
+**On Windows**, that one-liner is a POSIX shell script, so use the **Binary**
+tab in the same modal instead: it prints a PowerShell block that downloads the
+`windows-x86_64` asset and the token to run it with. (The agent itself runs
+natively on Windows — only the installer is shell-only.)
 
 The agent dials out over WebSocket, so it needs no inbound ports and can sit
 behind NAT. It appears in **Fleet** within seconds.
@@ -398,7 +413,7 @@ with TLS, add `--profile tls` so the commands reach Caddy too.
 
 <br/>
 
-`./scripts/gen-env.sh` fills all of these in for you. To do it manually,
+`./scripts/gen-env.sh` (or `.\scripts\gen-env.ps1` on Windows) fills all of these in for you. To do it manually,
 fill these into `.env`. Never commit the filled-in `.env`.
 
 | Variable | How to generate |
@@ -473,6 +488,7 @@ never an error.
 | `docker/` | `Dockerfile.coordinator`, `Dockerfile.doc-extract`, `docker-compose.yml`, `entrypoint.sh`, `Caddyfile`. |
 | `docs/` | Operator guides (agent connect walkthrough, production deployment). |
 | `scripts/gen-env.sh` | Generates a filled-in `.env` with fresh secrets. |
+| `scripts/gen-env.ps1` | The same, for Windows PowerShell (no openssl/sed needed). |
 | `scripts/deploy.sh` | Puts this coordinator on a public domain with automatic HTTPS. |
 
 Health endpoints are `GET /health` on the coordinator (`:8000`) and on

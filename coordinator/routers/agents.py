@@ -916,6 +916,10 @@ class AgentPollResponse(BaseModel):
     redirect_url: Optional[str] = None
     redirect_reason: Optional[str] = None
     processed: int = 0
+    # On-demand "Check now" target ids requested since the last poll, populated
+    # AND cleared here. This is the only channel an HTTP-poll agent listens on:
+    # a DB flag never reaches it. Written by `POST /api/targets/{id}/run`.
+    check_now_target_ids: List[int] = Field(default_factory=list)
 
 
 class AgentInfo(BaseModel):
@@ -1623,6 +1627,24 @@ async def agent_poll(request: AgentPollRequest):
             redirect_reason = "fallback_recovered"
     except Exception as e:
         logger.debug(f"fallback redirect lookup failed for {request.agent_id}: {e}")
+
+    # On-demand "Check now": drain this agent's pending set — target ids a caller
+    # asked to check immediately, out of the normal schedule. Draining here is
+    # what makes the request one-shot; leaving the set would re-run the check on
+    # every poll. Best-effort: a redis hiccup just defers to the next cycle.
+    check_now_target_ids: List[int] = []
+    try:
+        _key = f"check_now:{request.agent_id}"
+        _ids = await redis_client.smembers(_key)
+        if _ids:
+            await redis_client.delete(_key)
+            for _v in _ids:
+                try:
+                    check_now_target_ids.append(int(_v))
+                except (TypeError, ValueError):
+                    continue
+    except Exception as e:
+        logger.debug(f"check_now drain failed for {request.agent_id}: {e}")
 
     return AgentPollResponse(
         status="ok",

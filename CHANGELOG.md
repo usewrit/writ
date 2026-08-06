@@ -6,9 +6,21 @@ file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - Unreleased
+## [1.0.0] - 2026-08-06
 
-Initial public release.
+Initial public release, tagged `v1.0.0`.
+
+The version matches [`writ-agent`](https://github.com/usewrit/writ-agent) v1.0.0
+and [`writ-mcp`](https://www.npmjs.com/package/writ-mcp) 1.0.0: the coordinator,
+the agent it drives and the connector that talks to it are one product and are
+versioned together, so "which agent goes with which coordinator" is never a
+question you have to research.
+
+Every release is gated by `scripts/release-e2e.sh`, which brings the stack up
+with Docker Compose, creates the owner, installs the *published* agent release
+through the same one-liner the UI prints, records a workflow on a real browser,
+replays it, and calls it over both REST and MCP. A tag is not cut until that
+passes.
 
 ### Added
 

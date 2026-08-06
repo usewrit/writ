@@ -322,6 +322,19 @@ app = FastAPI(
 )
 
 
+# Idempotency-Key replay lane. Registered FIRST on purpose: the first-registered
+# http middleware is the INNERMOST one, so bans, rate limits and maintenance mode
+# all get their say before a key is claimed and a response is recorded for
+# replay. Only POST/PUT/PATCH carrying the header are affected; everything else
+# passes straight through. See security/idempotency.py.
+@app.middleware("http")
+async def idempotency_middleware(request: Request, call_next):
+    """Replay a recorded response when a caller repeats an Idempotency-Key."""
+    from security import idempotency
+
+    return await idempotency.process(request, call_next)
+
+
 # IP ban middleware - block banned IPs early in the request pipeline
 @app.middleware("http")
 async def ip_ban_middleware(request: Request, call_next):
@@ -533,7 +546,7 @@ app.add_middleware(
     allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Agent-ID", "X-Signature", "X-Signature-Algorithm", "X-Timestamp", "X-Writ-Signature", "X-Hub-Signature-256"],
+    allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-Agent-ID", "X-Signature", "X-Signature-Algorithm", "X-Timestamp", "X-Writ-Signature", "X-Writ-Timestamp", "X-Hub-Signature-256"],
     expose_headers=["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After", "X-Cache"],
     max_age=600,
 )

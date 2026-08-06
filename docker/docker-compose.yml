@@ -36,7 +36,14 @@ services:
       # Loopback by default — put a TLS reverse proxy in front for network
       # access (see docs/DEPLOYMENT.md). Change to "8000:8000" only on a
       # trusted network.
-      - "127.0.0.1:8000:8000"
+      #
+      # The HOST port is a variable because 8000 is one of the most contended
+      # ports on a developer machine, and until now the only way past a clash
+      # was editing this file — a local edit that then fights every `git pull`.
+      # Set WRIT_HOST_PORT in .env, and set WRIT_PUBLIC_URL to match: agents dial
+      # the URL, so the two drifting apart is what makes a fleet stay empty with
+      # nothing in the logs.
+      - "127.0.0.1:${WRIT_HOST_PORT:-8000}:8000"
     # Pass every variable from .env straight into the container. This is the
     # authoritative source for the secrets, admin bootstrap, and agent hints
     # (WRIT_JWT_SECRET, JWT_SECRET_KEY, API_SECRET_KEY, HMAC_SECRET_KEY,
@@ -120,7 +127,11 @@ services:
       # path you forward), and set DOC_EXTRACT_URL on each agent to that
       # address. Never publish it on a public interface unprotected — the
       # shared secret is the only thing in front of it.
-      - "127.0.0.1:8092:8092"
+      #
+      # Host port is a variable for the same reason as the coordinator's. If you
+      # change it, set DOC_EXTRACT_URL to match — an agent that cannot reach this
+      # service does not error, it silently skips every PDF and scanned page.
+      - "127.0.0.1:${WRIT_DOC_EXTRACT_HOST_PORT:-8092}:8092"
     env_file:
       - path: ../.env
         required: false

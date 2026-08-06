@@ -15,15 +15,15 @@ pytest>=8.0
 pytest-asyncio>=0.23
 
 # Lint + format (fast, replaces flake8/isort/pyupgrade).
-ruff==0.6.9
+ruff==0.16.1
 
 # Static type checking. Started non-strict / targeted (see mypy.ini) so the
 # job is green today and can be ratcheted toward strict per-module over time.
 mypy==1.11.2
 
 # Security static analysis (AST-based). Fails the build on MEDIUM+ findings.
-bandit==1.7.10
+bandit==1.9.4
 
 # Dependency CVE auditing against requirements.txt. Honoured ignore-list lives
 # in pip-audit-ignore.txt (one GHSA/CVE id per line, with an inline rationale).
-pip-audit==2.7.3
+pip-audit==2.10.1

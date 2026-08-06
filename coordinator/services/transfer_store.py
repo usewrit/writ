@@ -39,14 +39,26 @@ class TransferStoreUnavailable(RuntimeError):
 
 
 def _root() -> Path:
-    """`<writ_files_dir>/transfers`, or a temp dir when no files dir is configured.
+    """`<writ_files_dir>/transfers`, or `~/.writ/transfers` when none is configured.
 
     Created 0o700: the contents are decrypted tenant work, and on a self-host box
     the process user's home is frequently shared with other things.
+
+    The fallback is the HOME directory, never `/tmp`. A shared world-writable
+    directory is the wrong place for decrypted tenant work whatever the mode bits
+    say — another local user can win the race to create `transfers/` first, or
+    point it at a symlink, and `mkdir(exist_ok=True)` will happily adopt it.
+    `~/.writ` is also the same root `services/local_agent.py` falls back to, so an
+    install that sets nothing keeps all of its state in one place instead of
+    scattering half of it into a directory the OS may reap.
     """
     from config import settings
 
-    base = getattr(settings, "writ_files_dir", None) or os.getenv("WRIT_FILES_DIR") or "/tmp/writ"
+    base = (
+        getattr(settings, "writ_files_dir", None)
+        or os.getenv("WRIT_FILES_DIR")
+        or str(Path.home() / ".writ")
+    )
     root = Path(base).expanduser() / "transfers"
     root.mkdir(parents=True, exist_ok=True)
     try:

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 import clsx from 'clsx';
@@ -58,7 +58,7 @@ interface Pickable {
   detail?: string | null;
 }
 
-export const ExportWizard: React.FC<Props> = ({ isOpen, onClose, initialSelection }) => {
+const ExportWizardBody: React.FC<Props> = ({ isOpen, onClose, initialSelection }) => {
   const { t } = useTranslation();
 
   const [step, setStep] = useState<StepId>('choose');
@@ -78,23 +78,13 @@ export const ExportWizard: React.FC<Props> = ({ isOpen, onClose, initialSelectio
   const [confirmed, setConfirmed] = useState(false);
   const [done, setDone] = useState<{ filename: string } | null>(null);
 
-  const reset = useCallback(() => {
-    setStep('choose');
-    setPreview(null);
-    setDataFor([]);
-    setIncludeCredentials(false);
-    setPassword('');
-    setLabel('');
-    setPassphrase('');
-    setConfirmed(false);
-    setDone(null);
-    setPickedWorkflows(initialSelection?.workflows || []);
-    setPickedMonitors(initialSelection?.monitors || []);
-  }, [initialSelection]);
-
+  // No reset pass: `ExportWizard` below remounts this body on every open, so
+  // every field above is already at its initial value. Unwinding a dozen
+  // setState calls from an effect instead is what the cascading-render rule
+  // objects to, and it also left the passphrase sitting in memory for as long
+  // as the parent stayed mounted.
   useEffect(() => {
     if (!isOpen) return;
-    reset();
     // Load pickable assets. Names only — this is a chooser, not a browser.
     automationApi
       .listWorkflows()
@@ -108,7 +98,7 @@ export const ExportWizard: React.FC<Props> = ({ isOpen, onClose, initialSelectio
         setMonitors((rows || []).map((m: any) => ({ id: m.id, name: m.url, detail: m.check_type })));
       })
       .catch(() => undefined);
-  }, [isOpen, reset]);
+  }, [isOpen]);
 
   const selection = useMemo<ExportSelection>(
     () => ({ workflows: pickedWorkflows, monitors: pickedMonitors, personas: 'referenced' }),
@@ -427,6 +417,27 @@ export const ExportWizard: React.FC<Props> = ({ isOpen, onClose, initialSelectio
       )}
     </Modal>
   );
+};
+
+/**
+ * A closed-then-reopened wizard must start blank. React's answer to that is a
+ * fresh instance — a `key` — not an effect that unwinds every field with its own
+ * setState the moment `isOpen` flips.
+ *
+ * The counter advances on the CLOSED→OPEN edge only. Bumping it on close would
+ * tear down the subtree the modal's leave transition is still animating, and the
+ * dialog would vanish instead of fading. Comparing against the previous prop
+ * during render is React's documented way to adjust state from a prop without an
+ * effect; it settles in the same commit, so nothing renders with a stale key.
+ */
+export const ExportWizard: React.FC<Props> = (props) => {
+  const [session, setSession] = useState(0);
+  const [wasOpen, setWasOpen] = useState(props.isOpen);
+  if (props.isOpen !== wasOpen) {
+    setWasOpen(props.isOpen);
+    if (props.isOpen) setSession((n) => n + 1);
+  }
+  return <ExportWizardBody key={session} {...props} />;
 };
 
 /** Step subtitles, resolved through i18n at render time — a module-level `t()`

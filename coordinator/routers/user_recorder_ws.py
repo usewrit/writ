@@ -1009,6 +1009,16 @@ async def _recorder_ws_handler(websocket: WebSocket):
 
     # --- Phase 4: Register agent ---
     requested_agent_id = auth_msg.get("agent_id") or f"writ-{uuid.uuid4().hex[:12]}"
+    # BOUND BEFORE THE TRY, both of them. `_register_agent` returns the pair in a
+    # single unpacking, so a raise leaves NEITHER name assigned — and the recovery
+    # branch below used to re-bind only `agent_id` while the meta dict a few lines
+    # down reads `operator_max_sessions`. The degrade-to-in-memory path this except
+    # exists for therefore died on UnboundLocalError and took the agent's socket
+    # with it, on any transient DB fault: "database is locked" under write
+    # contention most of all, which is the normal failure mode of the SQLite this
+    # coordinator ships with.
+    agent_id = requested_agent_id
+    operator_max_sessions: Optional[int] = None
     try:
         async with AsyncSessionLocal() as db:
             agent_id, operator_max_sessions = await _register_agent(
@@ -1045,8 +1055,9 @@ async def _recorder_ws_handler(websocket: WebSocket):
             pass
         return
     except Exception as e:
+        # Keep serving on the pre-bound fallbacks: an unregistered agent is still
+        # a usable one (it just carries no operator override and no DB row).
         logger.error(f"Failed to register recorder agent: {e}")
-        agent_id = requested_agent_id
 
     # The agent advertises whether it has its own AI provider keys via the
     # `ai_keys_configured=1` connect query param (same source the old ws-gateway

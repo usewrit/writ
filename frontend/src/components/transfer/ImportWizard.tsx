@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 import clsx from 'clsx';
@@ -78,7 +78,7 @@ const KIND_LABEL: Record<string, string> = {
   webhooks: 'Webhook',
 };
 
-export const ImportWizard: React.FC<Props> = ({ isOpen, onClose, onImported }) => {
+const ImportWizardBody: React.FC<Props> = ({ isOpen, onClose, onImported }) => {
   const { t } = useTranslation();
 
   const [step, setStep] = useState<StepId>('file');
@@ -107,29 +107,12 @@ export const ImportWizard: React.FC<Props> = ({ isOpen, onClose, onImported }) =
   // One key per staged import, so a double-click cannot import twice.
   const idempotencyKey = useRef<string>('');
 
-  const reset = useCallback(() => {
-    setStep('file');
-    setFile(null);
-    setHeader(null);
-    setHeaderError(null);
-    setPassphrase('');
-    setUnlockError(null);
-    setAttemptsLeft(5);
-    setState(null);
-    setResolutions({});
-    setPersonaBindings({});
-    setSecretBindings({});
-    setNewSecretValues({});
-    setNotifyBindings({});
-    setCredentialChoices({});
-    setIncludeData(true);
-    setArmSchedules(false);
-    idempotencyKey.current = '';
-  }, []);
-
-  useEffect(() => {
-    if (isOpen) reset();
-  }, [isOpen, reset]);
+  // No reset pass: `ImportWizard` below remounts this body on every open, so all
+  // of the above is already at its initial value — including `idempotencyKey`,
+  // which a fresh mount gives a fresh ref. Clearing seventeen fields from an
+  // effect is what the cascading-render rule objects to, and it also kept the
+  // passphrase, the decrypted package and every entered secret alive in memory
+  // for as long as the parent page stayed mounted.
 
   // Personas + vault keys are the user's OWN data, loaded once we know the
   // package needs them. Silent: a failure here must not block the wizard.
@@ -433,6 +416,27 @@ export const ImportWizard: React.FC<Props> = ({ isOpen, onClose, onImported }) =
       )}
     </Modal>
   );
+};
+
+/**
+ * A closed-then-reopened wizard must start blank. React's answer to that is a
+ * fresh instance — a `key` — not an effect that clears every field with its own
+ * setState the moment `isOpen` flips.
+ *
+ * The counter advances on the CLOSED→OPEN edge only. Bumping it on close would
+ * tear down the subtree the modal's leave transition is still animating, and the
+ * dialog would vanish instead of fading. Comparing against the previous prop
+ * during render is React's documented way to adjust state from a prop without an
+ * effect; it settles in the same commit, so nothing renders with a stale key.
+ */
+export const ImportWizard: React.FC<Props> = (props) => {
+  const [session, setSession] = useState(0);
+  const [wasOpen, setWasOpen] = useState(props.isOpen);
+  if (props.isOpen !== wasOpen) {
+    setWasOpen(props.isOpen);
+    if (props.isOpen) setSession((n) => n + 1);
+  }
+  return <ImportWizardBody key={session} {...props} />;
 };
 
 /** Step subtitles as [key, English]. Resolved at RENDER time — a module-level

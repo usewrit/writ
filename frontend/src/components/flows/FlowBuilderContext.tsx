@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { createContext, useContext, useEffect, useCallback, useMemo, useState } from 'react';
 import { createStore, type StoreApi } from 'zustand/vanilla';
 import { useStoreWithEqualityFn } from 'zustand/traditional';
 import {
@@ -603,9 +603,15 @@ interface FlowBuilderProviderProps {
 
 export const FlowBuilderProvider: React.FC<FlowBuilderProviderProps> = ({ children, initialFlow, initialFlowDirty }) => {
   // One store per provider instance (mirrors the old per-mount useReducer state).
-  const storeRef = useRef<FlowStoreApi | undefined>(undefined);
-  if (!storeRef.current) storeRef.current = createFlowStore();
-  const store = storeRef.current;
+  //
+  // useState's lazy initialiser, NOT `if (!ref.current) ref.current = create()`:
+  // that idiom both writes and reads a ref during render, which is unsound under
+  // concurrent rendering — a render React throws away still constructs a store,
+  // and the resumed render reads whichever instance happened to land. useState
+  // gives the same construct-once-per-mount guarantee with none of that, and it
+  // is what the React Compiler's "cannot access refs during render" rule is
+  // pointing at.
+  const [store] = useState(createFlowStore);
 
   const loadReferenceData = useCallback(async () => {
     const { dispatch } = store.getState();

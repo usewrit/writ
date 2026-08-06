@@ -26,6 +26,7 @@ import asyncio
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 
 from routers import user_recorder_ws
 from routers.user_recorder_ws import (
@@ -90,6 +91,43 @@ def test_connected_agent_visible_to_consumers(ws_client):
 
     # After disconnect the agent drops out of the fleet.
     assert get_connected_recorder_meta(agent_id) is None
+
+
+def test_agent_still_served_when_registration_fails(ws_client, monkeypatch):
+    """A DB fault during registration must degrade to an in-memory agent rather
+    than kill the socket.
+
+    ``_register_agent`` returns ``(agent_id, operator_max_sessions)`` in a single
+    unpacking, so a raise leaves NEITHER name bound. The recovery branch re-bound
+    only the first, and the meta dict built right after reads the second — so the
+    handler died on UnboundLocalError before sending a frame, and the connect
+    failed with a bare ``anyio.EndOfStream``. That is what "database is locked"
+    under write contention produces on the SQLite this coordinator ships with,
+    and the degrade path the ``except`` exists for never once ran.
+
+    Every other test here connects against a migrated database, so none of them
+    exercise the branch; this one forces it.
+    """
+    async def _fail(*args, **kwargs):
+        raise OperationalError("SELECT agents.id FROM agents", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(user_recorder_ws, "_register_agent", _fail)
+
+    ws, agent_id = _connect_stub(ws_client, "stub-db-locked")
+    try:
+        assert agent_id == "stub-db-locked", "the requested id is kept when no row can be written"
+        meta = get_connected_recorder_meta(agent_id)
+        assert meta is not None, "an unregistered agent is still a connected one"
+        # No row means no operator override, so the effective cap falls back to
+        # the ceiling the token carries — not to the 2-slot default, which would
+        # quietly halve what the operator provisioned.
+        assert meta["max_sessions"] == 5
+        # The override itself is not in the public projection (safe fields only),
+        # so read the raw entry: it must be an explicit None, which is precisely
+        # the value that used to be unbound.
+        assert _agent_meta[agent_id]["operator_max_sessions"] is None
+    finally:
+        ws.__exit__(None, None, None)
 
 
 def test_byo_candidates_filter_role_and_keys():

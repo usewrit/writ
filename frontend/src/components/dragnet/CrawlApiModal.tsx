@@ -50,17 +50,18 @@ export const CrawlApiModal: React.FC<CrawlApiModalProps> = ({
 }) => {
   const { t } = useTranslation();
 
-  const [definition, setDefinition] = React.useState<CrawlDefinition | null>(existing ?? null);
+  // Only what THIS modal saved lives in state. The parent's `existing` is
+  // derived, not mirrored: it may still have been loading when the modal opened,
+  // and copying a late-arriving prop into state through an effect means an extra
+  // render pass showing the wrong panel — plus a stale value the moment the
+  // parent refetches. `saved` wins when present because a save is newer than
+  // anything the parent knew.
+  const [saved, setSaved] = React.useState<CrawlDefinition | null>(null);
+  const definition = saved ?? existing ?? null;
   const [saving, setSaving] = React.useState(false);
   const [maxAge, setMaxAge] = React.useState<number>(86400);
   const [mintedKey, setMintedKey] = React.useState<string | null>(null);
   const [minting, setMinting] = React.useState(false);
-
-  // Adopt a definition the parent discovers after mount (it may still have been
-  // loading when this modal opened).
-  React.useEffect(() => {
-    if (existing) setDefinition(existing);
-  }, [existing]);
 
   const origin = typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com';
   const apiBase = `${origin}/api/crawl/definitions`;
@@ -78,13 +79,13 @@ export const CrawlApiModal: React.FC<CrawlApiModalProps> = ({
       // echo every knob it ran with (politeness, shard sizing, path filters), so
       // rebuilding the config here would silently substitute defaults and save a
       // crawl that behaves differently from this one. The server reads the row.
-      const saved = await crawlApi.saveDefinition({
+      const created = await crawlApi.saveDefinition({
         name: crawl.name || crawl.seed_url,
         default_max_age_seconds: maxAge > 0 ? maxAge : null,
         from_crawl_id: crawl.id,
       });
-      setDefinition(saved);
-      onSaved?.(saved);
+      setSaved(created);
+      onSaved?.(created);
       toast.success(t('This crawl is now callable by API'));
     } catch {
       toast.error(t('Could not make this crawl callable'));

@@ -142,6 +142,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Admin bootstrap step skipped: {e}")
 
+    # Clear crawl dataset rows left behind by a removed crawl. SQLite recycles the
+    # deleted crawl's workflow id into the next workflow created, so a stray shard row
+    # would otherwise reappear as that workflow's extracted data (and as its last run).
+    # Idempotent; a clean database purges nothing.
+    try:
+        from database import AsyncSessionLocal as _BootSession
+        from services.crawl_orchestrator import purge_orphaned_crawl_datasets
+        async with _BootSession() as _db:
+            await purge_orphaned_crawl_datasets(_db)
+    except Exception as e:
+        logger.warning(f"Orphaned crawl-dataset purge skipped: {e}")
+
     # In-process Redis (fakeredis) — no external Redis server required. Shares
     # one keyspace/pub-sub bus across the process (see utils.inproc_redis).
     global redis_client

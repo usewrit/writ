@@ -35,6 +35,11 @@ CRAWL_WORKFLOW_TYPE = "crawl"
 # Step type the agent special-cases as a distributed-crawl shard.
 CRAWL_STEP_TYPE = "crawl_batch"
 
+# AutomationTask.trigger_type stamped on every shard run. Crawl pages and workflow
+# runs share the automation_tasks table, so this is what tells the two apart — a
+# workflow's dataset must never serve shard rows, and vice versa.
+CRAWL_TRIGGER_TYPE = "crawl"
+
 # trigger_context keys carrying per-shard payload (kept underscored like the
 # other private dispatch keys, e.g. _queued_form_data / _marketplace).
 CTX_CRAWL_ID = "_crawl_id"

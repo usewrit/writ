@@ -14,7 +14,7 @@ import httpx
 from utils.http_client import http_session
 from utils.redis_client import get_redis
 from datetime import datetime, timezone
-from typing import Optional, List, Any, Dict, Literal
+from typing import Optional, List, Any, Dict, Literal, Union
 from fastapi import APIRouter, Depends, HTTPException, Request, status, Query, BackgroundTasks
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,10 +33,38 @@ from security.infra_redaction import redact_infra, redact_result_data
 from config import settings
 from utils.recorder_auth import generate_push_jwt
 from services import dataset_formats
+from services.brand import CRAWL_WORKFLOW_TYPE, CRAWL_TRIGGER_TYPE
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/automation", tags=["Automation"])
+
+
+def _is_crawl_dataset(workflow) -> bool:
+    """True for the SYNTHETIC per-crawl workflow a crawl's shard results aggregate
+    under (crawl_orchestrator._mint_crawl_workflow).
+
+    A crawl is not a workflow. It only borrows the automation_workflows /
+    automation_tasks tables as storage, and every recipe surface below must treat
+    that row as if it did not exist.
+    """
+    return getattr(workflow, "workflow_type", None) == CRAWL_WORKFLOW_TYPE
+
+
+def _reject_crawl_dataset(workflow, workflow_id: int) -> None:
+    """404 a crawl's synthetic dataset row on the WORKFLOW (recipe) surfaces.
+
+    Without this the crawl shows up in the workflow library, can be opened, run,
+    edited, duplicated and deleted as though it were a recorded workflow — and
+    opening one 500s, since a shard's extracted_data is a list of pages, not a
+    workflow result. Its data stays reachable through the Outputs explorer and
+    /crawls/{id}, which is where a crawl dataset belongs.
+    """
+    if _is_crawl_dataset(workflow):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow {workflow_id} not found",
+        )
 
 
 async def _screen_entry_url(entry_url: Optional[str]) -> None:
@@ -215,7 +243,13 @@ class WorkflowResponse(BaseModel):
     last_run_status: Optional[str] = None
     last_run_task_id: Optional[int] = None
     last_run_error: Optional[str] = None
-    last_run_extracted_data: Optional[dict] = None
+    # A run's extracted_data is EITHER a single record (dict) OR a list of them —
+    # a recorded workflow that scrapes a listing page returns the list form, and so
+    # does every crawl shard. Typing this `dict` made the detail endpoint 500 on any
+    # such run (pydantic: "Input should be a valid dictionary"), which took the whole
+    # workflow page down. Mirrors services/extracted_data_table.py, which has always
+    # accepted both shapes.
+    last_run_extracted_data: Optional[Union[dict, list]] = None
     # Presence flag so the list can show the "view data" affordance without
     # shipping the (potentially multi-MB) extracted dataset on every poll;
     # the actual data is lazy-fetched from GET /workflows/{id}.
@@ -1036,6 +1070,11 @@ async def list_workflows(
         # install-proxy or soft-archive columns / relationships to load here.
     )
 
+    # A crawl's synthetic dataset workflow is storage, not a recipe — never list it
+    # as one (see _reject_crawl_dataset). Crawl datasets are reached from /crawls
+    # and the Outputs explorer.
+    query = query.where(AutomationWorkflow.workflow_type != CRAWL_WORKFLOW_TYPE)
+
     allowed_ids = filter_by_scope(_api_key, "workflows")
     if allowed_ids is not None and len(allowed_ids) > 0:
         query = query.where(AutomationWorkflow.id.in_(allowed_ids))
@@ -1064,6 +1103,9 @@ async def list_workflows(
             )
             .where(
                 AutomationTask.workflow_id.in_(workflow_ids),
+                # Crawl shards are not runs of this workflow — see the same guard on
+                # the detail endpoint.
+                AutomationTask.trigger_type != CRAWL_TRIGGER_TYPE,
             )
             .group_by(AutomationTask.workflow_id)
             .subquery()
@@ -1075,6 +1117,7 @@ async def list_workflows(
                 (AutomationTask.workflow_id == latest_subq.c.workflow_id)
                 & (AutomationTask.created_at == latest_subq.c.max_created),
             )
+            .where(AutomationTask.trigger_type != CRAWL_TRIGGER_TYPE)
         )
         for task in tasks_result.scalars().all():
             last_tasks[task.workflow_id] = task
@@ -1499,6 +1542,7 @@ async def get_workflow(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Workflow {workflow_id} not found"
         )
+    _reject_crawl_dataset(workflow, workflow_id)
 
     # The latest run, so `last_run_status` is populated here exactly as it is by the
     # LIST endpoint. Omitting it left the field permanently None on the detail
@@ -1508,6 +1552,11 @@ async def get_workflow(
     last_task_result = await db.execute(
         select(AutomationTask)
         .where(AutomationTask.workflow_id == workflow_id)
+        # Never let a crawl shard pose as this workflow's last run. automation_workflows.id
+        # is a bare SQLite rowid alias (no AUTOINCREMENT), so a deleted crawl's id is handed
+        # to the NEXT workflow created — and any shard row that outlived its crawl would
+        # otherwise resurface here as that workflow's run.
+        .where(AutomationTask.trigger_type != CRAWL_TRIGGER_TYPE)
         .order_by(AutomationTask.created_at.desc(), AutomationTask.id.desc())
         .limit(1)
     )
@@ -1540,6 +1589,7 @@ async def get_workflow_deps(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Workflow {workflow_id} not found",
         )
+    _reject_crawl_dataset(workflow, workflow_id)
 
     steps = workflow.steps or []
     form_data = workflow.form_data or {}
@@ -1591,6 +1641,7 @@ async def update_workflow(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Workflow {workflow_id} not found"
         )
+    _reject_crawl_dataset(workflow, workflow_id)
 
     # Update fields if provided
     if request.name is not None:
@@ -1784,6 +1835,10 @@ async def delete_workflow(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Workflow {workflow_id} not found"
         )
+    # Deleting a crawl's dataset row from here would drop the crawl's pages while
+    # leaving the CrawlJob pointing at nothing. Remove the crawl instead
+    # (DELETE /crawl/{id}), which tears down both halves together.
+    _reject_crawl_dataset(workflow, workflow_id)
 
     was_scheduled = workflow.schedule_enabled
 
@@ -1816,6 +1871,9 @@ async def duplicate_workflow(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Workflow {workflow_id} not found"
         )
+    # Copying a crawl's dataset row would mint a second synthetic workflow with a
+    # crawl_batch step and no crawl behind it — a run of it does nothing.
+    _reject_crawl_dataset(workflow, workflow_id)
 
     # Installed PROXY = read-only. Duplicating would copy the creator's recipe
     # logic into a fully editable own workflow (IP exfiltration). Forbid.
@@ -2438,9 +2496,16 @@ async def _process_task_completion(
     task.completed_at = now
     task.success = success
 
+    # DRAGNET: a crawl shard is an AutomationTask under the crawl's SYNTHETIC dataset
+    # workflow. It is not a run OF that row and must not write to it — a 30-shard crawl
+    # would otherwise count as 30 workflow runs, stamp last_run_at, and skew the rolling
+    # duration estimate with per-shard timings. Crawl progress lives on the CrawlJob
+    # (shards_done), which on_shard_complete below advances. The row is still needed
+    # below (persona TTL, failure classification), so flag it rather than dropping it.
+    _is_crawl_shard = _is_crawl_dataset(workflow)
 
     # Update workflow run counters and failure tracking
-    if workflow:
+    if workflow and not _is_crawl_shard:
         workflow.total_run_count = (workflow.total_run_count or 0) + 1
         if success:
             workflow.consecutive_failures = 0
@@ -2451,7 +2516,7 @@ async def _process_task_completion(
             workflow.last_failure_error = error
 
     # Update workflow usage count, duration estimate
-    if success and workflow:
+    if success and workflow and not _is_crawl_shard:
         workflow.usage_count = (workflow.usage_count or 0) + 1
         workflow.last_run_at = now
 
@@ -2464,7 +2529,7 @@ async def _process_task_completion(
                 )
             else:
                 workflow.estimated_duration_ms = duration
-    elif not success and workflow:
+    elif not success and workflow and not _is_crawl_shard:
         workflow.last_run_at = now
 
     if not success:
@@ -2494,7 +2559,10 @@ async def _process_task_completion(
         # validation / AI-generation tasks (they surface their own status on the
         # AI session, not the inbox). Best-effort: the whole block is guarded so a
         # notification can never break task completion.
-        if task.trigger_type not in ("validation",):
+        # "crawl": one shard failing is not a run the owner should be paged about —
+        # a page-level failure is normal crawl attrition, and a 30-shard crawl would
+        # fill the inbox. The crawl surfaces its own outcome when it finalizes.
+        if task.trigger_type not in ("validation", CRAWL_TRIGGER_TYPE):
             try:
                 from services import platform_notifier
                 _wf_name = (workflow.name if workflow else None) or "workflow"
@@ -2594,7 +2662,12 @@ async def _process_task_completion(
         pass
 
     # Dispatch workflow_completed triggers
-    if workflow:
+    #
+    # DRAGNET guard: a crawl shard must not masquerade as a workflow run, or a global
+    # `workflow_completed` automation fires once per shard (dozens of times per crawl).
+    # The crawl emits a single `crawl_completed` on convergence instead
+    # (crawl_orchestrator._finalize). on_shard_complete below still runs.
+    if workflow and not _is_crawl_shard:
         try:
             from services.unified_trigger_service import get_unified_trigger_service
 
@@ -4581,6 +4654,10 @@ async def run_workflow(
     install = None
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    # A crawl's dataset row is not runnable: its single crawl_batch step expects a
+    # per-shard URL batch in trigger_context that only the orchestrator mints. Start
+    # a crawl from /crawls instead.
+    _reject_crawl_dataset(workflow, workflow_id)
 
     # Parse optional body (tolerant of empty or missing)
     try:
@@ -4775,11 +4852,19 @@ async def _load_workflow_for_data(db: AsyncSession, workflow_id: int, _api_key: 
     return wf
 
 
-async def _scan_workflow_data_tasks(db: AsyncSession, workflow_id: int):
+async def _scan_workflow_data_tasks(db: AsyncSession, workflow_id: int, *, workflow=None):
     """Most-recent runs of a workflow that produced a real extracted_data value,
     bounded by _DATA_SCAN_CAP. Returns (tasks, truncated). No row locks needed
     for DELETE's in-transaction uid resolution — the coordinator is a
-    single-writer SQLite deployment."""
+    single-writer SQLite deployment.
+
+    SUBSYSTEM SCOPING. Crawl pages and workflow runs share automation_tasks, and
+    ``automation_workflows.id`` is a bare SQLite rowid alias — deleting a crawl frees
+    its id for the NEXT workflow created. Matching on workflow_id alone therefore
+    let a freshly recorded workflow serve a dead crawl's pages as its own dataset.
+    Pass ``workflow`` so the scan is pinned to the right side: a crawl dataset reads
+    only shard runs, a workflow reads only its own. (Omitting it keeps the legacy
+    id-only behaviour for callers that have no workflow row in hand.)"""
     recency = func.coalesce(AutomationTask.completed_at, AutomationTask.created_at)
     q = (
         select(AutomationTask)
@@ -4788,6 +4873,13 @@ async def _scan_workflow_data_tasks(db: AsyncSession, workflow_id: int):
         .order_by(recency.desc())
         .limit(_DATA_SCAN_CAP)
     )
+    if workflow is not None:
+        # trigger_type is NOT NULL (defaults to on_change), so a plain != is exact.
+        q = q.where(
+            AutomationTask.trigger_type == CRAWL_TRIGGER_TYPE
+            if _is_crawl_dataset(workflow)
+            else AutomationTask.trigger_type != CRAWL_TRIGGER_TYPE
+        )
     res = await db.execute(q)
     tasks = list(res.scalars().all())
     return tasks, len(tasks) >= _DATA_SCAN_CAP
@@ -4859,7 +4951,7 @@ async def get_workflow_data_facets(
         check_api_key_scope(_api_key, "workflows", "read", workflow_id)
     view = _validate_data_lens_params(view, run_id, collection)
     wf = await _load_workflow_for_data(db, workflow_id, _api_key)
-    tasks, truncated = await _scan_workflow_data_tasks(db, workflow_id)
+    tasks, truncated = await _scan_workflow_data_tasks(db, workflow_id, workflow=wf)
     if view == "all":
         columns, rows = edt.flatten(
             tasks,
@@ -4957,7 +5049,7 @@ async def get_workflow_data(
     fmt = dataset_formats.norm_format(format, default="json")
     view = _validate_data_lens_params(view, run_id, collection)
     wf = await _load_workflow_for_data(db, workflow_id, _api_key)
-    tasks, truncated = await _scan_workflow_data_tasks(db, workflow_id)
+    tasks, truncated = await _scan_workflow_data_tasks(db, workflow_id, workflow=wf)
     if view == "all":
         table = edt.build_table(
             tasks,
@@ -5049,7 +5141,7 @@ async def export_workflow_data(
         check_api_key_scope(_api_key, "workflows", "read", workflow_id)
     view = _validate_data_lens_params(view, run_id, collection)
     wf = await _load_workflow_for_data(db, workflow_id, _api_key)
-    tasks, _ = await _scan_workflow_data_tasks(db, workflow_id)
+    tasks, _ = await _scan_workflow_data_tasks(db, workflow_id, workflow=wf)
     if view == "all":
         table = edt.build_table(
             tasks,
@@ -5112,7 +5204,7 @@ async def get_workflow_data_runs(
     if isinstance(_api_key, dict):
         check_api_key_scope(_api_key, "workflows", "read")
     wf = await _load_workflow_for_data(db, workflow_id, _api_key)
-    tasks, truncated = await _scan_workflow_data_tasks(db, workflow_id)
+    tasks, truncated = await _scan_workflow_data_tasks(db, workflow_id, workflow=wf)
     index = edt.build_runs_index(
         tasks, declared=_declared_output_fields(wf), redactor=redact_result_data, key=key
     )
@@ -5141,7 +5233,7 @@ async def get_workflow_record_history(
     if isinstance(_api_key, dict):
         check_api_key_scope(_api_key, "workflows", "read")
     wf = await _load_workflow_for_data(db, workflow_id, _api_key)
-    tasks, truncated = await _scan_workflow_data_tasks(db, workflow_id)
+    tasks, truncated = await _scan_workflow_data_tasks(db, workflow_id, workflow=wf)
     history, identity = edt.build_record_history(
         tasks, record_uid, declared=_declared_output_fields(wf), redactor=redact_result_data, key=key
     )
@@ -5193,7 +5285,7 @@ async def list_data_workflows(
         # Materialize the SAME per-run entries the picker's table opens to; skip
         # workflows whose runs all flatten to zero rows (the "empty runs" the
         # picker must hide). The entries also feed last_delta — no second scan.
-        tasks, _ = await _scan_workflow_data_tasks(db, w.id)
+        tasks, _ = await _scan_workflow_data_tasks(db, w.id, workflow=w)
         if not tasks:
             continue
         declared_w = _declared_output_fields(w)
@@ -5216,7 +5308,7 @@ async def list_data_workflows(
     # A crawl is not a workflow: the Data explorer links its dataset back to the
     # crawl detail (/crawls/{crawl_id}), not the workflow page. Map each crawl
     # dataset's workflow_id → its crawl id in one query.
-    crawl_wf_ids = [d["workflow_id"] for d in out if d.get("workflow_type") == "crawl"]
+    crawl_wf_ids = [d["workflow_id"] for d in out if d.get("workflow_type") == CRAWL_WORKFLOW_TYPE]
     if crawl_wf_ids:
         from models.crawl_job import CrawlJob
         cj_res = await db.execute(
@@ -5227,6 +5319,14 @@ async def list_data_workflows(
             cid = wf_to_crawl.get(d["workflow_id"])
             if cid is not None:
                 d["crawl_id"] = cid
+        # A crawl dataset whose CrawlJob is gone is an ORPHAN — the crawl it belonged
+        # to was removed, so there is nothing to open and no owner to attribute the
+        # pages to. Hide it rather than listing pages under a dead name; the startup
+        # sweep (bootstrap._purge_orphaned_crawl_datasets) clears the rows.
+        out = [
+            d for d in out
+            if d.get("workflow_type") != CRAWL_WORKFLOW_TYPE or d.get("crawl_id") is not None
+        ]
     out.sort(key=lambda x: x["last_data_at"] or "", reverse=True)
     return {"workflows": out}
 
@@ -5325,7 +5425,7 @@ async def delete_dataset_records(db: AsyncSession, wf, request: "DeleteExtracted
     resolved: dict[str, int] = {}
     unmatched: list[str] = []
     if request.record_uids:
-        scan_tasks, _truncated = await _scan_workflow_data_tasks(db, wf.id)
+        scan_tasks, _truncated = await _scan_workflow_data_tasks(db, wf.id, workflow=wf)
         uid_by_run, resolved, unmatched, _identity = edt.resolve_record_uids(
             scan_tasks,
             request.record_uids,
@@ -5906,6 +6006,7 @@ async def clear_captcha_block(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Workflow {workflow_id} not found"
         )
+    _reject_crawl_dataset(workflow, workflow_id)
 
     was_blocked = workflow.captcha_blocked
     workflow.captcha_blocked = False
@@ -5957,6 +6058,7 @@ async def trigger_manual_repair(
     workflow = wf_result.scalar_one_or_none()
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    _reject_crawl_dataset(workflow, workflow_id)
 
     # Installed PROXY = read-only. AI-repair rewrites steps = recipe mutation;
     # re-syncing the recipe (re-install) is the sanctioned refresh path instead.
@@ -6126,6 +6228,7 @@ async def get_workflow_session(
     workflow = result.scalar_one_or_none()
     if not workflow:
         raise HTTPException(status_code=404, detail=f"Workflow {workflow_id} not found")
+    _reject_crawl_dataset(workflow, workflow_id)
 
     preferred = await SessionStateService.get_preferred_affinity(db, workflow_id)
     if not preferred:
@@ -6163,6 +6266,7 @@ async def clear_workflow_session(
     workflow = result.scalar_one_or_none()
     if not workflow:
         raise HTTPException(status_code=404, detail=f"Workflow {workflow_id} not found")
+    _reject_crawl_dataset(workflow, workflow_id)
 
     deleted = await SessionStateService.delete_sessions(db, workflow_id)
     await db.commit()

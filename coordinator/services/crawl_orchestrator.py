@@ -49,7 +49,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlsplit, urljoin, urldefrag
 
-from sqlalchemy import Integer, cast, select, func, update
+from sqlalchemy import Integer, cast, select, func, update, delete, exists, or_
 
 from database import AsyncSessionLocal
 from models.automation_task import AutomationTask
@@ -59,6 +59,7 @@ from services import url_policy, robots_guard, crawl_targeting, visual_storage
 from services.brand import (
     CRAWL_WORKFLOW_TYPE,
     CRAWL_STEP_TYPE,
+    CRAWL_TRIGGER_TYPE,
     CTX_CRAWL_ID,
     CTX_CRAWL_SHARD,
     CTX_CRAWL_EXTRACT,
@@ -715,7 +716,7 @@ async def _mint_shard_task(db, crawl: CrawlJob, batch: list) -> AutomationTask:
     task = AutomationTask(
         target_id=None,
         workflow_id=crawl.workflow_id,
-        trigger_type="crawl",
+        trigger_type=CRAWL_TRIGGER_TYPE,
         trigger_context={
             CTX_CRAWL_ID: crawl.id,
             CTX_CRAWL_SHARD: batch,
@@ -1375,6 +1376,80 @@ async def on_shard_complete(task: AutomationTask, result_data: Optional[dict]) -
 
 
 # --------------------------------------------------------------------------- #
+# Orphan repair                                                                #
+# --------------------------------------------------------------------------- #
+async def purge_orphaned_crawl_datasets(db) -> dict:
+    """Delete crawl dataset rows that no longer belong to any crawl. Idempotent.
+
+    A crawl borrows the workflow tables as storage: a synthetic AutomationWorkflow
+    (workflow_type='crawl') with one AutomationTask (trigger_type='crawl') per shard.
+    ``automation_workflows.id`` is a bare SQLite rowid alias — no AUTOINCREMENT — so
+    the id freed by a deleted crawl is handed straight to the NEXT workflow created.
+    Any shard row that outlives its crawl therefore RE-ATTACHES to that new workflow
+    and surfaces as its extracted data (and, being the newest task, as its last run).
+
+    Two shapes, both cleared here:
+
+    1. a synthetic crawl workflow no CrawlJob points at any more (its crawl was
+       removed by a build that deleted only the CrawlJob row), and
+    2. shard tasks hanging off a workflow that is not a crawl dataset at all — the
+       id-reuse case above, plus any left with no workflow.
+
+    Runs at startup, before the API serves. A crawl and its workflow are created in
+    ONE transaction (see start_crawl), so neither shape can be a crawl mid-creation.
+    """
+    log = logger
+    orphan_wfs = (
+        select(AutomationWorkflow.id)
+        .where(AutomationWorkflow.workflow_type == CRAWL_WORKFLOW_TYPE)
+        .where(~exists().where(CrawlJob.workflow_id == AutomationWorkflow.id))
+    )
+    orphan_wf_ids = [r for r in (await db.execute(orphan_wfs)).scalars().all()]
+
+    tasks_purged = 0
+    if orphan_wf_ids:
+        # Core DELETE bypasses the ORM relationship cascade, so clear the children
+        # explicitly rather than relying on it.
+        res = await db.execute(
+            delete(AutomationTask)
+            .where(AutomationTask.workflow_id.in_(orphan_wf_ids))
+            .execution_options(synchronize_session=False)
+        )
+        tasks_purged += res.rowcount or 0
+        await db.execute(
+            delete(AutomationWorkflow)
+            .where(AutomationWorkflow.id.in_(orphan_wf_ids))
+            .execution_options(synchronize_session=False)
+        )
+
+    # Shard rows whose workflow is missing, or is a real (non-crawl) workflow that
+    # merely inherited the id.
+    res = await db.execute(
+        delete(AutomationTask)
+        .where(AutomationTask.trigger_type == CRAWL_TRIGGER_TYPE)
+        .where(
+            or_(
+                AutomationTask.workflow_id.is_(None),
+                ~exists().where(
+                    (AutomationWorkflow.id == AutomationTask.workflow_id)
+                    & (AutomationWorkflow.workflow_type == CRAWL_WORKFLOW_TYPE)
+                ),
+            )
+        )
+        .execution_options(synchronize_session=False)
+    )
+    tasks_purged += res.rowcount or 0
+
+    if orphan_wf_ids or tasks_purged:
+        await db.commit()
+        log.info(
+            f"[{DRAGNET_NAME}] purged {len(orphan_wf_ids)} orphaned crawl dataset(s) "
+            f"and {tasks_purged} orphaned crawl page row(s)"
+        )
+    return {"workflows": len(orphan_wf_ids), "tasks": tasks_purged}
+
+
+# --------------------------------------------------------------------------- #
 # Public: start / cancel                                                       #
 # --------------------------------------------------------------------------- #
 async def _mint_crawl_workflow(db, crawl: CrawlJob) -> AutomationWorkflow:
@@ -1603,7 +1678,7 @@ async def sweep_crawls() -> None:
         async with AsyncSessionLocal() as db:
             stale = (await db.execute(
                 select(AutomationTask.id, AutomationTask.trigger_context)
-                .where(AutomationTask.trigger_type == "crawl")
+                .where(AutomationTask.trigger_type == CRAWL_TRIGGER_TYPE)
                 .where(AutomationTask.status.in_(("assigned", "running")))
                 .where(AutomationTask.created_at
                        < now - timedelta(seconds=_SHARD_STALE_AFTER_S))

@@ -32,7 +32,11 @@ export const DataWidget: React.FC<{
     { enabled: !!workflow?.id, silent: true, staleTime: 15000 },
   );
   const latestRow = table?.rows?.[0];
-  const last = latestRow?.fields ?? (workflow.last_run_extracted_data as Record<string, unknown> | undefined);
+  // A run's extracted_data is EITHER a single record OR a list of them (a listing-page
+  // scrape returns the list form). Peek at the first record either way — Object.entries
+  // on a raw list would render array indices as field names.
+  const lastRaw = latestRow?.fields ?? workflow.last_run_extracted_data;
+  const last = (Array.isArray(lastRaw) ? lastRaw[0] : lastRaw) as Record<string, unknown> | undefined;
   const entries = last && typeof last === 'object' ? Object.entries(last) : [];
   const lastAt = latestRow?.run_at ?? workflow.last_run_at;
 

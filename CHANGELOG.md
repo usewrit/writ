@@ -58,6 +58,30 @@ Initial public release.
   `writ_saved_crawl_data` (plus `save_as` on `writ_crawl_site`), and surfaced in the app
   as a *Call this crawl* panel on the crawl page.
 
+### Fixed
+
+- **A crawl is no longer mistaken for a workflow.** A crawl stores its pages under a
+  synthetic workflow row (`workflow_type='crawl'`, one task per shard), and nothing kept
+  that row out of the workflow surfaces. Three consequences, all fixed:
+
+  1. **The workflows page crashed.** `WorkflowResponse.last_run_extracted_data` was typed
+     `dict`, but a shard's result is a LIST of pages — so opening a crawl returned
+     `ValidationError: Input should be a valid dictionary`. This also took down any
+     ordinary workflow that extracts a list of rows (a scraped listing page), which had
+     nothing to do with crawls. The field now accepts both shapes.
+  2. **Crawls were listed as workflows**, and could be opened, run, edited, duplicated or
+     deleted as one. Crawl datasets are now excluded from the workflow library and 404 on
+     the recipe surfaces; their data stays reachable from Outputs and `/crawls/{id}`.
+  3. **A removed crawl's pages could reappear inside a new workflow.**
+     `automation_workflows.id` is a bare SQLite rowid alias, so the id freed by a deleted
+     crawl is handed to the next workflow created; any shard row that outlived its crawl
+     re-attached to that workflow and showed up as its extracted data and its last run.
+     Dataset reads are now scoped by subsystem (a workflow never serves shard rows, and
+     vice versa), and startup purges crawl rows whose crawl is gone.
+
+  Crawl shards also no longer inflate a workflow's run counters, fire a
+  `workflow_completed` trigger per shard, or raise a `run_failed` notification per page.
+
 ### Added
 
 - **Coordinator** — FastAPI + a single SQLite file; no external database or

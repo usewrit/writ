@@ -14,6 +14,19 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+#: Outbound delivery headers.
+SIGNATURE_HEADER = "X-Writ-Signature"
+TIMESTAMP_HEADER = "X-Writ-Timestamp"
+
+#: Replay-resistant signature, sent ALONGSIDE ``X-Writ-Signature``. It covers
+#: ``timestamp + "." + body`` — the same material the INBOUND verifier binds — so
+#: a captured delivery cannot be replayed under a forged timestamp the way a
+#: body-only MAC allows. Adding it as a second header rather than changing what
+#: ``X-Writ-Signature`` means keeps every deployed consumer verifying.
+SIGNATURE_V1_HEADER = "X-Writ-Signature-V1"
+
+USER_AGENT = "Writ-Webhook/1.0"
+
 
 class WebhookNotifier:
     """
@@ -81,8 +94,7 @@ class WebhookNotifier:
         """
         request_headers = {
             "Content-Type": "application/json",
-            "User-Agent": "Writ-Webhook/1.0",
-            "X-Writ-Timestamp": str(int(time.time())),
+            "User-Agent": USER_AGENT,
         }
 
         # Add custom headers
@@ -92,10 +104,23 @@ class WebhookNotifier:
         # Serialize payload
         payload_str = json.dumps(payload, default=str)
 
+        # Timestamp and signatures are set AFTER the custom-header merge: they are
+        # signed material, so a recipient-supplied header must never be able to
+        # overwrite them and invalidate every delivery to that endpoint.
+        # Stamped once, outside the retry loop, so a redelivery carries the same
+        # signature and the recipient's replay dedupe recognises it as one event.
+        timestamp = str(int(time.time()))
+        request_headers[TIMESTAMP_HEADER] = timestamp
+
         # Add signature if secret provided
         if secret:
-            signature = self._generate_signature(payload_str, secret)
-            request_headers["X-Writ-Signature"] = f"sha256={signature}"
+            request_headers[SIGNATURE_HEADER] = (
+                f"sha256={self._generate_signature(payload_str, secret)}"
+            )
+            # v1 binds the timestamp into the MAC; prefer it when verifying.
+            request_headers[SIGNATURE_V1_HEADER] = "sha256=" + self._generate_signature(
+                f"{timestamp}.{payload_str}", secret
+            )
 
         # SSRF hardening: the webhook destination is recipient-supplied and was
         # never re-validated at send time, leaving a DNS-rebinding window (a

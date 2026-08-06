@@ -218,7 +218,10 @@ def client(monkeypatch):
     async def _load(db, workflow_id, api_key):
         return _Wf()
 
-    async def _scan(db, workflow_id, for_update=False):
+    # Signature mirrors the real helper: routes pass the loaded workflow row so the
+    # scan can pin itself to the right subsystem (a workflow's dataset never serves
+    # crawl shard rows, and vice versa).
+    async def _scan(db, workflow_id, for_update=False, workflow=None):
         return [object()], False
 
     monkeypatch.setattr(automation, "check_api_key_scope", lambda *a, **kw: None)

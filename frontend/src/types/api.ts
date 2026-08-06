@@ -318,7 +318,8 @@ export interface AutomationWorkflow {
   last_run_status?: string | null;
   last_run_task_id?: number | null;
   last_run_error?: string | null;
-  last_run_extracted_data?: Record<string, any> | null;
+  /** One record, or a LIST of records when the run extracted multiple rows. */
+  last_run_extracted_data?: Record<string, any> | unknown[] | null;
   // Presence flag from the polled list (the blob itself is lazy-fetched).
   last_run_has_extracted_data?: boolean;
   // Captcha handling

@@ -6,6 +6,34 @@ file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-08-09
+
+### Fixed
+
+- **The onboarding tour's buttons could sit outside its own card.** The tour
+  panel was a fixed 312px, and its footer laid out a per-step progress dot beside
+  Skip / Back / Next. Dots don't shrink — twelve of them hold about 44px of the
+  row open no matter what — so the primary button was pushed roughly 35px past
+  the card's edge in English, and considerably further in French, where
+  "Ignorer / Retour / Suivant" runs about half again as wide as
+  "Skip / Back / Next". A first-time operator could reach the last step of
+  onboarding and not be able to click **Done**.
+
+  The dot strip is now a single progress track that flexes down to nothing, the
+  three actions travel together as one non-shrinking group, and the panel is
+  340px — sized for the longest language rather than for English. The track
+  carries `role="progressbar"` with the step number, so the progress is now
+  announced rather than being decorative markup a screen reader skipped.
+
+- **Two invisible elements caused by an invalid utility class.** The tour's
+  progress dots and the automation builder's loading indicator both asked for
+  `bg-border-border-strong`, which is not a class — the token is `border-strong`,
+  so the correct utility is `bg-border-strong`. Tailwind emits nothing for a
+  class it cannot resolve, so both elements rendered with no background at all
+  and simply were not visible. No warning is produced for this at build time,
+  which is why it survived: the only way to catch it is to build and diff the
+  emitted CSS.
+
 ## [1.0.0] - 2026-08-06
 
 Initial public release, tagged `v1.0.0`.

@@ -243,7 +243,10 @@ const TourLayer: React.FC<LayerProps> = ({ step, index, total, isLast, reduce, o
         aria-label={step.title}
         className={clsx(
           'absolute bg-surface text-ink rounded-xl shadow-2xl border border-border-strong p-4',
-          step.wide ? 'w-[400px]' : 'w-[312px]',
+          // 340, not 312: the footer's three actions are ~237px wide in French
+          // (vs ~194 in English), and at 312 that left the progress track a
+          // 29px stub. The extra 28px is the room the longest language needs.
+          step.wide ? 'w-[400px]' : 'w-[340px]',
           'max-w-[calc(100vw-24px)]',
         )}
         style={{
@@ -280,45 +283,60 @@ const TourLayer: React.FC<LayerProps> = ({ step, index, total, isLast, reduce, o
           {step.extra && <div className="mt-3">{step.extra}</div>}
         </div>
 
-        <div className="flex items-center gap-2 mt-4">
-          <div className="flex items-center gap-1" aria-hidden>
-            {Array.from({ length: total }).map((_, i) => (
-              <span
-                key={i}
-                className={clsx(
-                  'h-1 rounded-full transition-all duration-200',
-                  i === index ? 'w-4 bg-ink' : 'w-1 bg-border-border-strong',
-                )}
-              />
-            ))}
-          </div>
-          <div className="flex-1" />
-          <button
-            type="button"
-            onClick={onSkip}
-            className="px-2.5 py-1.5 text-[12px] font-medium text-tertiary hover:text-ink rounded-lg hover:bg-hover transition-colors"
+        {/* The footer is sized by the LONGEST language, not by English.
+            "Ignorer / Retour / Suivant" is half again as wide as "Skip / Back /
+            Next", and a per-step dot strip cannot give the difference back: its
+            gaps don't shrink, so twelve dots hold ~44px of the row open no
+            matter what — which pushed the primary button clean outside a 312px
+            card in French (and already by 35px in English). So the three
+            actions travel as ONE non-shrinking group, and the progress readout
+            is a single track that flexes down to nothing. The authoritative
+            count is the "Step n of N" line above; this is just the shape of it. */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 mt-4">
+          <div
+            className="flex-1 min-w-0 h-1 rounded-full bg-border-strong overflow-hidden"
+            role="progressbar"
+            aria-valuemin={1}
+            aria-valuemax={total}
+            aria-valuenow={index + 1}
+            aria-label={t('Step {{n}} of {{total}}', { n: index + 1, total })}
           >
-            {t('Skip')}
-          </button>
-          {index > 0 && (
+            <div
+              className="h-full rounded-full bg-ink"
+              style={{
+                width: `${((index + 1) / total) * 100}%`,
+                transition: reduce ? 'none' : 'width 200ms var(--ease-out)',
+              }}
+            />
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
-              onClick={onBack}
-              className="flex items-center gap-1 px-2.5 py-1.5 text-[12px] font-medium text-secondary hover:text-ink border border-border rounded-lg hover:bg-hover transition-colors"
+              onClick={onSkip}
+              className="px-2.5 py-1.5 text-[12px] font-medium whitespace-nowrap text-tertiary hover:text-ink rounded-lg hover:bg-hover transition-colors"
             >
-              <ArrowLeftIcon className="w-3 h-3" />
-              {t('Back')}
+              {t('Skip')}
             </button>
-          )}
-          <button
-            ref={nextRef}
-            type="button"
-            onClick={onNext}
-            className="flex items-center gap-1 px-3 py-1.5 text-[12px] font-semibold bg-accent-strong text-accent-on rounded-lg shadow-sm hover:bg-accent-strong/90 transition-colors"
-          >
-            {isLast ? t('Done') : t('Next')}
-            {isLast ? <CheckIcon className="w-3 h-3" /> : <ArrowRightIcon className="w-3 h-3" />}
-          </button>
+            {index > 0 && (
+              <button
+                type="button"
+                onClick={onBack}
+                className="flex items-center gap-1 px-2.5 py-1.5 text-[12px] font-medium whitespace-nowrap text-secondary hover:text-ink border border-border rounded-lg hover:bg-hover transition-colors"
+              >
+                <ArrowLeftIcon className="w-3 h-3 shrink-0" />
+                {t('Back')}
+              </button>
+            )}
+            <button
+              ref={nextRef}
+              type="button"
+              onClick={onNext}
+              className="flex items-center gap-1 px-3 py-1.5 text-[12px] font-semibold whitespace-nowrap bg-accent-strong text-accent-on rounded-lg shadow-sm hover:bg-accent-strong/90 transition-colors"
+            >
+              {isLast ? t('Done') : t('Next')}
+              {isLast ? <CheckIcon className="w-3 h-3 shrink-0" /> : <ArrowRightIcon className="w-3 h-3 shrink-0" />}
+            </button>
+          </div>
         </div>
       </div>
     </div>

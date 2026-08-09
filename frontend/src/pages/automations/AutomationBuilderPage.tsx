@@ -156,7 +156,7 @@ export const AutomationBuilderPage: React.FC = () => {
     return (
       <>
         <div className="flex flex-col items-center justify-center h-full text-center">
-          <div className="w-2 h-2 rounded-full bg-border-border-strong animate-pulse mb-3" />
+          <div className="w-2 h-2 rounded-full bg-border-strong animate-pulse mb-3" />
           <p className="text-xs text-tertiary">{id ? t('Loading automation…') : t('Setting up the builder…')}</p>
         </div>
       </>

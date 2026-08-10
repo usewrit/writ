@@ -26,11 +26,14 @@ deleted so storage can't leak orphans.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import unicodedata
+import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -311,6 +314,76 @@ async def signed_get(db: AsyncSession, file_id: str, ttl: Optional[int] = None) 
     return visual_storage.presigned_file_get(f.storage_key, expires_seconds=ttl, provider=None)
 
 
+# ---------------------------------------------------------------------------
+# Agent-fetchable download URLs
+#
+# An agent has no user credentials, so it cannot call the ownership-checked
+# /files/{id}/content route — it needs a self-authenticating URL. Presigned STORAGE
+# URLs are the cheap path, but `visual_storage` presigns with the PUBLIC MinIO
+# client, which defaults to `localhost:9000`: on any deployment where the agent is
+# not the same box as MinIO it then fetches ITSELF, and an upload step silently
+# receives no bytes. Set MINIO_PUBLIC_ENDPOINT to a reachable host to keep the
+# direct path; otherwise this falls back to a token against the coordinator API,
+# so storage need not be published at all.
+# ---------------------------------------------------------------------------
+_DOWNLOAD_TOKEN_TTL_SECONDS = 3600
+
+
+def make_download_token(file_id: str, ttl_seconds: int = _DOWNLOAD_TOKEN_TTL_SECONDS) -> str:
+    """Short-lived, single-FILE bearer token for the tokened download route."""
+    from security.encryption import SecretEncryption
+    payload = {
+        "jti": _uuid.uuid4().hex,
+        "file_id": str(file_id),
+        "exp": (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).timestamp(),
+    }
+    return SecretEncryption.encrypt_secret(json.dumps(payload))
+
+
+def verify_download_token(token: str) -> dict:
+    """Decrypt + expiry-check a download token. Raises HTTPException(403) if invalid."""
+    from security.encryption import SecretEncryption
+    try:
+        data = json.loads(SecretEncryption.decrypt_secret(token))
+    except Exception:
+        raise HTTPException(status_code=403, detail="Invalid download token")
+    if float(data.get("exp", 0)) < datetime.now(timezone.utc).timestamp():
+        raise HTTPException(status_code=403, detail="Download token expired")
+    if not data.get("file_id"):
+        raise HTTPException(status_code=403, detail="Invalid download token")
+    return data
+
+
+def _api_public_base() -> str:
+    """Public, agent-reachable base for API URLs, WITHOUT a trailing slash."""
+    base = (getattr(settings, "api_public_base_url", "") or "").strip()
+    if base:
+        return base.rstrip("/")
+    fe = (settings.frontend_url or "").strip().rstrip("/")
+    return f"{fe}/api" if fe else "/api"
+
+
+def _is_public_url(url: Optional[str]) -> bool:
+    """True when a presigned URL is actually reachable from off-box (not localhost /
+    loopback / private / .internal), so we never hand an agent a URL that resolves to
+    its own machine."""
+    if not url:
+        return False
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except Exception:
+        return False
+    if not host or host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return False
+    if host.endswith(".local") or host.endswith(".internal"):
+        return False
+    try:
+        import ipaddress
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        return "." in host
+
+
 async def resolve_for_run(db: AsyncSession, file_id: str, ttl: Optional[int] = None) -> dict:
     """Resolve one file to a dispatch descriptor for the run files-map (§4.1):
     ``{file_id, url, filename, content_type, size}``. Ownership-checked (404 if
@@ -320,6 +393,11 @@ async def resolve_for_run(db: AsyncSession, file_id: str, ttl: Optional[int] = N
     f = await get_file(db, file_id)
     ttl = int(ttl or settings.file_signed_url_ttl_seconds or 600)
     url = visual_storage.presigned_file_get(f.storage_key, expires_seconds=ttl, provider=None)
+    # Fall back to the tokened API route when the presigned URL is not reachable
+    # off-box (the unset-MINIO_PUBLIC_ENDPOINT → localhost:9000 default).
+    if not _is_public_url(url):
+        token = make_download_token(f.id, ttl_seconds=max(ttl, 900))
+        url = f"{_api_public_base()}/files/dl/{token}"
     return {
         "file_id": f.id,
         "url": url,

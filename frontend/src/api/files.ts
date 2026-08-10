@@ -145,6 +145,22 @@ export const filesApi = {
     `/api/files/${encodeURIComponent(fileId)}/content`,
 
   /**
+   * Resolve a file to a SHORT-TTL signed GET descriptor
+   * (`{file_id, url, filename, content_type, size}`).
+   *
+   * For handing a file to something that cannot authenticate as this user — namely a
+   * remote recording agent that has to satisfy a page's file chooser mid-recording.
+   * Ownership is checked server-side when minting, and the URL is single-object and
+   * expiring, so passing it down the recording socket exposes nothing else.
+   */
+  signedUrl: async (
+    fileId: string,
+  ): Promise<{ file_id: string; url: string; filename: string; content_type?: string; size?: number }> => {
+    const res = await client.get(`/files/${encodeURIComponent(fileId)}/signed-url`);
+    return res.data;
+  },
+
+  /**
    * Fetch a file's bytes as a Blob through the authenticated axios client. axios
    * attaches the Bearer token and transparently follows the backend's 302 to the
    * presigned GET, so this works for BOTH the presigned-redirect and the proxy-

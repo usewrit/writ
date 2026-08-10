@@ -281,15 +281,19 @@ export const AIPreviewModal: React.FC<AIPreviewModalProps> = ({
                         {sessionName ? t('Live Preview - {{name}}', { name: sessionName }) : t('Live Preview')}
                       </Dialog.Title>
                       <p className="text-[13px] text-secondary truncate max-w-md">
-                        {currentUrl || t('Connecting...')}
+                        {currentUrl
+                          || (connectionState === 'connecting' ? t('Connecting…')
+                            : connectionState === 'connected' ? t('Waiting for the first frame…')
+                            : connectionState === 'error' ? t('Not connected')
+                            : t('Disconnected'))}
                       </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-3 shrink-0">
                     {/* Connection status */}
                     <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
-                      connectionState === 'connected' ? 'bg-green-100 text-green-700' :
-                      connectionState === 'connecting' ? 'bg-amber-100 text-amber-700' :
+                      connectionState === 'connected' ? 'bg-green-50 text-green-700' :
+                      connectionState === 'error' ? 'bg-red-50 text-red-700' :
                       'bg-hover text-secondary'
                     }`}>
                       {connectionState === 'connected' ? (
@@ -319,7 +323,7 @@ export const AIPreviewModal: React.FC<AIPreviewModalProps> = ({
                 </div>
 
                 {/* Browser viewport */}
-                <div className="relative bg-gray-900 flex items-center justify-center" style={{ minHeight: '500px' }}>
+                <div className="relative bg-ink flex items-center justify-center" style={{ minHeight: '500px' }}>
                   {connectionState === 'connected' ? (
                     <canvas
                       ref={canvasRef}

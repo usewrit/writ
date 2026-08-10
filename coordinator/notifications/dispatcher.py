@@ -355,6 +355,9 @@ class NotificationDispatcher:
         sound: str = None,
         url: str = None,
         email_subject: str = None,
+        # Ad-hoc endpoint for the `webhook` channel, typed into the notify block. DISTINCT
+        # from `url` above, which is the Pushover link attachment.
+        webhook_url: str = None,
     ) -> Dict[str, Any]:
         """
         Dispatch notification from a trigger block with specific recipients.
@@ -380,6 +383,7 @@ class NotificationDispatcher:
             'twilio': {'sent': 0, 'failed': 0, 'skipped': True},
             'whatsapp': {'sent': 0, 'failed': 0, 'skipped': True},
             'signal': {'sent': 0, 'failed': 0, 'skipped': True},
+            'webhook': {'sent': 0, 'failed': 0, 'skipped': True},
         }
 
         if not channels:
@@ -403,6 +407,7 @@ class NotificationDispatcher:
         message = safe_format(template or "Change detected on {target_name}", context)
         formatted_title = safe_format(title or "Writ Alert", context) if title else "Writ Alert"
         formatted_url = safe_format(url, context) if url else None
+        formatted_webhook_url = safe_format(webhook_url, context) if webhook_url else None
         formatted_subject = safe_format(email_subject or formatted_title, context) if email_subject else formatted_title
 
         # Dispatch to each channel
@@ -434,6 +439,22 @@ class NotificationDispatcher:
                 results['signal'] = await self._send_signal_to_recipients(
                     target, context, message,
                     recipient_ids=recipient_filter.get('signal')
+                )
+            elif channel == 'webhook':
+                # The notify block has always offered a `webhook` channel (blockCatalog marks it
+                # needsWebhookUrl), and `_send_webhook_to_recipients` existed — but nothing ever
+                # called it from here, so selecting webhook wrote config that was never read and
+                # the automation reported success while delivering nothing.
+                results['webhook'] = await self._send_webhook_to_recipients(
+                    target, context,
+                    {
+                        "event": "notification",
+                        "title": formatted_title,
+                        "message": message,
+                        "context": context or {},
+                    },
+                    recipient_ids=recipient_filter.get('webhook'),
+                    webhook_url=formatted_webhook_url,
                 )
 
         return results
@@ -1272,8 +1293,16 @@ Changes:
         context: dict,
         payload: Dict[str, Any],
         recipient_ids: List[int] = None,
+        webhook_url: str = None,
     ) -> Dict[str, Any]:
-        """Send webhook to specific recipients (for trigger notifications)."""
+        """Send webhook to specific recipients (for trigger notifications).
+
+        `webhook_url` is the ad-hoc endpoint typed into the notify block (the catalog marks
+        this channel `needsWebhookUrl`), which has no recipient row and no stored secret, so
+        it is delivered unsigned — and only when the caller did NOT pin specific recipients,
+        since an explicit pin means "these rows and nothing else". Without it the block's URL
+        field was collected and never used.
+        """
         try:
             from models.webhook_recipient import WebhookRecipient
             from models.webhook_config import WebhookConfig
@@ -1281,7 +1310,10 @@ Changes:
 
             config_result = await self.db.execute(select(WebhookConfig).limit(1))
             config = config_result.scalar_one_or_none()
-            if not config or not config.enabled:
+            # An ad-hoc block URL needs no global WebhookConfig, so only bail out when there
+            # is no configured provider AND no ad-hoc target to deliver to.
+            _adhoc = webhook_url if (webhook_url and not recipient_ids) else None
+            if (not config or not config.enabled) and not _adhoc:
                 return {'sent': 0, 'failed': 0, 'skipped': True, 'reason': 'Webhook not configured'}
 
             # Get all enabled webhook recipients (single-owner coordinator).
@@ -1293,11 +1325,23 @@ Changes:
             result = await self.db.execute(query)
             recipients = result.scalars().all()
 
-            if not recipients:
+            if not recipients and not _adhoc:
                 return {'sent': 0, 'failed': 0, 'skipped': True, 'reason': 'No recipients'}
 
             sent = 0
             failed = 0
+
+            if _adhoc:
+                try:
+                    res = await WebhookNotifier().send_webhook(url=_adhoc, payload=payload)
+                    if res.get("success"):
+                        sent += 1
+                    else:
+                        failed += 1
+                        logger.warning(f"Webhook to block URL failed: {res.get('error')}")
+                except Exception as e:
+                    logger.error(f"Failed to send webhook to block URL: {e}")
+                    failed += 1
 
             for recipient in recipients:
                 notifier = WebhookNotifier(

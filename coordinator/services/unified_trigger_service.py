@@ -1803,6 +1803,10 @@ class UnifiedTriggerService:
         priority = config.get("priority")
         sound = config.get("sound")
         url = config.get("url")
+        # Ad-hoc endpoint for the `webhook` channel. Distinct from `url`, which is the
+        # Pushover link attachment — the block has always written this field, but nothing
+        # read it until the dispatcher grew a `webhook` branch.
+        webhook_url = config.get("webhook_url")
         email_subject = config.get("email_subject")
 
         # Single-user coordinator: no marketplace installed-automation proxy
@@ -1841,6 +1845,7 @@ class UnifiedTriggerService:
                 priority=priority,
                 sound=sound,
                 url=url,
+                webhook_url=webhook_url,
                 email_subject=email_subject,
             )
 

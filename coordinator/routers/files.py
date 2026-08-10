@@ -51,7 +51,10 @@ async def _serve_content(db: AsyncSession, file_id: str) -> Response:
     ttl = int(settings.file_signed_url_ttl_seconds or 600)
     provider = await file_service.provider_for_file(db, f)
     signed = visual_storage.presigned_file_get(f.storage_key, expires_seconds=ttl, provider=provider)
-    if signed:
+    # Only redirect to a presigned URL the CALLER can actually reach: the public
+    # MinIO client defaults to `localhost:9000`, and redirecting there sends the
+    # browser (or an agent) to its OWN machine. Fall through to the byte proxy.
+    if signed and file_service._is_public_url(signed):
         # 302 — the browser/SDK fetches the bytes straight from object storage via
         # a scoped, expiring URL; the backend never ingests the payload.
         return RedirectResponse(url=signed, status_code=302)
@@ -178,6 +181,39 @@ async def get_file_content(
     """Download / preview a file's bytes (ownership-checked). 302 → short-TTL
     presigned GET, or a same-origin byte proxy fallback."""
     return await _serve_content(db, file_id)
+
+
+@router.get("/dl/{token}")
+async def download_by_token(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Stream one file's bytes against a short-TTL, single-file token. NO session auth.
+
+    This is how an AGENT gets bytes: it holds no user credentials, so it cannot call
+    the ownership-checked `/content` route, and a presigned STORAGE URL is only usable
+    when MINIO_PUBLIC_ENDPOINT actually points somewhere reachable. The token IS the
+    authorization — it names exactly one file and expires within the hour — so storage
+    itself never has to be published.
+    """
+    data = file_service.verify_download_token(token)
+    return await _serve_content(db, data["file_id"])
+
+
+@router.get("/{file_id}/signed-url")
+async def get_file_signed_url(
+    file_id: str,
+    auth: AuthContext = Depends(get_auth_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """A short-TTL fetchable descriptor for one file: `{file_id, url, filename, ...}`.
+
+    Used by the RECORDER: when a page opens a file chooser mid-recording the browser is
+    on an agent, so the operator picks a stored file in the UI and the agent fetches
+    these bytes to satisfy the chooser. `url` is a genuinely public presigned URL when
+    one is available, else the tokened `/files/dl/{token}` route.
+    """
+    return await file_service.resolve_for_run(db, file_id)
 
 
 @router.delete("/{file_id}", status_code=204)

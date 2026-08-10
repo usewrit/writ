@@ -64,6 +64,9 @@ import { getAccessToken } from '../utils/auth';
 import { ConnectAgentPanel } from './ConnectAgentPanel';
 import { PersonaWizard } from './workflows/PersonaWizard';
 import { AuthenticatorImportModal } from './workflows/AuthenticatorImportModal';
+import { FilePicker, PickedFile } from './FilePicker';
+import { filesApi } from '../api/files';
+import { apiErrorMessage } from '../api/client';
 import type { WorkflowStep } from '../types/api';
 import { createStep, stepMeta, GROUP_NODE_STYLE } from './steps/stepMeta';
 import { StepConfigForm } from './steps/StepConfigForm';
@@ -944,6 +947,55 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   const [detectedCredentials, setDetectedCredentials] = useState<DetectedCredential[]>([]);
   // A 2FA/OTP field was seen during recording (recorder emits `twofa_detected`).
   const [detected2fa, setDetected2fa] = useState(false);
+  // In-flight file-chooser prompt from the recorder ({requestId, selector, isMultiple}).
+  // Non-null while the page is waiting on a file dialog we must answer for it.
+  const [uploadPrompt, setUploadPrompt] = useState<{
+    requestId: string;
+    selector: string;
+    isMultiple: boolean;
+  } | null>(null);
+
+  /** Answer the page's file chooser with a stored file. */
+  const answerUploadPrompt = React.useCallback(async (picked: PickedFile) => {
+    const prompt = uploadPrompt;
+    if (!prompt) return;
+    setUploadPrompt(null);
+    try {
+      // Mint a short-TTL signed GET for the agent — it cannot authenticate as this
+      // user, so it can't read /files/{id}/content itself. Ownership is enforced
+      // server-side when minting.
+      const desc = await filesApi.signedUrl(picked.file_id);
+      wsRef.current?.send(JSON.stringify({
+        type: 'upload_file_selected',
+        request_id: prompt.requestId,
+        file_id: picked.file_id,
+        filename: desc.filename || picked.filename,
+        url: desc.url,
+      }));
+      toast.success(t('Attached "{{name}}" — recording continues', { name: picked.filename }));
+    } catch (err) {
+      // Tell the recorder to stop waiting; the page's dialog must never hang on a
+      // failure here. The step is still recorded, just unbound.
+      try {
+        wsRef.current?.send(JSON.stringify({
+          type: 'upload_file_selected', request_id: prompt.requestId, skip: true,
+        }));
+      } catch { /* socket already gone */ }
+      toast.error(apiErrorMessage(err, t('Could not attach that file')));
+    }
+  }, [uploadPrompt, t]);
+
+  /** Decline the chooser — recording continues, the step is recorded unbound. */
+  const skipUploadPrompt = React.useCallback(() => {
+    const prompt = uploadPrompt;
+    setUploadPrompt(null);
+    if (!prompt) return;
+    try {
+      wsRef.current?.send(JSON.stringify({
+        type: 'upload_file_selected', request_id: prompt.requestId, skip: true,
+      }));
+    } catch { /* socket already gone */ }
+  }, [uploadPrompt]);
   // How the code is delivered (totp | email_otp | sms | unknown) — pre-selects
   // the persona 2FA method in the prefill. Best-effort hint from the page text.
   const [detected2faChannel, setDetected2faChannel] = useState<string | null>(null);
@@ -1613,6 +1665,19 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
               });
               toast.success(t('Credential detected: {{name}}', { name: fieldName }), { duration: 2000 });
             }
+            break;
+
+          case 'upload_prompt':
+            // The page opened a file chooser. The browser is on a remote agent, so the
+            // native dialog is unanswerable from here — open the file picker instead and
+            // let the operator bind a stored file (or import one). Answering feeds the
+            // real bytes to the chooser so the flow keeps recording; skipping records
+            // the step unbound.
+            setUploadPrompt({
+              requestId: data.request_id,
+              selector: data.selector || '',
+              isMultiple: !!data.is_multiple,
+            });
             break;
 
           case 'twofa_detected':
@@ -6203,6 +6268,18 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                       toast.success(t('Persona attached to this workflow.'));
                     }
                   }}
+                />
+
+                {/* File chooser opened by the page mid-recording. The browser is remote,
+                    so the native dialog can never be answered by the operator — this
+                    picker stands in for it. Confirming sends the file down to the agent,
+                    which feeds the real bytes to the chooser so the page proceeds
+                    normally AND binds the file to the recorded upload step. */}
+                <FilePicker
+                  isOpen={!!uploadPrompt}
+                  onClose={skipUploadPrompt}
+                  onSelect={answerUploadPrompt}
+                  title={t('Choose a file to upload')}
                 />
               </div>
   );

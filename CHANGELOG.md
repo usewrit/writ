@@ -6,7 +6,22 @@ file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.1] - 2026-08-09
+## [1.0.1] - 2026-08-10
+
+### Added
+
+- **Attach a file while recording.** When a page opens its file chooser mid-recording,
+  the recorder now asks you which stored file to hand it instead of dismissing the
+  dialog empty. Pick one and recording continues; the step is saved bound to that
+  file, so every replay uploads it again with no model in the loop.
+
+  The agent never receives your credentials. It is handed a **short-lived signed URL**
+  for that one file (`GET /files/{id}/signed-url`, TTL from
+  `FILE_SIGNED_URL_TTL_SECONDS`), minted only after ownership is checked
+  server-side — an agent cannot authenticate as you and so cannot read
+  `/files/{id}/content` itself. Declining is always available and never blocks the
+  page: the chooser is answered either way, and the step is simply recorded unbound
+  rather than leaving the browser stuck on an open dialog.
 
 ### Changed
 
@@ -58,6 +73,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and simply were not visible. No warning is produced for this at build time,
   which is why it survived: the only way to catch it is to build and diff the
   emitted CSS.
+
+- **Every image in a crawled article rendered as a broken tile.** The markdown
+  preview had no raw-HTML support, so an `<img>` tag arrived as literal text; and
+  once it did render, the app's Content-Security-Policy (`img-src 'self' data:
+  blob:`) refused the remote host anyway, leaving the browser's broken-image
+  chrome on every picture.
+
+  Both markdown `![](…)` and raw-HTML `<img>` now take one path, so the two can no
+  longer diverge. An image is embedded only when its URL is one the CSP actually
+  permits — inline `data:`/`blob:` bytes, or this origin — and anything else
+  degrades to its **alt text**, which is the caption the page's author wrote and
+  is real information rather than a broken tile. The CSP is deliberately *not*
+  widened to arbitrary remote hosts: rendering a crawled page must not become a
+  way to make your browser fetch from whatever that page names.
 
 ## [1.0.0] - 2026-08-06
 

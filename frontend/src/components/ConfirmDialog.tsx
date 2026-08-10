@@ -29,12 +29,12 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   const { t } = useTranslation();
   const variantStyles = {
     danger: {
-      iconBg: 'bg-red-100',
+      iconBg: 'bg-red-50',
       iconColor: 'text-red-600',
       buttonBg: 'bg-red-600 hover:bg-red-700 focus:ring-red-500',
     },
     warning: {
-      iconBg: 'bg-amber-100',
+      iconBg: 'bg-amber-50',
       iconColor: 'text-amber-600',
       buttonBg: 'bg-amber-600 hover:bg-amber-700 focus:ring-amber-500',
     },
@@ -60,7 +60,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           leaveFrom="opacity-100"
           leaveTo="opacity-0"
         >
-          <div className="fixed inset-0 bg-black bg-opacity-25" />
+          <div className="fixed inset-0 bg-black/20 backdrop-blur-sm" />
         </Transition.Child>
 
         <div className="fixed inset-0 overflow-y-auto">
@@ -74,7 +74,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
               leaveFrom="opacity-100 scale-100"
               leaveTo="opacity-0 scale-[0.98]"
             >
-              <Dialog.Panel className="w-full max-w-md transform overflow-hidden rounded-2xl bg-surface border border-border p-6 text-left align-middle shadow-xl transition-all">
+              <Dialog.Panel className="w-full max-w-md transform overflow-hidden rounded-xl bg-surface p-6 text-left align-middle shadow-lg transition-all">
                 <div className="flex items-start gap-4">
                   <div className={`flex-shrink-0 rounded-full ${styles.iconBg} p-3`}>
                     <Icon className={`h-6 w-6 ${styles.iconColor}`} aria-hidden="true" />

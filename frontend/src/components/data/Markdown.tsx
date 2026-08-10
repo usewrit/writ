@@ -87,8 +87,58 @@ function decode(s: string): string {
   return decodeEntities(restoreEscapes(s));
 }
 
+// ── Images ───────────────────────────────────────────────────────────────────────────
+// The app's CSP is `img-src 'self' data: blob: …` — deliberately NOT widened to
+// arbitrary remote hosts, so a crawled page's <img> pointing at its origin CANNOT
+// load here. Rendering one anyway produced the browser's broken-image chrome for
+// every picture in a crawled article.
+//
+// So an image is only EMBEDDED when its URL is one the CSP actually permits
+// (data: / blob: inline bytes, or our own origin). Anything else degrades to its
+// alt text — the caption the page's author wrote — which is real information
+// rather than a broken tile. Both markdown `![](…)` and raw-HTML <img> take this
+// same path, so the two never diverge.
+const INLINE_DATA_SCHEME = /^(data:image\/|blob:)/i;
+
+/** The URL to actually put in an <img src>, or undefined when the CSP would block
+ *  it (→ caller falls back to alt text). Relative refs resolve against `base`. */
+function embeddableImageSrc(src: string, base?: string): string | undefined {
+  const raw = src.trim();
+  if (!raw) return undefined;
+  // Inline bytes are allowed by the CSP verbatim — and carry no third-party fetch.
+  if (INLINE_DATA_SCHEME.test(raw)) return raw;
+  const abs = safeHref(raw, base);
+  if (!abs) return undefined;
+  // Same-origin only: 'self' in the CSP.
+  try {
+    if (typeof window !== 'undefined' && new URL(abs).origin === window.location.origin) return abs;
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+/** `src`/`alt` out of a raw HTML <img …> tag. Attribute VALUES only — never markup —
+ *  so the result still flows through React text/props and can't inject anything.
+ *  `data-src` is honoured because lazy-loading crawled pages leave `src` empty. */
+function parseImgTag(tag: string): { src: string; alt: string } {
+  const attr = (name: string): string => {
+    const m = new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i').exec(tag);
+    return m ? (m[2] ?? m[3] ?? m[4] ?? '') : '';
+  };
+  return { src: attr('src') || attr('data-src') || attr('data-original'), alt: attr('alt') };
+}
+
 // linkedImage(1 alt,2 src,3 href) | image(4 alt,5 src) | link(6 text,7 href)
 // | bold(8) | italic(9) | code(10) | autolink(11)
+// | htmlLinkedImage(12 href,13 tag) | htmlImage(14 tag)
+//
+// The two HTML forms are LAST so they never pre-empt markdown syntax, but they
+// still win over the autolink rule for a tag like `<img src="https://…">`: the
+// tag starts at `<`, which is left of the bare URL, and JS regex alternation
+// takes the leftmost match. Without them that URL matched the autolink branch and
+// the rest of the tag fell through as literal text — which is exactly how an
+// HTML-embedded image rendered as raw `<img src="` gibberish.
 const INLINE_SRC = [
   /\[!\[([^\]]*)\]\(([^)\s]+)[^)]*\)\]\(([^)\s]+)[^)]*\)/,
   /!\[([^\]]*)\]\(([^)\s]+)[^)]*\)/,
@@ -97,20 +147,30 @@ const INLINE_SRC = [
   /\*([^*\n]+)\*/,
   /`([^`]+)`/,
   /(https?:\/\/[^\s)]+)/,
+  /<a\b[^>]*\bhref\s*=\s*["']([^"']*)["'][^>]*>\s*(<img\b[^>]*>)\s*<\/a>/,
+  /(<img\b[^>]*\/?>)/,
 ]
   .map((r) => r.source)
   .join('|');
 
+const IMG_CLASS = 'my-1 max-h-64 max-w-full rounded-lg border border-border object-contain';
+
+/** An image, or — when the CSP would block its URL — the alt text standing in for it.
+ *  `href` (when present) keeps the surrounding link clickable either way, so a
+ *  non-embeddable image is still a way to reach the thing it depicted. */
 function LinkedImage({ alt, src, href, k }: { alt: string; src?: string; href?: string; k: string }): React.ReactNode {
+  const label = decode(alt);
   const img = src ? (
-    <img src={src} alt={decode(alt)} loading="lazy" className="my-1 max-h-64 max-w-full rounded-lg border border-border object-contain" />
-  ) : (
-    <span>{decode(alt)}</span>
-  );
+    <img src={src} alt={label} loading="lazy" referrerPolicy="no-referrer" className={IMG_CLASS} />
+  ) : label ? (
+    <span>{label}</span>
+  ) : null;
   if (!href) return <React.Fragment key={k}>{img}</React.Fragment>;
+  // A link with no image AND no alt would render as an empty, unclickable anchor —
+  // fall back to the destination so the reference is never silently dropped.
   return (
     <a key={k} href={href} target="_blank" rel="noopener noreferrer" className="inline-block">
-      {img}
+      {img ?? <span className="underline decoration-border underline-offset-2">{href}</span>}
     </a>
   );
 }
@@ -132,14 +192,29 @@ function renderInline(input: string, keyBase: string, base?: string): React.Reac
     const k = `${keyBase}-${i++}`;
     if (m[2] !== undefined || m[1] !== undefined) {
       // Linked image [![alt](src)](href)
-      nodes.push(<LinkedImage key={k} alt={m[1] || ''} src={safeHref(m[2], base)} href={safeHref(m[3], base)} k={k} />);
+      nodes.push(<LinkedImage key={k} alt={m[1] || ''} src={embeddableImageSrc(m[2], base)} href={safeHref(m[3], base)} k={k} />);
     } else if (m[5] !== undefined) {
-      const src = safeHref(m[5], base);
+      const src = embeddableImageSrc(m[5], base);
       nodes.push(
         src ? (
-          <img key={k} src={src} alt={decode(m[4] || '')} loading="lazy" className="my-1 max-h-64 max-w-full rounded-lg border border-border object-contain" />
+          <img key={k} src={src} alt={decode(m[4] || '')} loading="lazy" referrerPolicy="no-referrer" className={IMG_CLASS} />
         ) : (
           decode(m[4] || '')
+        ),
+      );
+    } else if (m[13] !== undefined) {
+      // Raw HTML linked image: <a href="…"><img src="…" alt="…"></a>
+      const { src, alt } = parseImgTag(m[13]);
+      nodes.push(<LinkedImage key={k} alt={alt} src={embeddableImageSrc(src, base)} href={safeHref(m[12] || '', base)} k={k} />);
+    } else if (m[14] !== undefined) {
+      // Raw HTML image: <img src="…" alt="…">
+      const { src, alt } = parseImgTag(m[14]);
+      const embed = embeddableImageSrc(src, base);
+      nodes.push(
+        embed ? (
+          <img key={k} src={embed} alt={decode(alt)} loading="lazy" referrerPolicy="no-referrer" className={IMG_CLASS} />
+        ) : (
+          decode(alt)
         ),
       );
     } else if (m[7] !== undefined) {

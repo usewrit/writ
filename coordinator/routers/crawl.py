@@ -521,8 +521,7 @@ async def preview_crawl(
             crawl_orchestrator._in_domain_scope(probe, u, seed_host, seed_reg)
             and crawl_orchestrator._passes_path_filters(probe, u)
         )
-        hit = crawl_targeting.include_hit(targeting, u)
-        score = crawl_targeting.score_url(targeting, u, "", depth=1)
+        score, hit = crawl_targeting.score_and_hit(targeting, u, "", depth=1)
         keep = in_scope and crawl_targeting.passes_threshold(targeting, score, 1, hit)
         if keep:
             kept += 1
@@ -548,6 +547,12 @@ class MapCrawlRequest(BaseModel):
         description="Map the site as this login identity — the picker that feeds an "
                     "authenticated crawl must see the pages the crawl will actually reach",
     )
+
+
+# Floor on how many seed-page links /map harvests, independent of the caller's
+# response limit — the ranking needs a real candidate pool to choose from.
+# (Mirrors the cloud tier's MAP_HARVEST_CAP.)
+_MAP_HARVEST_CAP = 200
 
 
 def _last_segment(url: str) -> Optional[str]:
@@ -581,8 +586,11 @@ async def map_crawl(
         auth_session = PersonaService.load_session(persona)
 
     text_by_url: dict = {}
+    # Harvest depth is decoupled from the response limit: with cap=body.limit a
+    # "top 10" request only ever harvested the first 10 links in DOM order, so
+    # the ranking had nothing better to choose from.
     harvested = await crawl_orchestrator._harvest_seed_links(
-        url, cap=body.limit, auth=auth_session)
+        url, cap=max(body.limit, _MAP_HARVEST_CAP), auth=auth_session)
     for h in harvested:
         text_by_url[h["url"]] = h.get("text") or ""
     candidates = list(dict.fromkeys(
@@ -590,18 +598,29 @@ async def map_crawl(
         + list(await crawl_orchestrator._discover_sitemap_urls(url, auth=auth_session))
     ))
 
+    # depth=0: map is a flat listing with no hop distance — the old constant
+    # depth=1 penalty just subtracted 0.05 from every row, so an unmatched
+    # search rendered as "score: -0.05" on all of them. rank_urls keeps only
+    # the top `limit` (bounded heap) and yields the event loop while scoring —
+    # a sitemap-sized candidate list must not pin the coordinator.
     targeting = crawl_targeting.make_targeting(intent=(body.search or ""))
-    scored = []
-    for u in candidates:
-        anchor = text_by_url.get(u, "")
-        score = crawl_targeting.score_url(targeting, u, anchor, depth=1)
-        title = anchor or _last_segment(u)
-        scored.append({"url": u, "score": round(score, 4), "title": title})
-    scored.sort(key=lambda i: -i["score"])
+    # Scent expansion: if the search matches almost nothing (opaque URLs, no
+    # anchor text), harvest a few of the most promising pages so their link
+    # anchors give the query something to bite on.
+    candidates = await crawl_orchestrator.expand_search_candidates(
+        url, candidates, text_by_url, targeting, auth=auth_session
+    )
+    ranked = await crawl_targeting.rank_urls(
+        targeting,
+        ((u, text_by_url.get(u, "")) for u in candidates),
+        limit=body.limit,
+        depth=0,
+    )
 
     return {
-        "urls": scored[: body.limit],
-        "count": len(scored),
+        "urls": [{"url": u, "score": round(s, 4), "title": anchor or _last_segment(u)}
+                 for u, anchor, s in ranked],
+        "count": len(candidates),
         "brand": DRAGNET_NAME,
     }
 

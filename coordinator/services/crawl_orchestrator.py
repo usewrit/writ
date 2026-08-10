@@ -72,6 +72,15 @@ from utils.redis_client import get_redis
 logger = logging.getLogger(__name__)
 
 _KEY_TTL = 24 * 3600  # frontier/visited live at most a day
+
+# Exploration allowances for GOAL-DIRECTED crawls. Frontier admission slots are
+# the page-budget currency, so URLs the goal does not match at all may only take
+# a few of them: enough to walk hub pages toward the content (the scorer orders
+# the zero-match tail hub-first), never enough to starve the on-topic links the
+# crawl discovers later. Un-targeted crawls have no such cap — a plain sweep is
+# exactly what they asked for.
+_EXPLORE_SEED_FLOOR = 8   # seeding: max(this, page_budget // 10) zero-match seeds
+_EXPLORE_SHARD_CAP = 8    # per completed shard: zero-match links admitted
 # How long a crawl may sit in "queued" before sweep_crawls assumes its detached
 # seeder was lost (worker restart / dropped task) and re-kicks it. Comfortably
 # longer than a healthy _seed takes to flip queued → mapping.
@@ -315,16 +324,21 @@ async def _admit(crawl: CrawlJob, raw_url: str, depth: int, seed_host: str, seed
 
     # Relevance-ranked admission. `targeting` is built once per seeding / shard-
     # completion pass by the caller; fall back to building it here for safety.
+    # score_and_hit computes the score AND the include verdict in one pass — the
+    # include-pattern sweep runs once per URL, not once per predicate.
     if targeting is None:
         targeting = crawl_targeting.build_targeting(crawl)
-    hit = crawl_targeting.include_hit(targeting, url)
-    score = crawl_targeting.score_url(targeting, url, anchor_text, depth)
+    score, hit = crawl_targeting.score_and_hit(targeting, url, anchor_text, depth)
     if not crawl_targeting.passes_threshold(targeting, score, depth, hit):
         return False
 
-    await r.zadd(_k_frontier(crawl.id), {json.dumps({"url": url, "depth": depth}): score})
-    await r.expire(_k_frontier(crawl.id), _KEY_TTL)
-    await r.expire(_k_visited(crawl.id), _KEY_TTL)
+    # One round trip, not three: admission runs once per discovered URL on the
+    # coordinator event loop, so per-URL RTTs dominate the cost of a big seed pass.
+    pipe = r.pipeline(transaction=False)
+    pipe.zadd(_k_frontier(crawl.id), {json.dumps({"url": url, "depth": depth}): score})
+    pipe.expire(_k_frontier(crawl.id), _KEY_TTL)
+    pipe.expire(_k_visited(crawl.id), _KEY_TTL)
+    await pipe.execute()
     return True
 
 
@@ -505,6 +519,65 @@ async def _harvest_seed_links(seed_url: str, *, cap: int = 200, auth=None) -> li
     return out
 
 
+# /map scent expansion: when the search matches almost nothing in the first
+# candidate pass, fetch a few of the best/shallowest pages and harvest THEIR
+# links — that is where the anchor text lives that lets the query bite.
+MAP_EXPAND_PAGES = 3         # extra hub fetches per /map call
+MAP_EXPAND_MIN_MATCHED = 10  # skip expansion once this many candidates match
+
+
+async def expand_search_candidates(
+    seed_url: str, candidates: list, text_by_url: dict, targeting, *, auth=None,
+) -> list:
+    """Grow a /map candidate set until the search has something to bite on.
+
+    A sitemap row is a bare URL and a seed-page harvest only covers one page's
+    links — on sites with opaque paths (/kb/314056, /thread?id=…) a search like
+    "windows xp" matches nothing in that text, scoring collapses to ties, and
+    /map "ranks" discovery order. The fix is the same scent-following a human
+    does: open the most promising few pages (best score first; the scorer's hub
+    prior orders the no-signal tail shallow-first) and read THEIR links, whose
+    anchor text ("Windows XP", …) carries the words the URLs don't. Newly found
+    anchors also become titles, so the picker stops showing bare path segments.
+
+    Bounded: at most MAP_EXPAND_PAGES extra fetches, each through the vetted
+    `_harvest_seed_links`. Same-domain only — expansion must not fetch third
+    parties a target page happens to link to. No-op without a search, or when
+    the first pass already matched MAP_EXPAND_MIN_MATCHED candidates. Mutates
+    text_by_url (anchor/title map) in place; returns the grown candidate list."""
+    if not targeting.has_intent or not candidates:
+        return candidates
+    pool = max(MAP_EXPAND_MIN_MATCHED, MAP_EXPAND_PAGES * 4)
+    head = await crawl_targeting.rank_urls(
+        targeting, ((u, text_by_url.get(u, "")) for u in candidates),
+        limit=pool, depth=0,
+    )
+    # The head holds the global top-`pool` scores, so counting matches there is
+    # exact up to the threshold: fewer than MIN matched in the head ⇒ fewer
+    # than MIN matched anywhere.
+    if sum(1 for _u, _a, s in head if s > 0) >= MAP_EXPAND_MIN_MATCHED:
+        return candidates
+    seed_host = _host(seed_url)
+    seen = set(candidates)
+    out = list(candidates)
+    fetched = 0
+    for u, _anchor, _score in head:
+        if fetched >= MAP_EXPAND_PAGES:
+            break
+        if u == seed_url or _host(u) != seed_host:
+            continue  # the seed's links are already in; never fetch off-domain
+        links = await _harvest_seed_links(u, cap=200, auth=auth)
+        fetched += 1
+        for h in links:
+            hu = h["url"]
+            if not text_by_url.get(hu):
+                text_by_url[hu] = h.get("text") or ""
+            if hu not in seen:
+                seen.add(hu)
+                out.append(hu)
+    return out
+
+
 async def _sample_site_urls(seed_url: str, *, cap: int = 150, auth=None) -> list:
     """A sample of the site's real URLs for scope derivation: sitemap first
     (cheap, broad), topped up with a shallow seed-page harvest when the sitemap
@@ -658,9 +731,45 @@ async def _seed_inner(crawl_id: int) -> None:
             sitemap_urls = []
         else:
             sitemap_urls = await _discover_sitemap_urls(crawl.seed_url, auth=auth_session)
-            for u in sitemap_urls:
+            # Bulk sitemap URLs are DISCOVERED links, not the explicit entry set,
+            # so the crawl's include/exclude path filters apply to them — the
+            # depth-0 exemption in _admit is for what the operator explicitly
+            # chose (the seed + picks). Without this, a scoped crawl on a big
+            # sitemap filled its budget with pages the scope explicitly excluded.
+            eligible = []
+            for n, u in enumerate(sitemap_urls, 1):
+                if (n & 0x3FF) == 0:
+                    await asyncio.sleep(0)  # site-sized list; don't pin the loop
+                if _passes_path_filters(crawl, u):
+                    eligible.append((u, ""))
+            # Rank BEFORE admitting. A sitemap routinely outsizes the page
+            # budget, and first-N-in-file-order admission spent the whole budget
+            # on whatever the sitemap happened to list first — the ranked
+            # frontier then only reordered that arbitrary subset. Ranking the
+            # candidates first (cheap, in-memory, no I/O) is what actually makes
+            # the budget flow to the most relevant pages.
+            #
+            # GOAL-DIRECTED crawls additionally cap how many ZERO-relevance URLs
+            # may seed. Admission slots are the budget currency (`pages_discovered
+            # >= page_budget` shuts admission off for the rest of the crawl), so
+            # seeding a big opaque-URL sitemap to the brim left no slots for the
+            # on-topic links the crawl discovers by anchor text later — an intent
+            # like "windows xp" crawled home pages and never the XP pages. Junk
+            # gets a small exploration allowance (ranked hub-first by the scorer,
+            # so it explores nav/section pages), the rest of the budget stays
+            # free for what the crawl finds. Un-targeted crawls are unchanged.
+            explore_quota = (
+                max(_EXPLORE_SEED_FLOOR, budget // 10) if targeting.has_intent else None
+            )
+            explored = 0
+            for u, _anchor, score in await crawl_targeting.rank_urls(
+                    targeting, eligible, depth=0):
                 if admitted >= budget:
                     break
+                if explore_quota is not None and score <= 0.0:
+                    if explored >= explore_quota:
+                        break  # ranked best-first: everything after is junk too
+                    explored += 1
                 if await _admit(crawl, u, 0, seed_host, seed_reg, targeting=targeting):
                     admitted += 1
 
@@ -1230,17 +1339,32 @@ async def on_shard_complete(task: AutomationTask, result_data: Optional[dict]) -
 
             # Admit newly-discovered in-scope URLs one level deeper, ranked by
             # relevance to the crawl's intent (anchor text + path). Most are
-            # rejected by the visited set — that is the point.
+            # rejected by the visited set — that is the point. Rank the page's
+            # links BEFORE admitting: admission stops at the page budget, so
+            # first-come order let DOM position (nav, footer, boilerplate) claim
+            # the last budget slots over the content links the intent asks for.
+            # With an intent, ZERO-relevance links get only a small per-shard
+            # exploration allowance — admission slots are the budget currency,
+            # and one link-heavy junk page must not consume every remaining slot
+            # (see the same rule at seeding).
             newly = 0
             if crawl.pages_discovered < (crawl.page_budget or 1000):
                 targeting = crawl_targeting.build_targeting(crawl)
+                pairs = []
                 for item in links[:5000]:
-                    if crawl.pages_discovered + newly >= (crawl.page_budget or 1000):
-                        break
                     u = item.get("url") if isinstance(item, dict) else item
-                    anchor = item.get("text", "") if isinstance(item, dict) else ""
                     if not u:
                         continue
+                    pairs.append((u, item.get("text", "") if isinstance(item, dict) else ""))
+                explore_left = _EXPLORE_SHARD_CAP if targeting.has_intent else None
+                for u, anchor, score in await crawl_targeting.rank_urls(
+                        targeting, pairs, depth=shard_depth + 1):
+                    if crawl.pages_discovered + newly >= (crawl.page_budget or 1000):
+                        break
+                    if explore_left is not None and score <= 0.0:
+                        if explore_left <= 0:
+                            break  # ranked best-first: everything after is junk too
+                        explore_left -= 1
                     if await _admit(crawl, u, shard_depth + 1, seed_host, seed_reg,
                                     anchor_text=anchor, targeting=targeting):
                         newly += 1

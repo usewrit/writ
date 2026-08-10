@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.1] - 2026-08-09
 
+### Changed
+
+- **A goal-directed crawl now spends its page budget best-first instead of
+  breadth-first.** `crawl_targeting` gained a lexical relevance score — token
+  overlap between the goal and a link's URL path and anchor text, with
+  discounted credit for near-matches such as plural and stem variants, a boost
+  for include-path hits, and a mild depth penalty. It runs on the coordinator
+  with no AI, no network call and no embeddings, so it costs nothing per link.
+  The frontier is ranked *before* admission rather than filtered after, which is
+  what makes the budget go to pages the goal actually names.
+
+  With no goal supplied the score reduces to shallow-first, which reproduces the
+  previous breadth-first sweep exactly — untargeted crawls behave as before.
+
+  Links matching the goal not at all are still followed, because the page you
+  want is often two hub pages away, but they draw from a bounded allowance
+  (`max(8, page_budget // 10)` at seeding, 8 per completed shard) so they can
+  walk toward the content without starving the on-topic links found later.
+
+- **`/map` harvests a real candidate pool before ranking.** It now collects at
+  least 200 seed-page links regardless of the caller's `limit`, then ranks and
+  truncates. Previously a small `limit` also shrank what was gathered, so the
+  ranking chose the best of whatever happened to be found first rather than the
+  best on the page.
+
 ### Fixed
 
 - **The onboarding tour's buttons could sit outside its own card.** The tour

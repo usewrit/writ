@@ -198,6 +198,169 @@ def test_frontier_is_relevance_ranked(loop, monkeypatch):
     assert urls.index("https://example.com/docs/pricing-api") < urls.index("https://example.com/legal/terms")
 
 
+def test_goal_directed_seeding_reserves_budget_for_discovery(loop, monkeypatch):
+    """An intent whose words appear NOWHERE in a big opaque sitemap must not let
+    that sitemap fill the page budget. Admission slots are the budget currency
+    (`pages_discovered >= page_budget` shuts admission off for the rest of the
+    crawl), so before this rule an intent like "windows xp" seeded 50 junk rows,
+    left zero slots for the on-topic links discovered while crawling, and the
+    run "crawled home pages". Junk now gets a small hub-first exploration
+    allowance; every goal-matching sitemap row is still seeded, ranked on top."""
+    from services import crawl_orchestrator as co
+    from database import AsyncSessionLocal
+    from models.crawl_job import CrawlJob
+    from utils.redis_client import get_redis
+
+    opaque = [f"https://example.com/p/{i}" for i in range(60)]
+    matched = ["https://example.com/kb/windows-xp-install",
+               "https://example.com/kb/windows-xp-networking"]
+    _stub_network(monkeypatch, opaque + matched)  # matched buried at the END
+    _freeze_pump(monkeypatch)
+
+    async def main():
+        await _fresh_schema()
+        async with AsyncSessionLocal() as db:
+            crawl = await co.start_crawl(
+                db, seed_url="https://example.com", intent="windows xp",
+                page_budget=50,
+            )
+            cid = crawl.id
+        await co._seed_inner(cid)
+
+        r = get_redis()
+        popped = await r.zpopmax(co._k_frontier(cid), 100)
+        urls = [json.loads(m)["url"] for m, _s in popped]
+        async with AsyncSessionLocal() as db:
+            row = await db.get(CrawlJob, cid)
+            return urls, row.pages_discovered
+
+    urls, discovered = loop.run_until_complete(main())
+
+    quota = max(co._EXPLORE_SEED_FLOOR, 50 // 10)
+    assert discovered <= 1 + len(matched) + quota, (
+        f"opaque sitemap rows filled the budget again: {discovered} admitted")
+    for u in matched:
+        assert u in urls, "every goal-matching sitemap URL must be seeded"
+    # ZPOPMAX order: the matching pages outrank every exploration seed.
+    assert set(urls[:2]) == set(matched)
+
+
+def test_goal_directed_shard_links_bound_exploration(loop, monkeypatch):
+    """One link-heavy junk page must not consume the remaining budget slots:
+    with an intent, a completed shard admits every goal-matching link but only
+    _EXPLORE_SHARD_CAP zero-relevance ones."""
+    from services import crawl_orchestrator as co
+    from database import AsyncSessionLocal
+    from models.crawl_job import CrawlJob
+    from utils.redis_client import get_redis
+
+    _stub_network(monkeypatch, [])
+    _freeze_pump(monkeypatch)
+
+    async def main():
+        await _fresh_schema()
+        async with AsyncSessionLocal() as db:
+            crawl = await co.start_crawl(
+                db, seed_url="https://example.com", intent="windows xp",
+                page_budget=100, max_depth=2,
+            )
+            cid = crawl.id
+            task = await co._mint_shard_task(
+                db, crawl, [{"url": "https://example.com", "depth": 0}])
+            tid = task.id
+            task.status = "running"
+            await db.commit()
+
+        links = [{"url": f"https://example.com/p/{i}", "text": f"page {i}"}
+                 for i in range(60)]
+        links.insert(30, {"url": "https://example.com/kb/1",
+                          "text": "Windows XP setup guide"})
+        links.append({"url": "https://example.com/kb/2",
+                      "text": "windows-xp driver archive"})
+        result_data = {
+            "engine": "http",
+            "pages": [{"url": "https://example.com", "status": "ok"}],
+            "failed": [],
+            "discovered_links": links,
+            "extracted_data": [],
+        }
+        await co.complete_shard_task(
+            tid, cid, success=True, result_data=result_data, reporter_agent="agent-1")
+
+        r = get_redis()
+        members = await r.zrange(co._k_frontier(cid), 0, -1)
+        urls = [json.loads(m)["url"] for m in members]
+        async with AsyncSessionLocal() as db:
+            row = await db.get(CrawlJob, cid)
+            return urls, row.pages_discovered
+
+    urls, discovered = loop.run_until_complete(main())
+
+    assert "https://example.com/kb/1" in urls and "https://example.com/kb/2" in urls, (
+        "goal-matching links must always be admitted")
+    junk = [u for u in urls if "/p/" in u]
+    assert len(junk) <= co._EXPLORE_SHARD_CAP, (
+        f"a junk page consumed {len(junk)} budget slots; cap is {co._EXPLORE_SHARD_CAP}")
+    assert discovered == len(urls)
+
+
+def test_map_scent_expansion_reaches_anchored_links(loop, monkeypatch):
+    """A /map search that matches nothing lexically must follow the scent: fetch
+    the most promising (hub-first) candidates and pick up THEIR link anchors, so
+    "windows xp" surfaces the XP thread even when every URL is opaque. And a
+    search that already matches plenty must not fetch anything at all."""
+    from services import crawl_orchestrator as co
+    from services import crawl_targeting
+
+    calls = []
+    harvests = {
+        "https://example.com/forums": [
+            {"url": "https://example.com/t/9911",
+             "text": "Windows XP won't boot after update"},
+            {"url": "https://example.com/t/9912", "text": "Photography corner"},
+        ],
+    }
+
+    async def _harvest(seed_url, *, cap=200, auth=None):
+        calls.append(seed_url)
+        return harvests.get(seed_url, [])
+
+    _setattr_compatible(monkeypatch, co, "_harvest_seed_links", _harvest)
+
+    t = crawl_targeting.make_targeting(intent="windows xp")
+    candidates = ["https://example.com/a/b/deep1",
+                  "https://example.com/forums",
+                  "https://example.com/a/b/deep2"]
+    text_by_url = {}
+
+    async def main():
+        out = await co.expand_search_candidates(
+            "https://example.com", list(candidates), text_by_url, t)
+        ranked = await crawl_targeting.rank_urls(
+            t, ((u, text_by_url.get(u, "")) for u in out), depth=0)
+        return out, ranked
+
+    out, ranked = loop.run_until_complete(main())
+
+    assert "https://example.com/t/9911" in out, "expansion must surface anchored links"
+    assert ranked[0][0] == "https://example.com/t/9911", (
+        "the XP-anchored link must rank first after expansion")
+    assert calls[0] == "https://example.com/forums", (
+        "expansion must open hub-like (shallow) candidates first")
+    assert len(calls) <= co.MAP_EXPAND_PAGES
+
+    # Plenty of matches ⇒ zero extra fetches.
+    calls.clear()
+    many = [f"https://example.com/windows-xp/{i}" for i in range(12)]
+
+    async def main2():
+        return await co.expand_search_candidates(
+            "https://example.com", list(many), {}, t)
+
+    out2 = loop.run_until_complete(main2())
+    assert out2 == many and calls == []
+
+
 def test_relevance_threshold_drops_offtopic(loop, monkeypatch):
     """A below-threshold discovered URL is dropped at admission (and stays in the
     visited set, so it is never reconsidered). Depth-0 seeds are never dropped."""

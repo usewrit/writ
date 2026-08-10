@@ -13,46 +13,62 @@ frontier hot path (`crawl_orchestrator._admit`), the `/crawl/preview` +
      and NEVER raises — on any failure (including no AI configured at all, the
      common self-host case) it returns whole-site defaults.
 
-  2. score_url(...) — a lexical relevance score in ~[-0.25, 1.0] used to order the
-     frontier best-first. No AI, no network, no embeddings: token overlap of the
-     goal against the URL path + anchor text, plus a boost for include-path hits,
-     minus a mild depth penalty. With NO goal it reduces to shallow-first, which
-     reproduces the plain BFS sweep (the safe default for un-targeted crawls).
+  2. score_and_hit(...) / score_url(...) — a lexical relevance score in
+     ~[-0.25, 1.0] used to order the frontier best-first. No AI, no network, no
+     embeddings: token overlap of the goal against the URL path + anchor text
+     (exact, plus a discounted credit for near-matches like plural/stem variants),
+     plus a boost for include-path hits, minus a mild depth penalty. With NO goal
+     it reduces to shallow-first, which reproduces the plain BFS sweep (the safe
+     default for un-targeted crawls).
+
+  3. rank_urls(...) — the one shared ranking loop over a candidate list. Bounded
+     heap (top-N without sorting the world) and it yields the event loop
+     periodically, because candidate lists are SITE-controlled: an 8 MB sitemap
+     is ~100k URLs, and scoring those in one sync sweep inside an async handler
+     pins every other request on the coordinator.
 
 The scorer is intentionally deterministic and side-effect-free so it can run on
 the dispatch hot path without a network call or per-URL model inference.
 """
 from __future__ import annotations
 
+import asyncio
+import heapq
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlsplit, unquote
 
 logger = logging.getLogger(__name__)
 
 # Common English + URL-boilerplate terms that carry no targeting signal. Kept
-# small on purpose — the goal is to drop noise, not to do real stemming.
+# small on purpose — the goal is to drop noise, not to do real stemming. The
+# 2-char entries matter because GOAL text keeps 2-char tokens (see tokenize):
+# "ai"/"3d"/"tv" are real intent, "of"/"to"/"in" are not.
 _STOPWORDS = frozenset({
     "the", "and", "for", "with", "that", "this", "from", "are", "was", "all",
     "any", "you", "your", "our", "get", "only", "just", "about", "into", "per",
     "via", "some", "page", "pages", "site", "website", "url", "urls", "http",
     "https", "www", "com", "give", "want", "need", "find", "show", "every",
     "each", "its", "their", "them", "they", "have", "has", "will", "can",
+    "of", "to", "in", "on", "at", "by", "an", "as", "is", "it", "be", "we",
+    "or", "if", "so", "do", "no", "me", "my", "up", "us",
 })
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
-# Path/query separators → spaces so URL segments tokenize as words.
-_SEP_RE = re.compile(r"[-_/.+~]+")
 
 
-def tokenize(text: str) -> set:
-    """Lowercased alphanumeric tokens ≥3 chars, minus stopwords."""
+def tokenize(text: str, min_len: int = 3) -> set:
+    """Lowercased alphanumeric tokens ≥ ``min_len`` chars, minus stopwords.
+
+    Goal text uses ``min_len=2`` so short-but-meaningful query terms ("ai",
+    "3d", "ev") still carry intent instead of being silently dropped — which
+    made a /map search for "AI" a no-op that returned discovery order."""
     if not text:
         return set()
     return {t for t in _TOKEN_RE.findall(text.lower())
-            if len(t) >= 3 and t not in _STOPWORDS}
+            if len(t) >= min_len and t not in _STOPWORDS}
 
 
 def _compile(patterns) -> tuple:
@@ -75,6 +91,9 @@ class Targeting:
     include_res: tuple         # compiled include_paths patterns (for the boost)
     max_depth: int
     threshold: float           # drop-below relevance (0.0 = disabled)
+    # First-2-chars of every goal token — the cheap gate that keeps the
+    # near-match pass O(few) per URL instead of goal×candidate.
+    prefix2: frozenset = field(default_factory=frozenset)
 
     @property
     def has_intent(self) -> bool:
@@ -98,11 +117,13 @@ def make_targeting(*, intent: str = "", extract_prompt: str = "",
         th = float(threshold or 0.0)
     except Exception:
         th = 0.0
+    tokens = frozenset(tokenize(intent, 2) | tokenize(extract_prompt, 2))
     return Targeting(
-        tokens=frozenset(tokenize(intent) | tokenize(extract_prompt)),
+        tokens=tokens,
         include_res=_compile(include_paths),
         max_depth=md,
         threshold=th,
+        prefix2=frozenset(t[:2] for t in tokens),
     )
 
 
@@ -126,8 +147,81 @@ def _path_query(url: str) -> str:
 
 def include_hit(t: Targeting, url: str) -> bool:
     """Does this URL's path+query match any include pattern? (A strong relevance signal
-    even when the goal tokens don't overlap the URL text.)"""
+    even when the goal tokens don't overlap the URL text.)
+
+    Callers that also need the score must use `score_and_hit` — calling this AND
+    `score_url` runs the include sweep (and urlsplit) twice per URL."""
     return any(rx.search(_path_query(url)) for rx in t.include_res)
+
+
+# Credit for a near-match (plural/stem variant) relative to an exact token hit.
+_NEAR_WEIGHT = 0.7
+
+# Tie-break for candidates the goal does NOT match at all: prefer hub-like pages
+# (fewer path segments). When a goal matches nothing lexically — opaque URLs,
+# sitemap rows with no anchor text — every candidate used to tie at ~0 and the
+# "ranking" was raw discovery order. Shallow pages are where the links that DO
+# carry the goal's words live (nav, section indexes), so they are the right
+# thing to surface in /map and to explore first in a crawl. Small on purpose:
+# max 0.048, so it can never outweigh any real token or include-path signal.
+_HUB_PRIOR = 0.008
+_HUB_PRIOR_MAX_SEGS = 6
+
+
+def _near_match(g: str, c: str) -> bool:
+    """Cheap morphological credit, no stemmer: one token is a prefix of the other
+    ("api"/"apis", "blog"/"blogger"), or two ≥5-char tokens share their first 4
+    chars ("pricing"/"prices", "article"/"articles"). Exact-only matching made
+    rankings look arbitrary the moment the goal's word form differed from the
+    URL's — the most common way a /map search "seemed broken"."""
+    shorter = len(g) if len(g) < len(c) else len(c)
+    if shorter >= 3 and (c.startswith(g) or g.startswith(c)):
+        return True
+    return len(g) >= 5 and len(c) >= 5 and g[:4] == c[:4]
+
+
+def score_and_hit(t: Targeting, url: str, anchor_text: str = "",
+                  depth: int = 0) -> tuple:
+    """`score_url` + `include_hit` in ONE pass — urlsplit and the include-pattern
+    sweep run once, not once per predicate. Every hot path (frontier admission,
+    /preview, /map) needs both, and the two-call shape doubled the expensive
+    half of scoring for each candidate URL."""
+    parts = urlsplit(url)
+    pq = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    hit = any(rx.search(pq) for rx in t.include_res)
+    ih = 1.0 if hit else 0.0
+    # Depth penalty scaled by the crawl's own max_depth so shallower pages sort
+    # first without ever flipping a strong content match below a shallow miss.
+    depth_pen = 0.25 * max(0, depth) / (t.max_depth + 1)
+    if not t.tokens:
+        return 0.45 * ih - depth_pen, hit
+    hay = unquote(pq)
+    if anchor_text:
+        hay = f"{hay} {anchor_text}"
+    # Raw tokens on the candidate side — no length/stopword filter. _TOKEN_RE
+    # already splits on every separator, and the goal side is filtered, so the
+    # intersection can't pick up noise; filtering here only cost time and made
+    # 2-char goal terms unmatchable.
+    cand = set(_TOKEN_RE.findall(hay.lower()))
+    exact = t.tokens & cand
+    matched = float(len(exact))
+    if len(exact) < len(t.tokens):
+        # Near-matches only for goal tokens that missed, only against candidate
+        # tokens sharing a first-2-chars bucket (both _near_match shapes imply a
+        # shared 2-char prefix), so this stays O(few) per URL.
+        near = [c for c in cand if c[:2] in t.prefix2]
+        if near:
+            for g in t.tokens:
+                if g not in exact and any(_near_match(g, c) for c in near):
+                    matched += _NEAR_WEIGHT
+    if not matched:
+        # Nothing overlapped: order this zero-signal tail hub-first instead of
+        # by discovery order. Matched candidates are never touched by this.
+        p = (parts.path or "/").strip("/")
+        segs = (p.count("/") + 1) if p else 0
+        return 0.45 * ih - depth_pen - _HUB_PRIOR * min(segs, _HUB_PRIOR_MAX_SEGS), hit
+    overlap = matched / len(t.tokens)
+    return 0.55 * overlap + 0.45 * ih - depth_pen, hit
 
 
 def score_url(t: Targeting, url: str, anchor_text: str = "", depth: int = 0) -> float:
@@ -136,19 +230,39 @@ def score_url(t: Targeting, url: str, anchor_text: str = "", depth: int = 0) -> 
     sorted-set score (best-first).
 
     With NO goal tokens this reduces to `include_boost - depth_penalty`, i.e.
-    shallow-first — reproducing the plain roughly-BFS ordering."""
-    parts = urlsplit(url)
-    path = parts.path or "/"
-    ih = 1.0 if any(rx.search(_path_query(url)) for rx in t.include_res) else 0.0
-    # Depth penalty scaled by the crawl's own max_depth so shallower pages sort
-    # first without ever flipping a strong content match below a shallow miss.
-    depth_pen = 0.25 * max(0, depth) / (t.max_depth + 1)
-    if not t.tokens:
-        return 0.45 * ih - depth_pen
-    hay = _SEP_RE.sub(" ", unquote(f"{path} {parts.query or ''}")) + " " + (anchor_text or "")
-    cand = tokenize(hay)
-    overlap = (len(t.tokens & cand) / len(t.tokens)) if t.tokens else 0.0
-    return 0.55 * overlap + 0.45 * ih - depth_pen
+    shallow-first — reproducing the plain roughly-BFS ordering. Thin wrapper over
+    `score_and_hit`; call that directly when the include verdict is also needed."""
+    return score_and_hit(t, url, anchor_text, depth)[0]
+
+
+async def rank_urls(t: Targeting, pairs, *, limit=None, depth: int = 0) -> list:
+    """Score `(url, anchor_text)` pairs and return the best `limit` of them as
+    `(url, anchor_text, score)`, best-first (ALL of them, fully sorted, when
+    `limit` is None). Ties keep discovery order, like the stable sorts this
+    replaces.
+
+    The one shared ranking loop for every candidate list (map endpoints, the
+    seeder, shard-completion admission). Two properties matter:
+      - bounded heap: top-N is O(n log limit), not a full sort of a site-sized
+        candidate dump just to serialize its head;
+      - it YIELDS the event loop every ~2k URLs — candidate lists are
+        site-controlled (an 8 MB sitemap is ~100k URLs) and these loops run
+        inside async handlers, where one sync sweep stalls the coordinator."""
+    bound = int(limit) if limit is not None and limit > 0 else None
+    heap: list = []
+    seq = 0
+    for url, anchor in pairs:
+        seq += 1
+        s, _hit = score_and_hit(t, url, anchor or "", depth)
+        entry = (s, -seq, url, anchor or "")   # -seq: earlier discovery wins ties
+        if bound is None or len(heap) < bound:
+            heapq.heappush(heap, entry)
+        elif entry > heap[0]:
+            heapq.heapreplace(heap, entry)
+        if (seq & 0x7FF) == 0:
+            await asyncio.sleep(0)
+    heap.sort(reverse=True)
+    return [(u, a, s) for (s, _neg, u, a) in heap]
 
 
 def passes_threshold(t: Targeting, score: float, depth: int, hit: bool) -> bool:

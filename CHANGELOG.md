@@ -6,6 +6,45 @@ file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-08-10
+
+Attaching a file while recording shipped in 1.0.1, but a file picked during a
+recording did not survive to replay. These four defects were the gap between the
+feature existing and the feature working.
+
+### Fixed
+
+- **A recorded upload failed at replay with "no file is bound" — even though you
+  had picked a file.** A saved step carries its binding in `config` when the
+  *editor* wrote it and in `options` when the *recorder* did. The run's file map
+  read only `config`, so every upload bound while recording was simply absent from
+  it. Both shapes are canonical for a saved workflow — the UI already tolerates the
+  `step.x` / `config.x` / `options.x` spread — so both are read now, with `config`
+  winning as the explicit later edit.
+
+- **An upload step with a file already pinned to it was invisible in the run
+  dialog.** A pinned file was treated as "not a run-time slot" and excluded
+  entirely, which meant a workflow that ran perfectly well offered no way to swap
+  the file for one run without editing the workflow itself. Every upload step is now
+  listed, and a pinned file comes through as that slot's **default** — the run works
+  untouched, and the default is there to override.
+
+- **Answering the recorder's file chooser could cancel itself.** `FilePicker` calls
+  `onSelect` and then `onClose`, while answering is asynchronous — it mints a signed
+  URL first. Both handlers therefore ran against the same React render, and the
+  close handler sent `skip` before the answer had gone out, so the file you chose
+  was discarded and the page's dialog was dismissed empty. The prompt is now claimed
+  through a ref that updates synchronously: whichever handler takes it first wins,
+  and the other finds nothing and does nothing. State could not fix this — a state
+  update is not visible to a handler in the same render.
+
+- **MCP callers could not tell which files a workflow needs.** Workflow tools now
+  describe their `files` parameter per workflow: each slot, its label, and the
+  filename of any pinned default, so a model can see what the call will use if it
+  passes nothing and which slot it must supply when a step ships no file. The
+  workflow-agnostic runner keeps a generic `{slot: file_id}` schema. **No `file_id`
+  is ever exposed** — only slot names, labels and the default's filename.
+
 ## [1.0.1] - 2026-08-10
 
 ### Added

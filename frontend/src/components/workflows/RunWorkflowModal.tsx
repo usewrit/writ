@@ -82,6 +82,10 @@ interface FileSlot {
   slot: string;
   label: string;
   is_multiple?: boolean;
+  /** File pinned on the step — pre-selected here, and used when the runner
+   *  doesn't choose another. Absent for a data-less marketplace slot. */
+  default_file_id?: string;
+  default_filename?: string;
 }
 
 /**
@@ -98,27 +102,51 @@ interface FileSlot {
  * run body's `files` map — the backend binds it to the matching step's file_slot.
  */
 function extractFileSlots(workflow: {
-  file_slots?: Array<{ slot: string; label?: string | null; is_multiple?: boolean }>;
-  steps?: Array<{ type?: string; config?: Record<string, any> | null }>;
+  file_slots?: Array<{
+    slot: string; label?: string | null; is_multiple?: boolean;
+    default_file_id?: string | null; default_filename?: string | null;
+  }>;
+  steps?: Array<{ id?: string; type?: string; config?: Record<string, any> | null; options?: Record<string, any> | null }>;
   data_manifest?: DataManifest | null;
 }): FileSlot[] {
   const slots: FileSlot[] = [];
   const seen = new Set<string>();
-  const add = (slot: string, label?: string | null, isMultiple?: boolean) => {
+  const add = (
+    slot: string, label?: string | null, isMultiple?: boolean,
+    defaultFileId?: string | null, defaultFilename?: string | null,
+  ) => {
     const name = (slot || '').trim();
     if (!name || seen.has(name)) return;
     seen.add(name);
-    slots.push({ slot: name, label: label || name.replace(/_/g, ' '), is_multiple: !!isMultiple });
+    slots.push({
+      slot: name,
+      label: label || name.replace(/_/g, ' '),
+      is_multiple: !!isMultiple,
+      default_file_id: defaultFileId || undefined,
+      default_filename: defaultFilename || undefined,
+    });
   };
   for (const fs of workflow.file_slots || []) {
-    add(fs.slot, fs.label, fs.is_multiple);
+    add(fs.slot, fs.label, fs.is_multiple, fs.default_file_id, fs.default_filename);
   }
+  // Fallback for a workflow served WITHOUT the backend's computed file_slots (summary
+  // payloads, older caches): derive the same inputs from the steps. Every upload step
+  // is an input — one with a pinned file simply arrives pre-filled — and an unslotted
+  // step is keyed on its stable step id, matching the backend and the agent.
   for (const step of workflow.steps || []) {
     if (step?.type !== 'upload') continue;
     const cfg = step.config || {};
-    if (typeof cfg.file_slot === 'string' && cfg.file_slot.trim()) {
-      add(cfg.file_slot, cfg.label, cfg.is_multiple);
-    }
+    const o = step.options || {};
+    const declared = (typeof cfg.file_slot === 'string' && cfg.file_slot.trim())
+      || (typeof o.file_slot === 'string' && o.file_slot.trim());
+    const slot = declared || (step.id ? `step:${step.id}` : '');
+    add(
+      String(slot || ''),
+      cfg.label || o.label || cfg.file_name || o.filename || o.file_name,
+      cfg.is_multiple || o.is_multiple,
+      cfg.file_id || o.file_id,
+      cfg.file_name || o.filename || o.file_name,
+    );
   }
   for (const fs of workflow.data_manifest?.file_slots || []) {
     add(fs.slot, fs.label, fs.is_multiple);
@@ -141,8 +169,11 @@ interface RunWorkflowModalProps {
     entry_url?: string;
     has_login?: boolean;
     has_twofa?: boolean;
-    file_slots?: Array<{ slot: string; label?: string | null; is_multiple?: boolean }>;
-    steps?: Array<{ type?: string; config?: Record<string, any> | null }>;
+    file_slots?: Array<{
+      slot: string; label?: string | null; is_multiple?: boolean;
+      default_file_id?: string | null; default_filename?: string | null;
+    }>;
+    steps?: Array<{ id?: string; type?: string; config?: Record<string, any> | null; options?: Record<string, any> | null }>;
     data_manifest?: DataManifest | null;
   };
   isOpen: boolean;
@@ -224,6 +255,25 @@ export const RunWorkflowModal: React.FC<RunWorkflowModalProps> = ({
 
   const fileSlots = React.useMemo(() => extractFileSlots(workflow), [workflow]);
 
+  // Each step's pinned file IS that slot's default, so a plain Run works untouched
+  // and picking another simply overrides it for this run.
+  //
+  // DERIVED, not seeded into state by an effect. `fileBindings` holds only what the
+  // runner deliberately chose; the default is folded in here at read time. Copying
+  // the defaults into state instead costs an extra render pass on open, and — because
+  // such an effect can only ever ADD — a binding from a previously shown workflow
+  // would survive into the next one, offering to upload a file that belongs to
+  // something else.
+  const effectiveFiles = React.useMemo(() => {
+    const out: Record<string, PickedFile> = { ...fileBindings };
+    for (const s of fileSlots) {
+      if (!out[s.slot] && s.default_file_id) {
+        out[s.slot] = { file_id: s.default_file_id, filename: s.default_filename || s.label };
+      }
+    }
+    return out;
+  }, [fileSlots, fileBindings]);
+
   const stored = workflow.form_data || {};
   // Secrets the workflow references via `{{secret:X}}` but has NO saved value for.
   // Prompted alongside plain placeholders in the modal — the user's ask: "detect
@@ -291,10 +341,11 @@ export const RunWorkflowModal: React.FC<RunWorkflowModalProps> = ({
       }
     }
 
-    // FILE ASSETS (§7.3): every declared file slot must be bound to one of the
-    // runner's own files. A slot ships no concrete file (the recipe is data-less),
-    // so it can't fall back to saved data — the run needs it bound here.
-    const missingFiles = fileSlots.filter((s) => !fileBindings[s.slot]);
+    // FILE ASSETS (§7.3): a file input with NO pinned default must be bound to one of
+    // the runner's own files — the recipe ships no bytes, so it can't fall back to
+    // saved data and the run needs it bound here. A step with a pinned file is
+    // already satisfied.
+    const missingFiles = fileSlots.filter((s) => !effectiveFiles[s.slot]);
     if (missingFiles.length > 0) {
       toast.error(t('Attach a file for: {{fields}}', {
         fields: missingFiles.map((s) => s.label).join(', '),
@@ -304,10 +355,11 @@ export const RunWorkflowModal: React.FC<RunWorkflowModalProps> = ({
 
     // { slot: file_id } — the run-body files map (§4.5). Each id is the runner's
     // own file; the backend ownership-checks it (resolve_for_run fail-closes 404).
+    // Falls back to the step's pinned file so an untouched slot still runs.
     const filesMap: Record<string, string> = {};
     for (const s of fileSlots) {
-      const picked = fileBindings[s.slot];
-      if (picked) filesMap[s.slot] = picked.file_id;
+      const fid = effectiveFiles[s.slot]?.file_id;
+      if (fid) filesMap[s.slot] = fid;
     }
 
     setRunning(true);
@@ -427,7 +479,7 @@ export const RunWorkflowModal: React.FC<RunWorkflowModalProps> = ({
                     )}
                   </label>
                   <SlotFileLink
-                    value={fileBindings[s.slot]}
+                    value={effectiveFiles[s.slot]}
                     onPick={(f) => setFileBindings((prev) => ({ ...prev, [s.slot]: f }))}
                     onClear={() => setFileBindings((prev) => {
                       const next = { ...prev };
@@ -509,8 +561,11 @@ export const RunWorkflowModal: React.FC<RunWorkflowModalProps> = ({
 export function workflowNeedsInput(workflow: {
   placeholders?: Placeholder[];
   form_data?: Record<string, string>;
-  file_slots?: Array<{ slot: string; label?: string | null; is_multiple?: boolean }>;
-  steps?: Array<{ type?: string; config?: Record<string, any> | null }>;
+  file_slots?: Array<{
+    slot: string; label?: string | null; is_multiple?: boolean;
+    default_file_id?: string | null; default_filename?: string | null;
+  }>;
+  steps?: Array<{ id?: string; type?: string; config?: Record<string, any> | null; options?: Record<string, any> | null }>;
   data_manifest?: DataManifest | null;
   has_credentials?: boolean;
   credential_keys?: string[];

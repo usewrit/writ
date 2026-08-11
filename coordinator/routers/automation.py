@@ -283,11 +283,13 @@ class WorkflowResponse(BaseModel):
     functions: Optional[List[dict]] = None
     # Detected placeholders from steps (for flow builder input mapping)
     placeholders: List[dict] = []
-    # FILE ASSETS (§7.3): declared file input slots a RUNNER binds their own stored
-    # file to before a run — `{slot, label, is_multiple}` for each upload-step
-    # config.file_slot (own + shared workflows) plus an installed proxy's manifest
-    # file_slots. Computed from steps even in summary mode (like `placeholders`), so
-    # the run modal can render a file picker per slot regardless of list/detail view.
+    # FILE ASSETS (§7.3): the file inputs a RUNNER may bind their own stored file to
+    # before a run — `{slot, label, is_multiple, default_file_id, default_filename,
+    # declared}` for EVERY upload step, plus an installed proxy's manifest file_slots.
+    # A step with a pinned file is included with that file as its DEFAULT (it still
+    # runs untouched); one that only `declared` a slot has no default and must be
+    # bound. Computed from steps even in summary mode (like `placeholders`), so the
+    # run modal can render a file picker per slot regardless of list/detail view.
     file_slots: List[dict] = []
     # Output keys produced by the workflow (api_call variables, extractions).
     # Legacy/light shape kept for back-compat (config.variable/output_key only).
@@ -577,11 +579,19 @@ def _collect_upload_step_slots(steps: list) -> tuple[list, list]:
             continue
         cfg = step.get("config") or {}
         if step.get("type") == "upload":
-            fid = cfg.get("file_id")
+            # A step carries its binding in `config` when the EDITOR wrote it and in
+            # `options` when the RECORDER did (the file picked while recording). Both
+            # shapes are canonical for a saved workflow — the UI already tolerates the
+            # step.x / config.x / options.x spread — so read both here too. Reading only
+            # `config` left every RECORDED upload out of the run's files map, and the
+            # step then failed at replay with "no file is bound" despite the operator
+            # having picked one. `config` wins: it is the explicit later edit.
+            opts = step.get("options") or {}
+            fid = cfg.get("file_id") or opts.get("file_id")
             if fid and isinstance(fid, str) and fid not in seen_ids:
                 seen_ids.add(fid)
                 file_ids.append(fid)
-            slot = cfg.get("file_slot")
+            slot = cfg.get("file_slot") or opts.get("file_slot")
             if slot and isinstance(slot, str) and slot not in seen_slots:
                 seen_slots.add(slot)
                 slots.append(slot)
@@ -601,28 +611,55 @@ def _collect_upload_step_slots(steps: list) -> tuple[list, list]:
 
 
 def _declared_file_slots(steps: list) -> list:
-    """Labeled file input slots a RUNNER binds their own file to at run time (§7.3).
+    """Labeled file inputs a RUNNER may bind their own file to at run time (§7.3).
 
-    Returns ``[{slot, label, is_multiple}]`` for each upload step that declares a
-    ``config.file_slot`` (own + shared/marketplace recipes). A concrete
-    ``config.file_id`` on an upload step is ALREADY pre-bound in the recipe and
-    resolved server-side, so it is NOT a run-time slot and is excluded. De-duped by
-    slot name, order-preserving. Mirrors services.workflow_manifest's file_slots
-    shape so the run form, the install/attach UI, and the manifest agree."""
+    Returns one entry per upload step:
+    ``[{slot, label, is_multiple, default_file_id, default_filename, declared}]``.
+
+    A step that ``declared`` an abstract ``config.file_slot`` ships no bytes and MUST
+    be bound by the runner. A step carrying a concrete ``file_id`` (pinned while
+    recording or in the editor) resolves server-side, so the workflow still runs
+    untouched — that file is simply the input's DEFAULT, and the runner can swap it
+    for one run without editing the workflow.
+
+    A pinned step used to be EXCLUDED here as "already bound". That is why the run
+    form never offered a file: the only upload most workflows have is a pinned one.
+    An unslotted step is keyed on its own stable step id, so a binding survives
+    reordering or inserting steps (an ordinal would not).
+
+    De-duped by slot name, order-preserving. Mirrors services.workflow_manifest's
+    file_slots shape so the run form, the install/attach UI, and the manifest agree.
+    """
     slots: list = []
     seen: set = set()
+    n = 0
     for step in (steps or []):
         if not isinstance(step, dict) or step.get("type") != "upload":
             continue
         cfg = step.get("config") or {}
-        slot = cfg.get("file_slot")
-        if not slot or not isinstance(slot, str) or slot in seen:
+        opts = step.get("options") or {}
+        n += 1
+        slot = cfg.get("file_slot") or opts.get("file_slot")
+        default_id = cfg.get("file_id") or opts.get("file_id")
+        default_name = cfg.get("file_name") or opts.get("filename") or opts.get("file_name")
+        declared = bool(slot and isinstance(slot, str))
+        if not declared:
+            sid = step.get("id")
+            slot = f"step:{sid}" if sid else f"upload:{n}"
+        if slot in seen:
             continue
         seen.add(slot)
         slots.append({
             "slot": slot,
-            "label": (cfg.get("label") or slot.replace("_", " ")),
-            "is_multiple": bool(cfg.get("is_multiple")),
+            "label": (cfg.get("label") or opts.get("label") or default_name
+                      or (slot.replace("_", " ") if declared else f"File {n}")),
+            "is_multiple": bool(cfg.get("is_multiple") or opts.get("is_multiple")),
+            # Pre-selected in the run form; sent back unchanged unless the runner
+            # picks another. None for a data-less recipe slot.
+            "default_file_id": default_id,
+            "default_filename": default_name,
+            # True = the creator declared an abstract slot the runner MUST bind.
+            "declared": declared,
         })
     return slots
 

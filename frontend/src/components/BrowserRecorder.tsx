@@ -954,10 +954,21 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
     selector: string;
     isMultiple: boolean;
   } | null>(null);
+  // Mirror of `uploadPrompt` that updates SYNCHRONOUSLY. FilePicker calls
+  // onSelect() and then onClose(), and answering is async (it mints a signed URL
+  // first) — so both handlers run against the SAME React render and the close
+  // handler would fire "skip" before the answer was ever sent, cancelling it.
+  // Whoever calls takeUploadPrompt() first wins; the other gets null and no-ops.
+  const uploadPromptRef = useRef<{ requestId: string; selector: string; isMultiple: boolean } | null>(null);
+  const takeUploadPrompt = React.useCallback(() => {
+    const p = uploadPromptRef.current;
+    uploadPromptRef.current = null;
+    return p;
+  }, []);
 
   /** Answer the page's file chooser with a stored file. */
   const answerUploadPrompt = React.useCallback(async (picked: PickedFile) => {
-    const prompt = uploadPrompt;
+    const prompt = takeUploadPrompt();
     if (!prompt) return;
     setUploadPrompt(null);
     try {
@@ -983,11 +994,11 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
       } catch { /* socket already gone */ }
       toast.error(apiErrorMessage(err, t('Could not attach that file')));
     }
-  }, [uploadPrompt, t]);
+  }, [takeUploadPrompt, t]);
 
   /** Decline the chooser — recording continues, the step is recorded unbound. */
   const skipUploadPrompt = React.useCallback(() => {
-    const prompt = uploadPrompt;
+    const prompt = takeUploadPrompt();
     setUploadPrompt(null);
     if (!prompt) return;
     try {
@@ -995,7 +1006,7 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
         type: 'upload_file_selected', request_id: prompt.requestId, skip: true,
       }));
     } catch { /* socket already gone */ }
-  }, [uploadPrompt]);
+  }, [takeUploadPrompt]);
   // How the code is delivered (totp | email_otp | sms | unknown) — pre-selects
   // the persona 2FA method in the prefill. Best-effort hint from the page text.
   const [detected2faChannel, setDetected2faChannel] = useState<string | null>(null);
@@ -1673,11 +1684,15 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
             // let the operator bind a stored file (or import one). Answering feeds the
             // real bytes to the chooser so the flow keeps recording; skipping records
             // the step unbound.
-            setUploadPrompt({
-              requestId: data.request_id,
-              selector: data.selector || '',
-              isMultiple: !!data.is_multiple,
-            });
+            {
+              const p = {
+                requestId: data.request_id,
+                selector: data.selector || '',
+                isMultiple: !!data.is_multiple,
+              };
+              uploadPromptRef.current = p;
+              setUploadPrompt(p);
+            }
             break;
 
           case 'twofa_detected':

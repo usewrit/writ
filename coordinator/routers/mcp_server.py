@@ -214,6 +214,55 @@ async def _resolve_workflow(token: str, args: dict) -> dict:
     raise _Upstream(404, f"No saved workflow matches {name or wid!r}. Use writ_list_workflows.")
 
 
+# Generic `files` schema for the workflow-agnostic runner, where the callable slot
+# names aren't known until a workflow is resolved.
+_FILES_PROPERTY_GENERIC = {
+    "type": "object",
+    "additionalProperties": {"type": "string"},
+    "description": (
+        "Optional file inputs for this run, as {slot: file_id}. Slot names come from "
+        "the workflow's `file_slots` (writ_list_workflows); file_ids come from the "
+        "file library. A workflow whose upload step already has a file pinned runs "
+        "fine with no `files` at all — pass it only to swap the file for THIS run."
+    ),
+}
+
+
+def _file_slots_property(w: dict) -> Optional[dict]:
+    """The `files` tool property for ONE workflow, or None when it takes no files.
+
+    Names each slot and its pinned default in the description so a model can tell
+    what the call will use if it passes nothing, and which slot it must supply when
+    a step ships no file. Never exposes a file_id — only slot names, labels and the
+    default's FILENAME.
+    """
+    slots = w.get("file_slots")
+    if not isinstance(slots, list) or not slots:
+        return None
+    lines: list[str] = []
+    for fs in slots:
+        if not isinstance(fs, dict) or not fs.get("slot"):
+            continue
+        label = fs.get("label") or fs["slot"]
+        if fs.get("default_file_id"):
+            fname = fs.get("default_filename")
+            lines.append(f"{fs['slot']} — {label} (optional; defaults to the pinned file"
+                         + (f" “{fname}”" if fname else "") + ")")
+        else:
+            lines.append(f"{fs['slot']} — {label} (REQUIRED: this step ships no file)")
+    if not lines:
+        return None
+    return {
+        "type": "object",
+        "additionalProperties": {"type": "string"},
+        "description": (
+            "Optional file inputs for this run, as {slot: file_id} using ids from the "
+            "file library. Overrides the step's pinned file for THIS run only. "
+            "Slots: " + "; ".join(lines)
+        ),
+    }
+
+
 def _derived_run_tools(rows: list[dict]) -> list[dict]:
     """One ``run_<workflow>`` tool per saved workflow (mirrors the desktop daemon).
 
@@ -242,6 +291,13 @@ def _derived_run_tools(rows: list[dict]) -> list[dict]:
             k = ph if isinstance(ph, str) else (ph.get("name") if isinstance(ph, dict) else None)
             if k and k not in props:
                 props[str(k)] = {"type": "string", "description": f"Input: {k}"}
+        # File inputs: every upload step is bindable at call time. A step with a
+        # pinned file needs no argument (it resolves server-side), so `files` is
+        # always OPTIONAL here — it exists so a caller can run the same workflow
+        # against a DIFFERENT file without editing it.
+        _fs = _file_slots_property(w)
+        if _fs:
+            props.setdefault("files", _fs)
         # Advertise the delivery/freshness controls alongside the workflow's own inputs.
         # A caller-defined input of the same name always wins — shadowing it would
         # silently change what the workflow receives.
@@ -260,10 +316,26 @@ def _derived_run_tools(rows: list[dict]) -> list[dict]:
 
 def _inputs_from_args(args: dict) -> dict:
     """Everything that isn't a control key is treated as a run input."""
-    reserved = {"workflow", "workflow_id", "id", "name", "wait", "timeout_seconds", FRESHNESS_ARG}
+    reserved = {"workflow", "workflow_id", "id", "name", "wait", "timeout_seconds",
+                "files", FRESHNESS_ARG}
     if isinstance(args.get("inputs"), dict):
         return dict(args["inputs"])
     return {k: v for k, v in args.items() if k not in reserved}
+
+
+def _files_from_args(args: dict) -> dict:
+    """The run's file bindings: ``{slot: file_id}`` (§4.5).
+
+    Kept OUT of form_data — the run endpoint reads files from a top-level `files`
+    key, and a slot left in form_data would be treated as an ordinary text input and
+    the file silently never bound. Only string→string pairs survive; the coordinator
+    resolves every id fail-closed (resolve_for_run 404s on a bad reference), so
+    nothing here is trusted beyond its shape.
+    """
+    raw = args.get("files")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): v for k, v in raw.items() if isinstance(v, str) and v}
 
 
 # ── Result reuse (the `max_age` tool argument) ───────────────────────────────
@@ -314,8 +386,12 @@ def _requested_max_age(args: dict) -> int:
         return 0
 
 
-def _freshness_key(wf_id: int, inputs: dict) -> tuple:
-    return (wf_id, json.dumps(inputs or {}, sort_keys=True, default=str))
+def _freshness_key(wf_id: int, inputs: dict, files: dict = None) -> tuple:
+    # The FILES map is part of the key: uploading a different file is a different
+    # question, so a run bound to file B must never be served file A's cached answer.
+    return (wf_id,
+            json.dumps(inputs or {}, sort_keys=True, default=str),
+            json.dumps(files or {}, sort_keys=True, default=str))
 
 
 def _cached_run(key: tuple, max_age: int) -> Optional[dict]:
@@ -345,12 +421,19 @@ def _store_run(key: tuple, result: dict) -> None:
         _RESULT_CACHE.popitem(last=False)
 
 
-async def _run_workflow_id(token: str, wf: dict, inputs: dict, wait: bool, timeout_s: int) -> dict:
+async def _run_workflow_id(token: str, wf: dict, inputs: dict, wait: bool, timeout_s: int,
+                           files: dict = None) -> dict:
     wid = wf["id"]
     dispatch_ts = time.time()
+    body: dict = {"form_data": inputs}
+    # Files ride at the TOP LEVEL of the run body, not inside form_data — that is
+    # where the run endpoint binds them from (§4.5). Omitted entirely when empty so
+    # a workflow with a pinned file keeps resolving it server-side.
+    if files:
+        body["files"] = files
     disp = await _call(
         "POST", f"/api/automation/workflows/{wid}/run", token,
-        json_body={"form_data": inputs},
+        json_body=body,
     )
     task_id = (disp or {}).get("task_id") if isinstance(disp, dict) else None
     if not wait:
@@ -417,14 +500,27 @@ async def _tool_list_workflows(token: str, args: dict) -> dict:
     for w in rows:
         if q and q not in (w.get("name") or "").lower() and q not in (w.get("description") or "").lower():
             continue
-        out.append({
+        row = {
             "id": w.get("id"),
             "name": w.get("name"),
             "description": w.get("description"),
             "inputs": list((w.get("form_data") or {}).keys()),
             "schedule_enabled": w.get("schedule_enabled"),
             "schedule_kind": w.get("schedule_kind"),
-        })
+        }
+        # File inputs, so a caller can discover the slot names it may bind (and
+        # which ones it MUST) without a second round-trip. Names only — the pinned
+        # file's id stays server-side; only its filename is descriptive.
+        fslots = [
+            {"slot": fs.get("slot"), "label": fs.get("label"),
+             "required": not fs.get("default_file_id"),
+             "default_filename": fs.get("default_filename")}
+            for fs in (w.get("file_slots") or [])
+            if isinstance(fs, dict) and fs.get("slot")
+        ]
+        if fslots:
+            row["file_slots"] = fslots
+        out.append(row)
     return _content({"workflows": out, "total": len(out)})
 
 
@@ -433,16 +529,17 @@ async def _tool_run_workflow(token: str, args: dict) -> dict:
     wait = args.get("wait", True) is not False
     timeout_s = int(args.get("timeout_seconds") or 120)
     inputs = _inputs_from_args(args)
+    files = _files_from_args(args)
 
     # FRESHNESS first: a reusable answer means no dispatch at all.
     max_age = _requested_max_age(args)
-    key = _freshness_key(wf["id"], inputs)
+    key = _freshness_key(wf["id"], inputs, files)
     if max_age > 0:
         hit = _cached_run(key, max_age)
         if hit is not None:
             return _content(hit)
 
-    res = await _run_workflow_id(token, wf, inputs, wait, timeout_s)
+    res = await _run_workflow_id(token, wf, inputs, wait, timeout_s, files)
     _store_run(key, res)
     return _content(res)
 
@@ -1133,11 +1230,12 @@ _STATIC_TOOLS: list[dict] = [
     },
     {
         "name": "writ_run_workflow",
-        "description": "Run a saved workflow by id or name and (by default) wait for it to finish, returning the extracted data. Pass workflow inputs as top-level fields or under `inputs`.",
+        "description": "Run a saved workflow by id or name and (by default) wait for it to finish, returning the extracted data. Pass workflow inputs as top-level fields or under `inputs`, and any file inputs under `files`.",
         "inputSchema": {"type": "object", "properties": {
             "workflow": {"type": "string", "description": "Workflow name (or use workflow_id)."},
             "workflow_id": {"type": "integer"},
             "inputs": {"type": "object", "description": "Run inputs (or pass them as top-level fields)."},
+            "files": _FILES_PROPERTY_GENERIC,
             **RUN_CONTROL_PROPERTIES}},
         "_handler": _tool_run_workflow,
     },
@@ -1773,9 +1871,23 @@ async def _dispatch(body: dict, token: str, auth: "AuthContext" = None) -> Optio
                         async def handler(tok, a, _wid=wid):  # noqa: E731
                             wf = next((w for w in rows if w.get("id") == _wid), {"id": _wid})
                             wait = a.get("wait", True) is not False
-                            return _content(await _run_workflow_id(
-                                tok, wf, _inputs_from_args(a), wait,
-                                int(a.get("timeout_seconds") or 120)))
+                            inputs = _inputs_from_args(a)
+                            files = _files_from_args(a)
+                            # The derived tools advertise `max_age` (they inherit
+                            # RUN_CONTROL_PROPERTIES), so they must honour it —
+                            # advertising a control that silently does nothing is
+                            # worse than not offering it at all.
+                            fkey = _freshness_key(_wid, inputs, files)
+                            requested = _requested_max_age(a)
+                            if requested > 0:
+                                hit = _cached_run(fkey, requested)
+                                if hit is not None:
+                                    return _content(hit)
+                            res = await _run_workflow_id(
+                                tok, wf, inputs, wait,
+                                int(a.get("timeout_seconds") or 120), files)
+                            _store_run(fkey, res)
+                            return _content(res)
                         break
 
             if handler is None:

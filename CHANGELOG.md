@@ -12,6 +12,26 @@ Attaching a file while recording shipped in 1.0.1, but a file picked during a
 recording did not survive to replay. These four defects were the gap between the
 feature existing and the feature working.
 
+### Security
+
+- **The automation builder's hand-off draft now re-validates where it sends you.**
+  Leaving the builder to create a workflow stashes the draft in `sessionStorage`
+  along with a `returnTo` route, and finishing interpolates that value straight
+  into a `navigate()` target. It was checked only for being a *string*.
+
+  It is written as `location.pathname`, so it is same-origin by construction — but
+  it then survives in storage and is re-read rather than re-derived, so anything
+  able to write that key chose where "back to the builder" landed, including an
+  absolute URL or the `/\evil.com` form that gets past React Router's own check
+  (CVE-2026-53669). It is now resolved against this origin on the way **out**, via
+  the same `safeInternalPath` guard the login redirect uses, and falls back to
+  `/automations/new` when it does not point here. Validating on read rather than
+  on write means the guarantee holds however the value got there.
+
+  Defence in depth rather than a fix for a live hole: writing that key requires
+  script execution on the page already. No configuration change, and legitimate
+  builder routes — including query and fragment — are unaffected.
+
 ### Fixed
 
 - **A recorded upload failed at replay with "no file is bound" — even though you

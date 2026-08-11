@@ -1,4 +1,5 @@
 import type { FlowBlock } from './types';
+import { safeInternalPath } from '../../utils/safeRedirect';
 
 /**
  * Hand-off draft for the automation builder.
@@ -37,6 +38,9 @@ export function saveFlowDraft(draft: FlowDraft): void {
   }
 }
 
+/** Where a draft with an unusable `returnTo` sends the builder instead. */
+const DEFAULT_RETURN_TO = '/automations/new';
+
 /** Read without consuming — the wizard needs `returnTo` while it's still running. */
 export function peekFlowDraft(): FlowDraft | null {
   try {
@@ -44,7 +48,15 @@ export function peekFlowDraft(): FlowDraft | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed.returnTo !== 'string' || !Array.isArray(parsed.blocks)) return null;
-    return parsed as FlowDraft;
+    // `returnTo` is interpolated straight into a `navigate()` target by the wizard,
+    // so being a string is not enough — it has to be a path on THIS origin. It is
+    // written as `location.pathname` and so is same-origin by construction, but this
+    // value survives in sessionStorage and is only ever re-read, never re-derived.
+    // Anything that can write that key therefore chooses where "Back to builder"
+    // lands, including an absolute URL or the `\\evil.com` form that CVE-2026-53669
+    // gets past react-router's own check. Re-validating on the way OUT means the
+    // guarantee holds no matter how the value got there.
+    return { ...parsed, returnTo: safeInternalPath(parsed.returnTo, DEFAULT_RETURN_TO) } as FlowDraft;
   } catch {
     return null;
   }

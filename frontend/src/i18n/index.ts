@@ -52,8 +52,10 @@ export async function ensureLanguage(lng?: string): Promise<void> {
   try {
     const mod = await loader();
     i18n.addResourceBundle(base, 'translation', mod.default, true, true);
-    // Re-emit so already-mounted components re-render with the loaded strings.
-    if (i18n.language === base || i18n.resolvedLanguage === base) {
+    // Re-emit so already-mounted components re-render with the loaded strings. Compare on the BASE
+    // code: the detector hands us regional tags (`fr-FR` on a French machine), so an exact match
+    // missed and the freshly-loaded dictionary never triggered the re-render.
+    if (normalizeLanguage(i18n.language) === base) {
       await i18n.changeLanguage(base);
     }
   } catch {
@@ -65,6 +67,27 @@ export async function ensureLanguage(lng?: string): Promise<void> {
 export function normalizeLanguage(lng: string | null | undefined): string | null {
   const base = (lng || '').split('-')[0].trim().toLowerCase();
   return SUPPORTED_LANGUAGES.some((l) => l.code === base) ? base : null;
+}
+
+/**
+ * THE active UI language, always a supported base code (`en` / `fr` / `es`).
+ *
+ * USE THIS — never `i18n.resolvedLanguage` — for "which language is selected".
+ *
+ * i18next assigns `resolvedLanguage` only a language that HAS TRANSLATIONS IN THE STORE
+ * (`setResolvedLanguage` resets it to `undefined`, then walks `languages` for the first one where
+ * `hasLanguageSomeTranslations` holds). This app uses natural-language keys, so **English
+ * deliberately ships no dictionary** — `hasLanguageSomeTranslations('en')` is false forever, and
+ * fr/es are false until their lazy chunk lands (or permanently, if it fails to load).
+ * `resolvedLanguage` is therefore `undefined` far more often than it looks, and every
+ * `i18n.resolvedLanguage || 'en'` collapsed to "English is selected" while the UI displayed another
+ * language — a language picker keeping the check on English after switching to French.
+ *
+ * `i18n.language` is what was actually CHOSEN (or detected) — the question a selector is asking. It
+ * only needs normalizing, since the detector yields regional tags like `fr-FR`.
+ */
+export function activeLanguage(): string {
+  return normalizeLanguage(i18n.language) ?? normalizeLanguage(i18n.resolvedLanguage) ?? 'en';
 }
 
 /**
@@ -87,19 +110,24 @@ export async function setLanguage(lng: string): Promise<void> {
  */
 export async function applyUserLanguage(userLanguage: string | null | undefined): Promise<void> {
   const target = normalizeLanguage(userLanguage);
-  if (!target || target === i18n.resolvedLanguage) return;
+  if (!target || target === activeLanguage()) return;
   await setLanguage(target);
 }
 
 // Keep <html lang> in sync for a11y / screen readers.
 i18n.on('languageChanged', (lng) => {
-  document.documentElement.lang = lng;
+  document.documentElement.lang = normalizeLanguage(lng) ?? lng;
 });
-document.documentElement.lang = i18n.resolvedLanguage || 'en';
+document.documentElement.lang = activeLanguage();
 
 // Load whatever language was detected on boot (English is a no-op, resolves
 // instantly). Exposed so the app can hold first paint until the active
 // dictionary is present — avoids a flash of English keys for fr/es users.
-export const i18nReady: Promise<void> = ensureLanguage(i18n.resolvedLanguage);
+// `i18n.language`, NOT `i18n.resolvedLanguage`. At this point the store is EMPTY (`resources: {}`
+// — every dictionary is lazy), so `resolvedLanguage` is `undefined` and this called
+// `ensureLanguage(undefined)`, a no-op. Effect: a machine whose OS locale is French or Spanish
+// booted the whole app in English and never loaded its dictionary at all. Invisible on an
+// English-locale machine, which is why it survived.
+export const i18nReady: Promise<void> = ensureLanguage(i18n.language);
 
 export default i18n;

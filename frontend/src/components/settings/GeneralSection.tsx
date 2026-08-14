@@ -6,7 +6,7 @@ import { SectionHead } from '../common/SectionHead';
 import { SourceOffer } from '../common/SourceOffer';
 import { Button } from '../ui/Button';
 import { Select } from '../ui';
-import { SUPPORTED_LANGUAGES, setLanguage } from '../../i18n';
+import { SUPPORTED_LANGUAGES, activeLanguage, setLanguage } from '../../i18n';
 import { useTour } from '../../onboarding/TourProvider';
 import { resetOnboarding, setGlobalStatus } from '../../onboarding/storage';
 import { apiErrorMessage } from '../../api/client';
@@ -29,7 +29,7 @@ import { getPreferences, updatePreferences, type PreferencesSettings } from '../
  * nothing. If that ever changes, the README claim has to change with it.
  */
 export const GeneralSection: React.FC = () => {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { startTour } = useTour();
   const [data, setData] = useState<PreferencesSettings | null>(null);
   const [loading, setLoading] = useState(true);
@@ -80,7 +80,7 @@ export const GeneralSection: React.FC = () => {
           <div>
             <label className="block text-[13px] font-medium text-ink mb-1">{t('Language')}</label>
             <Select
-              value={data.language || i18n.resolvedLanguage || 'en'}
+              value={data.language || activeLanguage()}
               onChange={(v) => handleLanguage(String(v))}
               options={SUPPORTED_LANGUAGES.map((l) => ({ value: l.code, label: l.label }))}
             />

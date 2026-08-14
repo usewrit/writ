@@ -6,6 +6,37 @@ file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-08-13
+
+### Fixed
+
+- **The language picker always showed "English", whatever language the app was
+  actually displaying.** i18next only sets `resolvedLanguage` for a language it has
+  a dictionary for, and English ships none — it is the source strings. So
+  `resolvedLanguage || 'en'` read as English even while the UI rendered in French,
+  and the `<select>` sat on the wrong option until you re-picked the language you
+  were already using. A new `activeLanguage()` returns the true active base code
+  and is now the single source for the two pickers and for date formatting.
+  **`resolvedLanguage` must not be used to decide what is selected.**
+
+- **A freshly loaded dictionary did not repaint mounted components.** The re-emit
+  after a lazy dictionary load compared the exact language tag, but the browser
+  detector supplies regional tags — `fr-FR` on a French machine — so the match
+  failed and already-mounted components kept their English strings until the next
+  unrelated render. The comparison is now on the normalised base code.
+
+### Security
+
+- **React Router upgraded to 7.18.2**, clearing three advisories that affected the
+  6.x line: an open redirect via backslash in `<Link>` and `useNavigate`
+  (CVE-2026-53669), an open redirect leading to XSS (CVE-2026-53668), and arbitrary
+  constructor injection in SSR hydration (CVE-2026-53666).
+
+  None was reachable here — this app is a pure SPA with no server-side rendering, so
+  the hydration path never ran, and no untrusted input reached a router target. The
+  6.x line had **no patch** for CVE-2026-53668, so the major upgrade was the only way
+  to clear them rather than carry them indefinitely.
+
 ## [1.0.2] - 2026-08-10
 
 Attaching a file while recording shipped in 1.0.1, but a file picked during a

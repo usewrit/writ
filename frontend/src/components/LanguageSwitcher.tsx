@@ -1,6 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { SUPPORTED_LANGUAGES, setLanguage } from '../i18n';
+import { SUPPORTED_LANGUAGES, activeLanguage, setLanguage } from '../i18n';
 
 interface LanguageSwitcherProps {
   className?: string;
@@ -14,13 +14,13 @@ interface LanguageSwitcherProps {
 }
 
 export const LanguageSwitcher: React.FC<LanguageSwitcherProps> = ({ className, onChange }) => {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
 
   return (
     <label className={className}>
       <span className="sr-only">{t('Language')}</span>
       <select
-        value={i18n.resolvedLanguage || 'en'}
+        value={activeLanguage()}
         onChange={(e) => {
           const code = e.target.value;
           void setLanguage(code);

@@ -1,7 +1,7 @@
 import { formatDistanceToNow } from 'date-fns';
 import { fr } from 'date-fns/locale/fr';
 import { es } from 'date-fns/locale/es';
-import i18n from '../i18n';
+import i18n, { activeLanguage } from '../i18n';
 
 // Timestamps are the single most repeated piece of text in the UI, so they have to
 // follow the interface language rather than the build's. `formatDate` used a fixed
@@ -12,7 +12,7 @@ const DATE_FNS_LOCALES = { fr, es } as const;
 
 /** date-fns locale for the active UI language (undefined = the en-US built-in). */
 const dateFnsLocale = () =>
-  DATE_FNS_LOCALES[i18n.resolvedLanguage as keyof typeof DATE_FNS_LOCALES];
+  DATE_FNS_LOCALES[activeLanguage() as keyof typeof DATE_FNS_LOCALES];
 
 /**
  * BCP-47 tag for `Intl` / `toLocale*`, from the active UI language.
@@ -22,7 +22,7 @@ const dateFnsLocale = () =>
  * different thing from the language the owner picked in Settings — an en-US browser
  * set to French would otherwise keep rendering English dates and 1,234.5 numbers.
  */
-export const uiLocale = (): string => i18n.resolvedLanguage || 'en';
+export const uiLocale = (): string => activeLanguage();
 const intlLocale = uiLocale;
 
 // Intl handles the parts a fixed pattern cannot: month names, and the field ORDER

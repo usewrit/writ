@@ -355,3 +355,68 @@ def test_image_ocr_off_skips():
     res = extractor.extract(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16, "image/png", "", ocr_mode="off")
     assert res["kind"] == "image"
     assert res["ocr"] is None
+
+
+# --- Table plausibility: shredded prose must never render as a table --------
+
+
+def test_justified_prose_grid_is_not_a_table():
+    """Justified paragraphs align words into vertical columns; pdfplumber's
+    text strategy reads them as a uniform-width grid of 1-3 word fragments with
+    words CUT at column boundaries ("con" | "sectetuer"). The word-split gate
+    must reject that shape under both the strict (borderless) and ruled bars."""
+    from engines import pdf_infer
+
+    shredded = [
+        ["Sample", "PDF", None, None, None, None],
+        ["This is a simple", "PDF fil", "e. Fun fun fun", ".", None, None],
+        ["Lorem ipsum dolor sit", "amet, con", "sectetuer adipiscing",
+         "elit. Phasellus f", "acilisis odio", "sed mi."],
+        ["Curabitur suscipit. Nulla", "m vel nisi", ". Etiam semper ipsu",
+         "m ut lectus. Proi", "n aliquam,", "erat eget"],
+        ["pulvinar quis, nisl.", None, None, None, None, None],
+    ]
+    assert pdf_infer._word_split_fraction(shredded) >= 0.35
+    assert pdf_infer._plausible_table(shredded, strict=True) is False
+    assert pdf_infer._plausible_table(shredded, strict=False) is False
+
+
+def test_real_and_unit_column_tables_stay_plausible():
+    from engines import pdf_infer
+
+    real = [
+        ["Product", "Qty", "Price", "Total"],
+        ["Widget A", "2", "$4.00", "$8.00"],
+        ["Widget B", "1", "$3.50", "$3.50"],
+        ["Gadget", "10", "$0.99", "$9.90"],
+    ]
+    assert pdf_infer._plausible_table(real, strict=True) is True
+    assert pdf_infer._plausible_table(real, strict=False) is True
+
+    # Lowercase unit cells ("mm", "kg") create a few letter→lowercase junctions
+    # in a GENUINE table; the fraction gate must tolerate them.
+    units = [
+        ["Dimension", "Value", "Unit"],
+        ["Length", "120", "mm"],
+        ["Width", "80", "mm"],
+        ["Mass", "2.4", "kg"],
+    ]
+    assert pdf_infer._plausible_table(units, strict=True) is True
+
+
+def test_prose_filled_raggedness_rejected_even_without_word_cuts():
+    """Prose lines fill wildly varying column counts (a closing line fills 1,
+    a full line 6) even when the cuts happen to land on word boundaries — the
+    filled-count consistency bar must reject that on its own."""
+    from engines import pdf_infer
+
+    ragged = [
+        ["The quick", "Brown fox", "Jumps over", "The lazy", "Dog and", "Runs."],
+        ["Then it", "Sat down.", None, None, None, None],
+        ["A new", "Sentence starts", "Here with", "More words", "To fill", "Lines."],
+        ["End.", None, None, None, None, None],
+    ]
+    # Every cell starts uppercase, so the word-split gate stays quiet — this
+    # fixture isolates the filled-count consistency bar.
+    assert pdf_infer._word_split_fraction(ragged) < 0.35
+    assert pdf_infer._plausible_table(ragged, strict=True) is False

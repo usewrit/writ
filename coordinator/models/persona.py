@@ -117,6 +117,39 @@ class Persona(Base):
     )
     last_login_at = Column(DateTime(timezone=True), nullable=True)
 
+    # --- Login workflow (how this persona SIGNS IN) ---
+    # Without this the warm session could only ever be CAPTURED from something that
+    # had already logged in; a persona created with credentials alone had no way to
+    # establish one, so authenticated crawls using it were rejected forever.
+    # Dispatching this workflow with persona_id folds in the credentials + 2FA, and
+    # the run-completion write-back persists the captured session onto the persona.
+    # SET NULL on delete: losing the workflow must never delete the identity.
+    # `use_alter` breaks a FOREIGN-KEY CYCLE. `automation_workflows.default_persona_id`
+    # already points here, so this column makes the two tables mutually dependent and
+    # SQLAlchemy can no longer order them:
+    #   "Cannot correctly sort tables; there are unresolvable cycles between tables
+    #    automation_workflows, personas"
+    # which breaks `metadata.create_all` / `drop_all` outright — and SQLAlchemy warns
+    # that it "may raise an error in a future release". `use_alter` emits this one
+    # constraint separately instead of inline, so the cycle no longer participates in
+    # the sort. It needs an explicit `name` to be alterable at all.
+    #
+    # Migrations are unaffected either way: 0017 adds the column to a table that
+    # already exists, so it never sorts the schema as a whole.
+    login_workflow_id = Column(
+        Integer,
+        ForeignKey(
+            "automation_workflows.id", ondelete="SET NULL",
+            use_alter=True, name="fk_personas_login_workflow_id",
+        ),
+        nullable=True, index=True,
+        comment="Workflow that signs this persona in; re-run on demand and on session expiry",
+    )
+    last_login_error = Column(
+        Text, nullable=True,
+        comment="Why the most recent sign-in attempt failed (cleared on success)",
+    )
+
     is_active = Column(Boolean, nullable=False, server_default="true", index=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())

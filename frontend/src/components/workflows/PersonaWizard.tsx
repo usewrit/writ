@@ -11,7 +11,7 @@ import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
 import { Checkbox, NumberInput, Select } from '../ui';
 import { ConfirmDialog } from '../ConfirmDialog';
-import { personasApi, agentsApi, vaultApi } from '../../api/endpoints';
+import { personasApi, agentsApi, vaultApi, automationApi } from '../../api/endpoints';
 import type { Persona, PersonaCreate, PersonaUpdate, TwoFactorMethod, ImapConfig, Agent } from '../../types/api';
 import { parseOtpauthUri, decodeQrFromImageFile, canDecodeQr, isMigrationUri, parseMigrationUri, type ParsedOtpauth } from '../../utils/otpauth';
 
@@ -56,6 +56,9 @@ interface WizardForm {
   fingerprint: { user_agent: string; locale: string; timezone: string } | null;
   fingerprintTouched: boolean;
   is_active: boolean;
+  /** Workflow that SIGNS THIS PERSONA IN. Null = it can't log itself in, so its
+   * session can only ever be captured from elsewhere and an expiry is terminal. */
+  login_workflow_id: number | null;
   // ── BYO/residential proxy ──
   proxy_server: string;
   proxy_username: string;
@@ -142,6 +145,7 @@ function buildInitialForm(persona?: Persona | null, defaultDomain?: string, pref
     fingerprint: persona ? null : randomFingerprint(),
     fingerprintTouched: false,
     is_active: persona ? !!persona.is_active : true,
+    login_workflow_id: persona?.login_workflow_id ?? null,
     // Proxy secrets are write-only; on edit we only know whether one is set.
     proxy_server: '',
     proxy_username: '',
@@ -295,6 +299,7 @@ export const PersonaWizard: React.FC<PersonaWizardProps> = ({ isOpen, onClose, o
   const [imapReplace, setImapReplace] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [secrets, setSecrets] = useState<{ id: number; name: string; is_credential: boolean }[]>([]);
+  const [loginWorkflowOptions, setLoginWorkflowOptions] = useState<any[]>([]);
   // On edit, only overwrite stored credentials if the user actually touched them.
   const [credsTouched, setCredsTouched] = useState(false);
   // Optional live check: confirm a pasted TOTP seed reproduces a code the user
@@ -337,6 +342,11 @@ export const PersonaWizard: React.FC<PersonaWizardProps> = ({ isOpen, onClose, o
     agentsApi.getAll()
       .then((rows) => { if (alive) setAgents(rows); })
       .catch(() => { if (alive) setAgents([]); });
+    // Candidates for "this persona's login workflow". Crawl workflows are already
+    // excluded server-side, so this is the full list of things a login could be.
+    automationApi.listWorkflows()
+      .then((rows: any[]) => { if (alive) setLoginWorkflowOptions(rows || []); })
+      .catch(() => { if (alive) setLoginWorkflowOptions([]); });
     vaultApi.listSecrets()
       .then((rows: any[]) => {
         if (alive) setSecrets((rows || []).map((s) => ({ id: s.id, name: s.name, is_credential: !!s.is_credential })));
@@ -538,6 +548,7 @@ export const PersonaWizard: React.FC<PersonaWizardProps> = ({ isOpen, onClose, o
           twofa_method: form.twofa_method,
           preferred_agent_id: form.preferred_agent_id || undefined,
           fingerprint: form.pinFingerprint && form.fingerprint ? form.fingerprint : undefined,
+          login_workflow_id: form.login_workflow_id ?? undefined,
         };
         if (form.proxy_server.trim()) {
           payload.proxy_server = form.proxy_server.trim();
@@ -587,6 +598,8 @@ export const PersonaWizard: React.FC<PersonaWizardProps> = ({ isOpen, onClose, o
           twofa_method: form.twofa_method,
           preferred_agent_id: form.preferred_agent_id || (null as any),
           is_active: form.is_active,
+          // Explicit null DETACHES; the coordinator distinguishes absent from null.
+          login_workflow_id: form.login_workflow_id ?? (null as any),
         };
         // Secrets: only overwrite when the user actually changed a credential
         // (typed a value, or linked/unlinked a secret). Saving replaces the
@@ -828,6 +841,29 @@ export const PersonaWizard: React.FC<PersonaWizardProps> = ({ isOpen, onClose, o
             {t('Heads-up: saving new credentials replaces the whole stored credential set — re-enter every field this persona needs (including linked secrets), not just the changed one.')}
           </p>
         )}
+      </div>
+
+      {/* HOW THIS PERSONA SIGNS IN. Credentials alone never produced a session —
+          they are only values a login flow types in. Without a workflow that
+          actually performs the login, the persona can never authenticate a crawl,
+          so this belongs on the Login step next to the credentials themselves. */}
+      <div className="border-t border-border pt-4">
+        <label className="text-xs font-medium text-secondary block mb-1">{t('Login workflow')}</label>
+        <Select<string>
+          value={form.login_workflow_id == null ? '' : String(form.login_workflow_id)}
+          onChange={(v) => update({ login_workflow_id: v ? Number(v) : null })}
+          options={[
+            { value: '', label: t('None — this persona can\'t sign itself in') },
+            ...loginWorkflowOptions.map((w: any) => ({ value: String(w.id), label: w.name })),
+          ]}
+        />
+        <p className="text-[11px] text-tertiary mt-1.5">
+          {form.login_workflow_id
+            ? t('Runs whenever this persona needs a fresh session — including automatically mid-crawl.')
+            : isEdit
+              ? t('Pick the workflow that logs this account in, or record one from the persona once saved.')
+              : t('Pick the workflow that logs this account in. You can also record one after saving.')}
+        </p>
       </div>
     </div>
   );

@@ -17,6 +17,10 @@ import {
 import { useWizard } from '../WizardContext';
 import { NumberInput, Switch, Expand } from '../../ui';
 import { PersonaPicker } from '../../workflows/PersonaPicker';
+import { PersonaLoginWorkflow } from '../../workflows/PersonaLoginWorkflow';
+import { personasApi } from '../../../api/endpoints';
+import { useQuery } from '../../../hooks/useQuery';
+import { Q } from '../../../stores/queryKeys';
 import { StageBackdrop } from '../shared/StageBackdrop';
 import { UrlInput } from '../steps/ModeSelectionStep';
 import { crawlApi, type MapUrlItem, type PreviewCrawlResponse } from '../../../api/crawl';
@@ -269,6 +273,18 @@ export const SiteCrawlPanel: React.FC<{ onSubmit?: () => void }> = ({ onSubmit }
     }
   })();
 
+  // The chosen persona, for the sign-in row below. Shares PersonaPicker's cache
+  // entry (same key), so selecting one doesn't cost a second fetch — and the
+  // picker's own refresh after an inline create re-primes this too.
+  const { data: crawlPersonas, refresh: refreshCrawlPersonas } = useQuery(
+    Q.personas(host),
+    () => personasApi.list(host),
+  );
+  const selectedPersona = React.useMemo(
+    () => (crawlPersonas || []).find((p) => p.id === c.crawlPersonaId) || null,
+    [crawlPersonas, c.crawlPersonaId],
+  );
+
   // Parallel-agents speed estimate (mirrors the website's Dragnet demo): each
   // agent pulls pages concurrently, so throughput scales with the fleet. The
   // per-agent rate is a rough, honest guess keyed to what actually dominates:
@@ -485,6 +501,37 @@ export const SiteCrawlPanel: React.FC<{ onSubmit?: () => void }> = ({ onSubmit }
           {/* The essentials — quiet rows, nothing else visible. */}
           {verb !== 'map' && (
           <div className="mt-5 divide-y divide-border border-t border-border">
+            {/* SIGN IN — first, not buried in Advanced. Whether a crawl can see the
+                pages at all is a more fundamental question than how to format them,
+                and a login-walled site returns nothing useful without it. Choosing a
+                persona reveals its sign-in setup inline, so "crawl behind a login"
+                is completable here instead of ending at a 422 on Start. */}
+            <div className="py-3.5">
+              <div className="mb-1.5 flex items-baseline justify-between gap-3">
+                <span className="text-[13px] font-medium text-ink">{t('Sign in as')}</span>
+                <span className="text-[11px] text-tertiary">{t('optional')}</span>
+              </div>
+              <PersonaPicker
+                value={c.crawlPersonaId}
+                onChange={(id) => updateConfig({ crawlPersonaId: id })}
+                // Domain-sorts the list and prefills the create modal with the site
+                // the user just typed.
+                domain={host}
+              />
+              {selectedPersona ? (
+                <div className="mt-3 rounded-xl border border-border bg-hover/20 p-3">
+                  <PersonaLoginWorkflow
+                    persona={selectedPersona}
+                    onChanged={refreshCrawlPersonas}
+                  />
+                </div>
+              ) : (
+                <p className="mt-1.5 text-[12px] text-tertiary">
+                  {t('Crawl pages behind a login using a saved persona (handles 2FA and reuses its session).')}
+                </p>
+              )}
+            </div>
+
             {/* Output */}
             <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3.5">
               <span className="text-[13px] font-medium text-ink">{t('Collect as')}</span>
@@ -766,16 +813,6 @@ export const SiteCrawlPanel: React.FC<{ onSubmit?: () => void }> = ({ onSubmit }
                 />
               </div>
 
-              <div className="border-t border-border pt-4">
-                <div className="mb-1.5 flex items-baseline justify-between gap-3">
-                  <label className="text-sm text-secondary">{t('Sign in as')}</label>
-                  <span className="text-[11px] text-tertiary">{t('optional')}</span>
-                </div>
-                <PersonaPicker value={c.crawlPersonaId} onChange={(id) => updateConfig({ crawlPersonaId: id })} />
-                <p className="mt-1.5 text-[12px] text-tertiary">
-                  {t('Crawl pages behind a login using a saved persona (handles 2FA and reuses its session).')}
-                </p>
-              </div>
             </Drawer>
             )}
           </div>

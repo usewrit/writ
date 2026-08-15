@@ -1,4 +1,6 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
+import toast from 'react-hot-toast';
 import { useRequireAuth } from '../../hooks/useAuth';
 import { useNavigate, useSearchParams, Navigate } from 'react-router-dom';
 import { UnifiedCreationWizard } from '../../components/wizard/UnifiedCreationWizard';
@@ -19,6 +21,7 @@ const AUTOMATION_ACTION_MODES = ['manual_workflow', 'streaming_workflow'];
 
 export const WorkflowCreatePage: React.FC = () => {
   useRequireAuth();
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const [params] = useSearchParams();
 
@@ -38,6 +41,31 @@ export const WorkflowCreatePage: React.FC = () => {
     const q = new URLSearchParams({ resume: '1' });
     if (workflowId) q.set('bindWorkflowId', String(workflowId));
     navigate(`${draftReturnTo || '/automations/new'}?${q.toString()}`);
+  };
+
+  // Launched from a persona's "Record login": the workflow being built IS that
+  // persona's sign-in, so finishing must ATTACH it (personas.login_workflow_id)
+  // and return where the user came from. Without the attach the recording would
+  // be just another workflow and the persona would still be unable to sign in —
+  // which is the whole reason they were sent here.
+  const loginForPersona = Number(params.get('login_for_persona')) || null;
+  const loginReturnTo = params.get('login_return_to') || '/personas';
+  const attachLoginAndReturn = async (workflowId?: number | null) => {
+    if (loginForPersona && workflowId) {
+      try {
+        const { personasApi } = await import('../../api/endpoints');
+        await personasApi.update(loginForPersona, { login_workflow_id: workflowId });
+        toast.success(t('Login workflow attached to the persona'));
+      } catch (e: any) {
+        // The workflow itself was saved — say what didn't happen rather than
+        // implying the recording was lost.
+        toast.error(
+          e?.response?.data?.detail ||
+            t('Workflow saved, but it could not be attached to the persona. Attach it from the persona.'),
+        );
+      }
+    }
+    navigate(loginReturnTo);
   };
 
   // Monitor / Automate / Crawl intents live on their own pages — redirect,
@@ -68,10 +96,14 @@ export const WorkflowCreatePage: React.FC = () => {
             // A missing workflowId still returns to the builder — the draft is restored,
             // just with nothing new bound.
             if (forAutomationAction) { backToBuilder(ids?.workflowId); return; }
+            if (loginForPersona) { void attachLoginAndReturn(ids?.workflowId); return; }
             navigate('/workflows');
           }}
           onCancel={() => {
             if (forAutomationAction) { backToBuilder(null); return; }
+            // Cancelled: nothing to attach, but still return to the persona rather
+            // than dumping the user on the workflow list they never asked for.
+            if (loginForPersona) { navigate(loginReturnTo); return; }
             navigate('/workflows');
           }}
           embedded

@@ -69,24 +69,61 @@ def words_to_text(chars: List[dict]) -> str:
     return "".join(c["text"] for c in chars).strip()
 
 
+def _word_split_fraction(rows: List[list]) -> float:
+    """Fraction of adjacent FILLED cell pairs that read as one word cut in two.
+
+    The definitive tell of shredded prose: a column boundary that runs through
+    running text cuts words and sentences, so a cell ends in a letter and its
+    right-hand neighbour starts with a LOWERCASE letter ("con" | "sectetuer",
+    "PDF fil" | "e. Fun"). Real table cells overwhelmingly start with capitals,
+    digits, currency or punctuation. Unit columns ("kg", "mm") produce a few
+    such junctions in genuine tables, which is why callers gate on a fraction
+    rather than a single hit."""
+    pairs = cuts = 0
+    for r in rows:
+        cells = [str(c).strip() for c in r if str(c or "").strip()]
+        for a, b in zip(cells, cells[1:]):
+            pairs += 1
+            if a[-1:].isalpha() and b[:1].isalpha() and b[:1].islower():
+                cuts += 1
+    return (cuts / pairs) if pairs else 0.0
+
+
 def _plausible_table(rows: List[list], *, strict: bool) -> bool:
     """Does this candidate look like a table rather than shredded prose?
 
     The text-alignment strategy will happily read a paragraph as a grid: left
     margins line up, so every line becomes a row and every word-run a cell.
     Measured on a plain two-paragraph page it produced a 13-cell "table" and
-    destroyed the prose. Tables are distinguished by SHORT cells in a CONSISTENT
-    grid, so require both before trusting a borderless candidate.
+    destroyed the prose. Worse, JUSTIFIED paragraphs align words into vertical
+    columns, and pdfplumber pads every extracted row to the grid width — so the
+    old uniform-width + short-cells bar passed a justified lorem-ipsum page as a
+    six-column table of word fragments. Tables are distinguished by SHORT cells
+    in a CONSISTENT grid whose boundaries do NOT cut through words, so require
+    all three before trusting a candidate.
     """
     if not rows or len(rows) < 2:
         return False
     widths = [len(r) for r in rows]
     if max(widths) < 2:
         return False
+    # Word-cut junctions betray a column boundary running through running text.
+    # Applied to RULED candidates too: decorative page frames and underlines make
+    # the lines strategy shred prose exactly the same way.
+    if _word_split_fraction(rows) >= 0.35:
+        return False
     if not strict:
         return True
 
     if len(set(widths)) > 1:  # ragged row widths ⇒ not a grid
+        return False
+    # FILLED-cell raggedness: pdfplumber pads rows to the grid, so raw widths are
+    # always uniform — but prose lines fill wildly varying numbers of "columns"
+    # (a short closing line fills 1, a full line 6) while real table rows fill a
+    # consistent count. Compare the sparsest to the fullest non-empty row.
+    filled_per_row = [sum(1 for c in r if str(c or "").strip()) for r in rows]
+    nonempty = [n for n in filled_per_row if n > 0]
+    if not nonempty or min(nonempty) * 2 < max(nonempty):
         return False
     lengths = sorted(len(str(c or "").split())
                      for r in rows for c in r if str(c or "").strip())
@@ -95,7 +132,7 @@ def _plausible_table(rows: List[list], *, strict: bool) -> bool:
     # Cells carry labels and values, not sentences.
     if lengths[len(lengths) // 2] > 3 or lengths[-1] > 8:
         return False
-    filled = sum(1 for r in rows for c in r if str(c or "").strip())
+    filled = sum(filled_per_row)
     return filled >= 0.7 * sum(widths)
 
 

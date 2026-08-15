@@ -25,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed and already-mounted components kept their English strings until the next
   unrelated render. The comparison is now on the normalised base code.
 
+- **Linking a login workflow to a persona made the schema unsortable.**
+  `automation_workflows.default_persona_id` already referenced `personas`, so the
+  new `personas.login_workflow_id` closed a foreign-key cycle between the two
+  tables. SQLAlchemy could then no longer order them —
+
+  > Cannot correctly sort tables; there are unresolvable cycles between tables
+  > "automation_workflows, personas"
+
+  — which breaks `metadata.create_all` / `drop_all` outright, and which SQLAlchemy
+  warns "may raise an error in a future release". The constraint is now emitted
+  with `use_alter`, so it no longer takes part in the sort. Existing installs are
+  unaffected either way: migration `0017` adds a column to a table that already
+  exists and never sorts the schema as a whole.
+
 ### Security
 
 - **React Router upgraded to 7.18.2**, clearing three advisories that affected the

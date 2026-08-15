@@ -5,6 +5,8 @@ All notable changes to `writ-mcp` are documented here. This project follows
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-08-14
+
 ### Added
 - **Saved crawls are callable, with freshness.** New relayed tools `writ_saved_crawls`,
   `writ_run_saved_crawl` and `writ_saved_crawl_data`, plus `save_as` on

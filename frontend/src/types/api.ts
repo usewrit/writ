@@ -696,6 +696,23 @@ export interface Persona {
   linked_workflows?: { id: number; name: string }[];
   /** {credential_field: vault_secret_key} for fields linked to a vault secret. */
   linked_secrets?: Record<string, string>;
+  /** Workflow that SIGNS THIS PERSONA IN. Without one the persona can only use a
+   * session captured elsewhere, so an expired session is a dead end; with one it
+   * re-logins on its own (on demand, and automatically when a crawl finds it stale). */
+  login_workflow_id?: number | null;
+  login_workflow_name?: string | null;
+  /** Why the most recent sign-in attempt failed (cleared on success). */
+  last_login_error?: string | null;
+  /** True when the persona can sign itself in — i.e. has a login workflow. Gate
+   * "needs setup" on THIS, not has_warm_session (which is only a point-in-time fact). */
+  can_self_login?: boolean;
+}
+
+export interface PersonaSignInResult {
+  ok: boolean;
+  error?: string | null;
+  has_warm_session: boolean;
+  session_expires_at?: string | null;
 }
 
 export interface PersonaCreate {
@@ -725,6 +742,8 @@ export interface PersonaCreate {
   proxy_password?: string;
   /** Required (true) when proxy_server is set: acknowledges lawful use of the proxy. */
   proxy_lawful_use_ack?: boolean;
+  /** Workflow that signs this persona in (establishes/refreshes its warm session). */
+  login_workflow_id?: number | null;
 }
 
 export type PersonaUpdate = Partial<PersonaCreate & { is_active: boolean }>;

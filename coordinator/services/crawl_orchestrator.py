@@ -603,21 +603,10 @@ async def _sample_site_urls(seed_url: str, *, cap: int = 150, auth=None) -> list
     return out
 
 
-def _session_is_usable(session) -> bool:
-    """Does this persona session carry anything that can actually authenticate?
-
-    Checks EVERY shape a session can arrive in — `cookies`, the Writ camelCase
-    `localStorage`/`sessionStorage` maps, captured auth `headers`, the HTTP-lane
-    `tokens` store, and Playwright's `origins[]`. The previous check accepted only
-    `cookies` or `origins`; a token-auth SPA whose whole session is a localStorage
-    JWT (a very common shape here) has NEITHER, so it was reported to the operator
-    as an expired login no matter how fresh it was."""
-    if not isinstance(session, dict):
-        return False
-    for key in ("cookies", "origins", "localStorage", "sessionStorage", "headers", "tokens"):
-        if session.get(key):
-            return True
-    return False
+# Canonical definition lives in services.persona_login so the creation-time check,
+# the pre-fanout guard and the sign-in path can never disagree about what counts as
+# a session. Re-exported under the local name the rest of this module already uses.
+from services.persona_login import session_is_usable as _session_is_usable  # noqa: E402
 
 
 async def _ensure_persona_session(db, crawl: CrawlJob) -> tuple:
@@ -645,9 +634,26 @@ async def _ensure_persona_session(db, crawl: CrawlJob) -> tuple:
             logger.info(f"[{DRAGNET_NAME}] crawl {crawl.id}: authenticated — reusing "
                         f"persona {persona.id} warm session")
             return True, None, session
-        return False, ("The login session for this crawl's persona has expired. "
-                       "Re-link the login and start the crawl so pages behind the "
-                       "login are reachable."), None
+
+        # STALE OR ABSENT — try to SIGN IN rather than failing the crawl. A persona
+        # with a login workflow can re-establish its own session, so an expired
+        # session is a recoverable condition, not a dead end. ensure_fresh_session
+        # holds a per-persona lock, so a re-kicked seeder can't stack logins.
+        if getattr(persona, "login_workflow_id", None):
+            logger.info(f"[{DRAGNET_NAME}] crawl {crawl.id}: persona {persona.id} "
+                        f"session stale — running its login workflow")
+            from services.persona_login import ensure_fresh_session
+            ok, login_err, fresh = await ensure_fresh_session(persona.id)
+            if ok and fresh:
+                logger.info(f"[{DRAGNET_NAME}] crawl {crawl.id}: persona {persona.id} "
+                            f"signed in — proceeding authenticated")
+                return True, None, fresh
+            return False, (login_err or "Could not sign this crawl's persona in."), None
+
+        return False, ("The login session for this crawl's persona has expired, and it "
+                       "has no login workflow to sign itself back in. Record or attach a "
+                       "login workflow for the persona (it will then re-login on its own), "
+                       "then start the crawl so pages behind the login are reachable."), None
     except Exception as e:  # noqa: BLE001 — never crash seeding on the guard
         logger.warning(f"[{DRAGNET_NAME}] persona-session guard failed for crawl {crawl.id}: {e}")
         # Fail OPEN on an unexpected guard error only when we truly can't tell —
@@ -1661,10 +1667,20 @@ async def start_crawl(
             )
         persona_session = PersonaService.load_session(_persona)
         if not _session_is_usable(persona_session):
-            raise HTTPException(
-                422,
-                "That persona has no live login session. Sign in once with the persona "
-                "(this captures the session the crawl replays), then start the crawl.",
+            # A persona with a login workflow can sign ITSELF in — the seeder runs it
+            # before fan-out. Rejecting here would block the very case the login
+            # workflow exists to serve (attach it, start the crawl, never think about
+            # sessions again). Only a persona that cannot self-login is a dead end.
+            if not getattr(_persona, "login_workflow_id", None):
+                raise HTTPException(
+                    422,
+                    "That persona has no live login session and no login workflow to "
+                    "establish one. Record or attach a login workflow for it (the crawl "
+                    "will then sign in automatically), then start the crawl.",
+                )
+            logger.info(
+                f"[{DRAGNET_NAME}] persona {_persona.id} has no warm session yet; the "
+                f"seeder will run its login workflow before fan-out"
             )
 
     # Concurrency default. There is no plan ladder self-hosted, so the operator's

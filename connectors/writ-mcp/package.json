@@ -1,6 +1,6 @@
 {
   "name": "writ-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Official Writ MCP server connector — bridges a stdio MCP client (Claude Code, Claude Desktop, Cursor) to Writ Cloud or a self-hosted Writ coordinator. Turns your saved browser workflows into callable tools.",
   "license": "MIT",
   "author": "The Writ Project Authors",

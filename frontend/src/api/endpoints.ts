@@ -26,6 +26,7 @@ import {
   StreamingSession,
   Persona,
   PersonaCreate,
+  PersonaSignInResult,
   PersonaUpdate,
   PersonaRun,
   ImapConfig,
@@ -1133,6 +1134,15 @@ export const personasApi = {
   },
   test2fa: async (id: number): Promise<{ ok: boolean; method: string; kind?: string; message?: string }> => {
     const response = await client.post(`/personas/${id}/test-2fa`);
+    return response.data;
+  },
+  // Run the persona's login workflow to establish (or refresh) its warm session.
+  // Resolves with ok:false + a human-readable error for login FAILURES — only
+  // transport/authorization problems reject, so callers render `error` inline.
+  // Long-running by nature (a login with an email-OTP hop polls a mailbox), so the
+  // client timeout is raised well past the coordinator's own 240s ceiling.
+  signIn: async (id: number, force = false): Promise<PersonaSignInResult> => {
+    const response = await client.post(`/personas/${id}/sign-in`, { force }, { timeout: 300_000 });
     return response.data;
   },
   runs: async (id: number, limit = 20): Promise<PersonaRun[]> => {

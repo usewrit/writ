@@ -424,6 +424,7 @@ export const PersonaList: React.FC<PersonaListProps> = ({ search, onSearchChange
       {/* ── Detail pane (lg only) ── */}
       <div className={SHELF_DETAIL_COL}>
         <PersonaDetailPane
+          onChanged={refresh}
           persona={selectedPersona}
           onEdit={setEditPersona}
           onDelete={setDeleteTarget}

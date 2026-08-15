@@ -26,6 +26,7 @@ import { formatRelativeTime, formatDate } from '../../utils/format';
 import { tintStyle } from '../../utils/tint';
 import { statusStyle } from '../../utils/statusStyle';
 import { EmptyHero } from '../ui';
+import { PersonaLoginWorkflow } from '../workflows/PersonaLoginWorkflow';
 
 const TWOFA_LABELS: Record<TwoFactorMethod, string> = {
   none: 'No 2FA',
@@ -95,6 +96,8 @@ interface PersonaDetailPaneProps {
   onEdit: (p: Persona) => void;
   onDelete: (p: Persona) => void;
   onSend: (p: Persona) => void;
+  /** Called after sign-in state or the login-workflow link changes, so the list refetches. */
+  onChanged?: () => void;
 }
 
 /**
@@ -105,7 +108,7 @@ interface PersonaDetailPaneProps {
  * (There is no mailbox-connect surface; any mailbox recorded earlier shows
  * read-only.)
  */
-export const PersonaDetailPane: React.FC<PersonaDetailPaneProps> = ({ persona: p, onEdit, onDelete, onSend }) => {
+export const PersonaDetailPane: React.FC<PersonaDetailPaneProps> = ({ persona: p, onEdit, onDelete, onSend, onChanged }) => {
   const { t } = useTranslation();
   const [testing, setTesting] = useState(false);
 
@@ -241,8 +244,21 @@ export const PersonaDetailPane: React.FC<PersonaDetailPaneProps> = ({ persona: p
             <p className="text-[11px] text-tertiary">
               {p.has_warm_session
                 ? t('A logged-in session is reused so this persona skips the login step on the next run.')
-                : t('No warm session yet — the first run will log in and save one.')}
+                : p.login_workflow_id
+                  // Only true WITH a login workflow. Said unconditionally (as it was)
+                  // this promised a self-healing login to personas that had no way to
+                  // log in at all, which is exactly how a crawl ended at a dead-end 422.
+                  ? t('No warm session yet — the login workflow below will sign in and save one.')
+                  : t('No warm session yet, and no login workflow to establish one. Set up sign-in below.')}
             </p>
+          </div>
+        </div>
+
+        {/* Sign-in — the workflow that logs this persona in, plus Sign in now. */}
+        <div>
+          <SectionLabel>{t('Sign-in')}</SectionLabel>
+          <div className="rounded-xl border border-ink/20 bg-surface p-3">
+            <PersonaLoginWorkflow persona={p} onChanged={onChanged} hideHeading />
           </div>
         </div>
 

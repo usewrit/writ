@@ -377,6 +377,35 @@ async def queue_processor_loop():
                                         # config.session_state to the agent, which applies it
                                         # on BOTH its HTTP and browser lanes.
                                         session_state = PersonaService.load_session(_own_persona)
+                                        # RE-LOGIN before giving up. The persona's login
+                                        # workflow can re-establish the session, and
+                                        # ensure_fresh_session serializes on a per-persona
+                                        # lock — so when N shards notice the same expiry
+                                        # at once, ONE logs in and the rest reuse its
+                                        # result instead of firing N concurrent logins at
+                                        # the site (which is how accounts get locked).
+                                        if not session_state and getattr(
+                                            _own_persona, "login_workflow_id", None
+                                        ):
+                                            logger.info(
+                                                f"[Queue] crawl shard {task.id}: persona "
+                                                f"{_own_persona.id} session expired mid-crawl "
+                                                f"— running its login workflow"
+                                            )
+                                            try:
+                                                from services.persona_login import (
+                                                    ensure_fresh_session,
+                                                )
+                                                _ok, _err, _fresh = await ensure_fresh_session(
+                                                    _own_persona.id
+                                                )
+                                                if _ok and _fresh:
+                                                    session_state = _fresh
+                                            except Exception as _rl_e:  # noqa: BLE001
+                                                logger.warning(
+                                                    f"[Queue] re-login failed for shard "
+                                                    f"{task.id}: {_rl_e}"
+                                                )
                                         # MID-CRAWL EXPIRY. The seeder verified the session
                                         # before fan-out, but a long crawl outlives it: by the
                                         # time this shard dispatches, load_session can return
@@ -405,8 +434,11 @@ async def queue_processor_loop():
                                                 success=False,
                                                 error=(
                                                     "The login session for this crawl's persona "
-                                                    "expired while it was running. Re-link the "
-                                                    "login and start the crawl again."
+                                                    "expired while it was running and could not "
+                                                    "be renewed. Give the persona a login "
+                                                    "workflow (or check the one it has) so it "
+                                                    "can sign back in on its own, then start "
+                                                    "the crawl again."
                                                 ),
                                             )
                                             continue

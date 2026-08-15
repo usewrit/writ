@@ -78,9 +78,8 @@ claude mcp list
 ```
 
 > **Writ Cloud is the default target** when you pass no `--url`
-> (`https://api.usewrit.app`). The hosted service is **not live yet** — until it
-> is, always pass `--url` pointing at your own coordinator. See
-> [Status](#status).
+> (`https://api.usewrit.app`). Pass `--url` to point the connector at your own
+> coordinator instead. See [Status](#status).
 
 > **Pass the key through the environment, not the command line.** `--api-key`
 > works, but it puts your key in the process's argument list where any local
@@ -283,7 +282,7 @@ npm audit signatures
 |---|---|
 | **Self-hosted coordinator** | Supported and verified end to end. |
 | **Published `/mcp/<slug>` endpoints** | Supported. |
-| **Writ Cloud** (`https://api.usewrit.app`, the no-`--url` default) | **Not live yet.** The hosted service has not launched; the hostname does not resolve. Pass `--url` until it does. |
+| **Writ Cloud** (`https://api.usewrit.app`, the no-`--url` default) | Supported. Used automatically when no `--url` is passed. |
 
 ## Development
 

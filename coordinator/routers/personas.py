@@ -67,6 +67,9 @@ class PersonaCreate(BaseModel):
         False,
         description="Required (true) when proxy_server is set: the owner acknowledges lawful use of this proxy.",
     )
+    login_workflow_id: Optional[int] = Field(
+        None, description="Workflow that signs this persona in (establishes its warm session)"
+    )
 
 
 class PersonaUpdate(BaseModel):
@@ -93,6 +96,9 @@ class PersonaUpdate(BaseModel):
     proxy_username: Optional[str] = Field(None, max_length=255)
     proxy_password: Optional[str] = None
     proxy_lawful_use_ack: Optional[bool] = None
+    # Explicit null CLEARS the link (detach). The handler uses exclude_unset so an
+    # unrelated PATCH never silently clears it.
+    login_workflow_id: Optional[int] = None
 
 
 class PersonaResponse(BaseModel):
@@ -117,6 +123,14 @@ class PersonaResponse(BaseModel):
     has_warm_session: bool
     session_expires_at: Optional[datetime]
     last_login_at: Optional[datetime]
+    # --- Login workflow (how this persona establishes its warm session) ---
+    login_workflow_id: Optional[int] = None
+    login_workflow_name: Optional[str] = None
+    last_login_error: Optional[str] = None
+    # True when this persona can sign ITSELF in — i.e. a crawl using it can recover
+    # from an expired session unattended. The UI gates its "needs setup" state on
+    # this rather than on has_warm_session, which is only ever a point-in-time fact.
+    can_self_login: bool = False
     last_used_at: Optional[datetime]
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
@@ -130,7 +144,8 @@ def _to_response(p: Persona, mailbox_email: Optional[str] = None,
                  linked_workflows: Optional[List[dict]] = None,
                  has_warm_session: Optional[bool] = None,
                  has_totp_seed: Optional[bool] = None,
-                 has_proxy: Optional[bool] = None) -> PersonaResponse:
+                 has_proxy: Optional[bool] = None,
+                 login_workflow_name: Optional[str] = None) -> PersonaResponse:
     # When the username is linked to a vault secret it's stored as a
     # "{{vault:...}}" template — never surface that raw ref (linked_secrets
     # carries the link instead).
@@ -161,6 +176,10 @@ def _to_response(p: Persona, mailbox_email: Optional[str] = None,
         created_at=p.created_at, updated_at=p.updated_at,
         linked_workflows=linked_workflows or [],
         linked_secrets=PersonaService.linked_secret_refs(p),
+        login_workflow_id=p.login_workflow_id,
+        login_workflow_name=login_workflow_name,
+        last_login_error=p.last_login_error,
+        can_self_login=bool(p.login_workflow_id),
     )
 
 
@@ -177,6 +196,49 @@ async def _linked_workflows_map(db: AsyncSession, persona_ids: List[int]) -> dic
     for wid, wname, pid in rows:
         out.setdefault(pid, []).append({"id": wid, "name": wname})
     return out
+
+
+async def _login_workflow_names_map(db: AsyncSession, workflow_ids) -> dict:
+    """Return {workflow_id: name} for the personas' login workflows (one query).
+
+    Names only — the login workflow is displayed, never executed from here.
+    """
+    ids = list({w for w in workflow_ids if w})
+    if not ids:
+        return {}
+    from models.automation_workflow import AutomationWorkflow
+    rows = (await db.execute(
+        select(AutomationWorkflow.id, AutomationWorkflow.name)
+        .where(AutomationWorkflow.id.in_(ids))
+    )).all()
+    return {wid: wname for wid, wname in rows}
+
+
+async def _assert_login_workflow_valid(db: AsyncSession, workflow_id: Optional[int]) -> None:
+    """The login workflow must exist and must not be a crawl workflow.
+
+    A crawl workflow is orchestrator machinery, not a recorded sign-in. Pointing a
+    persona at one is never useful and is actively dangerous: a crawl whose persona
+    logs in by running a crawl workflow would re-enter the very path that asked for
+    the login. GET /automation/workflows already hides these, so this only closes
+    the direct-API route.
+    """
+    if not workflow_id:
+        return
+    from models.automation_workflow import AutomationWorkflow
+    from services.brand import CRAWL_WORKFLOW_TYPE
+    row = (await db.execute(
+        select(AutomationWorkflow.id, AutomationWorkflow.workflow_type)
+        .where(AutomationWorkflow.id == workflow_id)
+    )).first()
+    if row is None:
+        raise HTTPException(404, "login_workflow_id does not reference an existing workflow")
+    if row[1] == CRAWL_WORKFLOW_TYPE:
+        raise HTTPException(
+            422,
+            "A crawl workflow can't be used as a login workflow. Record or pick the "
+            "workflow that signs the account in.",
+        )
 
 
 async def _mailbox_email(db: AsyncSession, persona: Persona) -> Optional[str]:
@@ -237,6 +299,11 @@ async def list_personas(
             Persona.last_used_at,
             Persona.created_at,
             Persona.updated_at,
+            # MUST be loaded: _to_response reads both. Omitting them makes the
+            # attribute access a lazy load on an async-detached instance, which
+            # raises MissingGreenlet and 500s the whole list.
+            Persona.login_workflow_id,
+            Persona.last_login_error,
         ))
         .order_by(Persona.name)
     )
@@ -246,6 +313,7 @@ async def list_personas(
         rows = [r for r in rows if not r[0].target_domain or r[0].target_domain.lower().lstrip(".") == d or d.endswith("." + r[0].target_domain.lower().lstrip("."))]
     personas = [r[0] for r in rows]
     wf_map = await _linked_workflows_map(db, [p.id for p in personas])
+    login_wf_map = await _login_workflow_names_map(db, [p.login_workflow_id for p in personas])
     out = []
     for p, has_warm_session, has_totp_seed, has_proxy in rows:
         out.append(_to_response(
@@ -253,6 +321,7 @@ async def list_personas(
             has_warm_session=bool(has_warm_session),
             has_totp_seed=bool(has_totp_seed),
             has_proxy=bool(has_proxy),
+            login_workflow_name=login_wf_map.get(p.login_workflow_id),
         ))
     return out
 
@@ -264,6 +333,8 @@ async def create_persona(
     db: AsyncSession = Depends(get_db),
 ):
     _validate_twofa(body.twofa_method, body.email_otp_mode)
+    # The login workflow must exist and must not be crawl machinery.
+    await _assert_login_workflow_valid(db, body.login_workflow_id)
     existing = await db.execute(
         select(Persona).where(Persona.name == body.name)
     )
@@ -304,12 +375,17 @@ async def create_persona(
         preferred_agent_id=body.preferred_agent_id,
         proxy_config_encrypted=proxy_config_encrypted,
         proxy_lawful_use_ack_at=proxy_ack_at,
+        login_workflow_id=body.login_workflow_id,
     )
     db.add(p)
     await db.commit()
     await db.refresh(p)
     logger.info("Persona created: %s", p.name)
-    return _to_response(p, await _mailbox_email(db, p))
+    login_wf_map = await _login_workflow_names_map(db, [p.login_workflow_id])
+    return _to_response(
+        p, await _mailbox_email(db, p),
+        login_workflow_name=login_wf_map.get(p.login_workflow_id),
+    )
 
 
 @router.get("/{persona_id}", response_model=PersonaResponse, dependencies=[_FEATURE])
@@ -322,7 +398,11 @@ async def get_persona(
     if not p:
         raise HTTPException(404, "Persona not found")
     wf_map = await _linked_workflows_map(db, [p.id])
-    return _to_response(p, await _mailbox_email(db, p), wf_map.get(p.id, []))
+    login_wf_map = await _login_workflow_names_map(db, [p.login_workflow_id])
+    return _to_response(
+        p, await _mailbox_email(db, p), wf_map.get(p.id, []),
+        login_workflow_name=login_wf_map.get(p.login_workflow_id),
+    )
 
 
 class PersonaRun(BaseModel):
@@ -381,6 +461,13 @@ async def update_persona(
 
     data = body.model_dump(exclude_unset=True)
 
+    # Re-pointing the login workflow: validate the target; explicit null DETACHES
+    # (exclude_unset above keeps "absent" distinct from "null", so an unrelated
+    # PATCH never silently clears the link).
+    if "login_workflow_id" in data:
+        await _assert_login_workflow_valid(db, data["login_workflow_id"])
+        p.login_workflow_id = data["login_workflow_id"]
+
     simple = {
         "name", "description", "target_domain", "login_username", "twofa_method",
         "totp_digits", "totp_period_seconds", "totp_algorithm", "email_otp_mode",
@@ -417,7 +504,64 @@ async def update_persona(
 
     await db.commit()
     await db.refresh(p)
-    return _to_response(p, await _mailbox_email(db, p))
+    login_wf_map = await _login_workflow_names_map(db, [p.login_workflow_id])
+    return _to_response(
+        p, await _mailbox_email(db, p),
+        login_workflow_name=login_wf_map.get(p.login_workflow_id),
+    )
+
+
+class PersonaSignInRequest(BaseModel):
+    force: bool = Field(
+        False,
+        description="Re-run the login even when the current session still looks usable",
+    )
+
+
+class PersonaSignInResponse(BaseModel):
+    ok: bool
+    error: Optional[str] = None
+    has_warm_session: bool = False
+    session_expires_at: Optional[datetime] = None
+
+
+@router.post("/{persona_id}/sign-in", response_model=PersonaSignInResponse, dependencies=[_FEATURE])
+async def sign_in_persona(
+    persona_id: int,
+    body: Optional[PersonaSignInRequest] = None,
+    auth: AuthContext = Depends(get_auth_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """Run this persona's login workflow to establish (or refresh) its warm session.
+
+    This is the endpoint that makes a persona able to sign ITSELF in. Before it, a
+    persona's session could only be captured from a run that had already logged in,
+    so a persona created from credentials alone could never satisfy the
+    authenticated-crawl precondition.
+
+    Returns ok=False with a human-actionable `error` rather than raising, so the UI
+    can render the reason inline next to the button instead of as a toast-and-lose.
+    Genuine 404 (unknown persona) still raises — that's not a login outcome.
+    """
+    p = await PersonaService.get_owned(db, persona_id)
+    if not p:
+        raise HTTPException(404, "Persona not found")
+
+    from services.persona_login import ensure_fresh_session
+
+    ok, error, _session = await ensure_fresh_session(
+        persona_id, force=bool(body and body.force),
+    )
+
+    # Re-read: ensure_fresh_session writes the captured session (and last_login_at /
+    # last_login_error) from its OWN sessions, so `p` here is stale by construction.
+    await db.refresh(p)
+    return PersonaSignInResponse(
+        ok=ok,
+        error=error,
+        has_warm_session=bool(p.session_state_encrypted),
+        session_expires_at=p.expires_at,
+    )
 
 
 class ImapConfig(BaseModel):

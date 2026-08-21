@@ -52,7 +52,7 @@ webauthn>=2.5.0  # FIDO2/WebAuthn passkeys (passwordless + biometric 2FA) — se
 prometheus-fastapi-instrumentator>=7.0.0  # /metrics for Prometheus scraping
 prometheus-client>=0.20.0  # explicit (dep of the instrumentator; pin so a stale build installs it)
 unidecode>=1.3.8  # correct non-ASCII transliteration for slug_service (graceful NFKD fallback if absent)
-regex>=2024.5.15  # ReDoS hard-timeout guarantee: regex.search/findall(..., timeout=) releases the GIL (the stdlib `re` cannot be timed out). Used by security.validation safe_regex_* + validate_regex probe.
+regex>=2026.7.19  # ReDoS hard-timeout guarantee: regex.search/findall(..., timeout=) releases the GIL (the stdlib `re` cannot be timed out). Used by security.validation safe_regex_* + validate_regex probe.
 apscheduler>=3.10  # in-process monitor/workflow/housekeeping scheduling (replaces the cloud Redis-backed scheduler; wired up in a later self-host stage)
 cachetools>=5.3  # in-process TTL caches (replaces some Redis usages in the self-host carve)
 

@@ -283,7 +283,7 @@ export interface AutomationWorkflow {
   // the full `steps` come from GET /workflows/{id} (lazy-fetched on expand).
   step_count?: number;
   raw_replay?: Array<Record<string, any>>;  // Raw coordinate-based replay for fallback
-  form_data?: Record<string, string>;
+  form_data?: Record<string, unknown>;
   // Entry and exit points
   entry_url?: string;
   exit_condition?: ExitCondition;
@@ -308,6 +308,9 @@ export interface AutomationWorkflow {
   default_persona_id?: number | null;  // Default cloud persona (auth identity); run can override
   has_login?: boolean;  // True if the workflow authenticates (login/2FA detected) — gates persona UI
   has_twofa?: boolean;  // True if a step enters a one-time code — runs need a persona with a 2FA method
+  // Reverse persona link: personas whose sign-in workflow IS this row.
+  // Stamped by the list endpoint only; absent elsewhere.
+  login_personas?: Array<{ id: number; name: string }>;
   // Metadata
   created_at: string;
   updated_at: string;
@@ -494,7 +497,7 @@ export interface AIWorkflowSession {
   description?: string;
   goal: string;
   entry_url: string;
-  form_data: Record<string, string>;
+  form_data: Record<string, unknown>;
   has_credentials: boolean;
   ai_model?: string;
   max_steps: number;
@@ -538,7 +541,7 @@ export interface AISessionCreate {
   description?: string;
   goal: string;
   entry_url: string;
-  form_data?: Record<string, string>;
+  form_data?: Record<string, unknown>;
   credentials?: Record<string, string>;
   ai_model?: string;
   max_steps?: number;
@@ -571,7 +574,7 @@ export interface AISessionUpdate {
   description?: string;
   goal?: string;
   entry_url?: string;
-  form_data?: Record<string, string>;
+  form_data?: Record<string, unknown>;
   credentials?: Record<string, string>;
   // Intelligent mode settings
   mode?: 'standard' | 'intelligent' | 'api_discovery';

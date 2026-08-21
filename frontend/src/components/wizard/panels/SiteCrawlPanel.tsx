@@ -32,13 +32,18 @@ import { crawlApi, type MapUrlItem, type PreviewCrawlResponse } from '../../../a
  *   [ https://…                                    ] [▶ Start crawl]
  *   [Crawl|Scrape]  hint sentence
  *   ── essentials ──────────────────────────────────────────
+ *   AI reader          [ off ]           (+ prompt when on)
  *   Collect as         [Markdown | Structured table]
  *   Parallel agents    [────●──────────────]  ≈ pages/s · eta
  *   ── everything else, stacked & collapsed ────────────────
  *   ▸ Fetching & documents  ▸ Content  ▸ Limits & boundaries
  *
- * The coordinator runs DETERMINISTIC crawls only — no AI executor — so a
- * beginner types a URL and presses Start; two quiet rows are all they see.
+ * A beginner types a URL and presses Start; the rows above are all they see, and
+ * the crawl is deterministic until they turn the AI reader on. That switch is the
+ * `ai` EXECUTOR — every fetched page is read against a prompt by the provider
+ * configured in Settings → AI. It is free (the operator's own key) and orthogonal
+ * to the Render lane below: the AI reads whatever HTTP, the warm browser, or the
+ * document lane produced.
  *
  * Palette: flat muted tiles, ink accent (no Signal/AI accent in the
  * self-hosted app).
@@ -262,6 +267,7 @@ export const SiteCrawlPanel: React.FC<{ onSubmit?: () => void }> = ({ onSubmit }
     updateConfig({ crawlVerb: 'crawl', crawlSeedUrls: sel });
   };
   const output = c.crawlOutput as Output;
+  const isAi = (c.crawlExecutor ?? 'regular') === 'ai';
   const render = (c.crawlRenderMode ?? 'auto') as 'auto' | 'http' | 'browser';
   const ocr = (c.crawlOcrMode ?? 'auto') as 'auto' | 'off' | 'force';
 
@@ -530,6 +536,47 @@ export const SiteCrawlPanel: React.FC<{ onSubmit?: () => void }> = ({ onSubmit }
                   {t('Crawl pages behind a login using a saved persona (handles 2FA and reuses its session).')}
                 </p>
               )}
+            </div>
+
+            {/* AI reader — the `ai` executor, as a plain on/off switch. Nothing is
+                metered here: it runs on the operator's own provider, so the only
+                caveat worth stating is that one has to exist. */}
+            <div className="py-3.5">
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <span className="text-[13px] font-medium text-ink">{t('AI reader')}</span>
+                  <p className="mt-0.5 text-[12px] text-tertiary">
+                    {isAi
+                      ? t('Every page is read against your instruction — for messy pages and judgment calls.')
+                      : t('Off = fast, deterministic crawl. On = an AI reads each page.')}
+                  </p>
+                </div>
+                <Switch
+                  checked={isAi}
+                  onChange={(v) => updateConfig({ crawlExecutor: v ? 'ai' : 'regular' })}
+                />
+              </div>
+              <Expand open={isAi} mountOnEnter>
+                <div className="mt-3">
+                  <label className="mb-1.5 block text-[13px] font-medium text-ink">
+                    {output === 'schema' ? t('What should it extract from each page?') : t('Cleanup instruction')}
+                  </label>
+                  <textarea
+                    value={c.crawlPrompt}
+                    onChange={(e) => updateConfig({ crawlPrompt: e.target.value })}
+                    rows={2}
+                    placeholder={
+                      output === 'schema'
+                        ? t('e.g. the product name, price, and SKU on each page')
+                        : t('e.g. keep only the main article body; drop nav, ads, and footers')
+                    }
+                    className="w-full resize-none rounded-lg border border-border bg-surface px-3.5 py-2.5 text-[13px] text-ink placeholder:text-tertiary focus:border-ink/30 focus:outline-none focus:ring-2 focus:ring-ink/10"
+                  />
+                  <p className="mt-1.5 text-[12px] text-tertiary">
+                    {t('Runs on the AI provider you configured in Settings → AI — no metering, no per-page fee.')}
+                  </p>
+                </div>
+              </Expand>
             </div>
 
             {/* Output */}

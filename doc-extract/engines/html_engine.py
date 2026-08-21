@@ -235,8 +235,45 @@ def _trafilatura_meta(html: str, url: str) -> Dict[str, str]:
     }
 
 
+# trafilatura's markdown drifts across releases in ways that DESTROY structure
+# rather than restyle it (bisected 2026-08 against the agent's GFM fixtures):
+# 1.x rendered table rows without the leading pipe ("Plan | Price |" — not a
+# GFM row, so markdown consumers read it as prose), and 2.2.0's extraction can
+# collapse a whole page into ONE line (headings, list items and table cells
+# concatenated). Either shape is strictly worse than the readability+markdownify
+# fallback, which emits real GFM deterministically — so a body carrying one of
+# these signatures is rejected and the caller falls through. requirements.txt
+# pins the known-good range (>=2.0,<2.2); the guard covers installs that bring
+# their own trafilatura anyway.
+_GFM_TABLE_ROW_RE = re.compile(r"^\s*\|.+\|\s*$", re.M)  # a "| a | b |" row
+_HTML_TABLE_RE = re.compile(r"<table\b", re.I)
+_HTML_TABLE_HEADER_RE = re.compile(r"<th\b|<thead\b", re.I)
+_HTML_BLOCK_ELEM_RE = re.compile(r"<(?:h[1-6]|p|li|t[dh]|blockquote|pre|dl)\b", re.I)
+
+
+def _engine_output_mangled(md: str, html: str, *, keep_tables: bool) -> bool:
+    """True when an engine's markdown lost structure the page itself carries.
+
+    Judged against the page's own HTML, so a page that genuinely IS one
+    paragraph — or has no header-carrying data table — never trips. ``md`` must
+    be non-empty and stripped."""
+    if "\n" not in md and len(_HTML_BLOCK_ELEM_RE.findall(html)) >= 2:
+        return True  # multi-block page came back as a single unstructured line
+    if (
+        keep_tables
+        and _HTML_TABLE_RE.search(html)
+        and _HTML_TABLE_HEADER_RE.search(html)
+        and not _GFM_TABLE_ROW_RE.search(md)
+    ):
+        return True  # the page has a data table but no GFM row survived
+    return False
+
+
 def _trafilatura_markdown(html: str, url: str) -> str:
-    """Trafilatura → markdown body (boilerplate-stripped, tables + headings kept)."""
+    """Trafilatura → markdown body (boilerplate-stripped, tables + headings kept).
+
+    A body that fails the structure-acceptance check returns "" so the
+    readability+markdownify fallback answers instead."""
     if _trafilatura is None:
         return ""
     try:
@@ -262,7 +299,11 @@ def _trafilatura_markdown(html: str, url: str) -> str:
     except Exception as e:  # pragma: no cover - defensive
         logger.debug("trafilatura extract failed for %s: %s", url, e)
         return ""
-    return (md or "").strip()
+    md = (md or "").strip()
+    if md and _engine_output_mangled(md, html, keep_tables=True):
+        logger.debug("trafilatura body rejected as structure-mangled for %s", url)
+        return ""
+    return md
 
 
 def _fallback_markdown(html: str, url: str) -> str:

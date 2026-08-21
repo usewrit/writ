@@ -192,15 +192,24 @@ export interface WizardState {
     openaiDefaultHandler: string;
     openaiModelName: string;
 
-    // Site crawl (Dragnet) — the self-hosted coordinator does deterministic crawls
-    // only (no AI executor); the one axis is the output shape.
+    // Site crawl (Dragnet) — two orthogonal axes: WHO reads each page
+    // (crawlExecutor) and the output SHAPE (crawlOutput).
     /**
      * Which operation: 'crawl' = seed → follow links → many pages; 'scrape' = fetch
      * just the entry URL, no link-following (a depth-0 crawl); 'map' = list the
      * site's URLs and hand-pick the entry set (creates nothing).
      */
     crawlVerb: 'crawl' | 'scrape' | 'map';
+    /**
+     * WHO reads each page: 'regular' = deterministic (readability/CSS, free), 'ai'
+     * = every page is read against crawlPrompt by the AI provider configured in
+     * Settings → AI. Independent of crawlRenderMode — the AI reads whatever the
+     * chosen fetch lane produced.
+     */
+    crawlExecutor: 'regular' | 'ai';
     crawlOutput: 'markdown' | 'schema';
+    /** For the ai executor: what every page should yield. */
+    crawlPrompt: string;
     crawlRenderMode: 'auto' | 'http' | 'browser';
     crawlOcrMode: 'auto' | 'off' | 'force';
     crawlMaxDepth: number;
@@ -374,7 +383,9 @@ const initialState: WizardState = {
     openaiDefaultHandler: 'chat',
     openaiModelName: 'streaming',
     crawlVerb: 'crawl',
+    crawlExecutor: 'regular',
     crawlOutput: 'markdown',
+    crawlPrompt: '',
     crawlRenderMode: 'auto',
     crawlOcrMode: 'auto',
     crawlMaxDepth: 4,

@@ -1010,6 +1010,66 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
   // How the code is delivered (totp | email_otp | sms | unknown) — pre-selects
   // the persona 2FA method in the prefill. Best-effort hint from the page text.
   const [detected2faChannel, setDetected2faChannel] = useState<string | null>(null);
+
+  // ── PERSONA HAND-OFF: what the recording knows about this sign-in ──────────
+  // The identity fields the recording captured, split by role. `username` and
+  // `password` are the two keys a persona resolves its credentials under
+  // (PersonaService.resolve_login_credentials), so a step referencing
+  // {{secret:username}} / {{secret:password}} replays against ANY persona.
+  const passwordCredential = React.useMemo(
+    () => detectedCredentials.find((c) => /pass/i.test(`${c.field_type} ${c.field_name}`)),
+    [detectedCredentials],
+  );
+  const usernameCredential = React.useMemo(
+    () => detectedCredentials.find(
+      (c) => /user|email|login/i.test(`${c.field_type} ${c.field_name}`) && !/pass/i.test(c.field_type),
+    ),
+    [detectedCredentials],
+  );
+  // Everything else the login form asked for (account id, company code…), kept
+  // under its own field name so the persona stores it as an extra login field.
+  const extraCredentials = React.useMemo(
+    () => detectedCredentials.filter((c) => c !== passwordCredential && c !== usernameCredential),
+    [detectedCredentials, passwordCredential, usernameCredential],
+  );
+  /** {plaintext value → persona credential key} for the swap below. */
+  const credentialKeyByValue = React.useMemo(() => {
+    const map = new Map<string, string>();
+    if (usernameCredential?.value) map.set(usernameCredential.value, 'username');
+    if (passwordCredential?.value) map.set(passwordCredential.value, 'password');
+    for (const c of extraCredentials) if (c.value) map.set(c.value, c.field_name);
+    return map;
+  }, [usernameCredential, passwordCredential, extraCredentials]);
+
+  // The recorded steps with every captured credential VALUE replaced by its
+  // {{secret:…}} reference — what the persona wizard may save as the login
+  // workflow. Parameterizing here (not in the wizard) keeps plaintext inside
+  // the component that already owns it: the derived workflow never stores a
+  // typed password, the persona supplies it at dispatch.
+  const personaLoginSteps = React.useMemo(() => {
+    const swap = (v: unknown): unknown => {
+      if (typeof v === 'string') {
+        const key = credentialKeyByValue.get(v);
+        return key ? `{{secret:${key}}}` : v;
+      }
+      if (Array.isArray(v)) return v.map(swap);
+      if (isPlainObject(v)) {
+        const out: Record<string, unknown> = {};
+        for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = swap(val);
+        return out;
+      }
+      return v;
+    };
+    // RecordedStep widens `type` to string, but every value it holds IS a
+    // workflow step type — the same shape the recorder saves through onSave.
+    return steps.map((s) => swap(s)) as WorkflowStep[];
+  }, [steps, credentialKeyByValue]);
+
+  const entryUrlForLogin = React.useMemo(() => {
+    const firstNav = steps.find((s) => s.type === 'navigate' && s.url);
+    return firstNav?.url || currentUrl || undefined;
+  }, [steps, currentUrl]);
+
   // Offer to turn the recorded login into a persona (so runs sign in unattended).
   const [showPersonaWizard, setShowPersonaWizard] = useState(false);
   const [showAuthImport, setShowAuthImport] = useState(false);
@@ -6240,9 +6300,18 @@ export const BrowserRecorder: React.FC<BrowserRecorderProps> = ({
                       try { return currentUrl ? new URL(currentUrl).hostname.replace(/^www\./, '') : undefined; }
                       catch { return undefined; }
                     })(),
-                    login_username: detectedCredentials.find(
-                      (c) => /user|email|login/i.test(`${c.field_type} ${c.field_name}`) && !/pass/i.test(c.field_type),
-                    )?.value || undefined,
+                    login_username: usernameCredential?.value || undefined,
+                    // What the user actually typed during the recording — stored
+                    // encrypted on the persona so replays sign in with the same
+                    // account rather than asking for it a second time.
+                    password: passwordCredential?.value || undefined,
+                    extra_fields: extraCredentials.map((c) => ({ key: c.field_name, value: c.value })),
+                    // The sign-in as PERFORMED, with every captured credential
+                    // value swapped for its {{secret:…}} reference — the wizard
+                    // offers it as the persona's login workflow and never sees a
+                    // plaintext value in a step.
+                    recorded_steps: personaLoginSteps,
+                    entry_url: entryUrlForLogin,
                     twofa_method: (() => {
                       const has2fa = detected2fa || steps.some((s) => s.type === 'twofa');
                       if (!has2fa) return 'none';

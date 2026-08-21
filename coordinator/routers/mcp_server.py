@@ -62,6 +62,14 @@ SERVER_NAME = "writ-selfhost"
 SERVER_TITLE = "Writ Self-Host Coordinator"
 SERVER_VERSION = "1.0.0"
 
+# Ceiling on derived run_<workflow> tools (pinned workflows). MCP clients inject
+# every advertised tool schema into model context on every request, and several
+# cap the total tool count (ChatGPT/VS Code at 128, Cursor warns near 40-50) —
+# with ~30 static writ_* tools, 20 derived keeps the whole surface inside those
+# budgets. Workflows past the cap (and every unpinned one) stay fully callable
+# through writ_run_workflow. 0 disables derived tools entirely.
+MCP_DERIVED_TOOL_CAP = max(0, int(os.getenv("MCP_DERIVED_TOOL_CAP", "20")))
+
 # Terminal run statuses (RunItem.status normalization, routers/runs.py).
 _TERMINAL = {"success", "failed", "cancelled", "skipped"}
 
@@ -144,15 +152,26 @@ class _Upstream(Exception):
         super().__init__(detail)
 
 
-async def _call(method: str, path: str, token: str, *, params=None, json_body=None) -> Any:
+async def _call(
+    method: str, path: str, token: str, *, params=None, json_body=None,
+    timeout: Optional[float] = None,
+) -> Any:
     """Call the coordinator's own REST endpoint, forwarding the caller's bearer.
 
     Scope checks, validation, and metering happen in the target endpoint exactly
     as for any external caller — this hop adds no authority. Raises ``_Upstream``
     on a non-2xx so the tool layer can surface a clean error.
+
+    ``timeout`` overrides the shared client's 30s read timeout for the ONE call —
+    required for wait-mode endpoints (a crawl run with wait=true holds the
+    response up to its own `timeout` seconds; the default 30s client limit
+    aborted those mid-wait with a ReadTimeout).
     """
     headers = {"Authorization": token} if token else {}
-    resp = await _http().request(method, path, headers=headers, params=params, json=json_body)
+    kwargs: dict = {}
+    if timeout is not None:
+        kwargs["timeout"] = httpx.Timeout(timeout)
+    resp = await _http().request(method, path, headers=headers, params=params, json=json_body, **kwargs)
     if resp.status_code >= 400:
         # Prefer the endpoint's own `detail`, but keep it terse and non-leaky.
         detail = resp.text[:300]
@@ -264,17 +283,31 @@ def _file_slots_property(w: dict) -> Optional[dict]:
 
 
 def _derived_run_tools(rows: list[dict]) -> list[dict]:
-    """One ``run_<workflow>`` tool per saved workflow (mirrors the desktop daemon).
+    """One ``run_<workflow>`` tool per PINNED saved workflow.
 
     Lets an agent call a named tool instead of passing a workflow id to the
     generic runner. Input schema is derived from the workflow's declared inputs.
     Names are de-duped; the static ``writ_*`` names always win.
+
+    Exposure is OPT-IN (``mcp_tool_pinned``, default off) and capped at
+    MCP_DERIVED_TOOL_CAP: clients inject every advertised schema into model
+    context on every request, so an instance with many workflows must not
+    advertise them all as tools. Every workflow — pinned or not — stays callable
+    through writ_run_workflow, and a stale ``run_<name>`` call still resolves in
+    tools/call via _match_run_tool_name.
     """
+    pinned = [w for w in rows if w.get("id") and w.get("mcp_tool_pinned")]
+    if len(pinned) > MCP_DERIVED_TOOL_CAP:
+        # Deterministic under the cap: most recently touched first (ISO-8601
+        # strings order lexicographically), id as the tie-break.
+        pinned.sort(
+            key=lambda w: (str(w.get("updated_at") or w.get("created_at") or ""), w.get("id") or 0),
+            reverse=True,
+        )
+        pinned = pinned[:MCP_DERIVED_TOOL_CAP]
     used = {t["name"] for t in _STATIC_TOOLS}
     tools: list[dict] = []
-    for w in rows:
-        if not w.get("id"):
-            continue
+    for w in pinned:
         fallback = w.get("name") or ("workflow_%s" % w["id"])
         base = "run_" + _slug(fallback)
         name = base
@@ -312,15 +345,88 @@ def _derived_run_tools(rows: list[dict]) -> list[dict]:
     return tools
 
 
+def _match_run_tool_name(rows: list[dict], name: str) -> list[dict]:
+    """Workflows whose derived tool name would be ``name`` — ALL rows, not just
+    pinned ones, so a client that cached the tool list before a workflow was
+    unpinned (or before exposure became opt-in) keeps working instead of 404ing.
+
+    Deliberately conservative: a tool name is a machine identifier, so only an
+    exact slug match counts, plus a retry with a trailing ``_N`` de-dup suffix
+    stripped (those suffixes were assigned in list order and are not stable).
+    Anything fuzzier risks silently running the WRONG workflow — a miss routes
+    the caller to writ_run_workflow instead, where name resolution is explicit.
+    """
+    target = name[len("run_"):]
+    base = re.sub(r"_\d+$", "", target)
+    exact: list[dict] = []
+    stripped: list[dict] = []
+    for w in rows:
+        if not w.get("id"):
+            continue
+        s = _slug(w.get("name") or ("workflow_%s" % w["id"]))
+        if s == target:
+            exact.append(w)
+        elif base != target and s == base:
+            stripped.append(w)
+    return exact or stripped
+
+
+def _derived_tool_handler(rows: list[dict], wid: int):
+    """The tools/call handler for one workflow's derived ``run_<name>`` tool.
+
+    Shared by the advertised (pinned) tools and the stale-name fallback so both
+    lanes honour the same contract — notably `max_age` freshness, which the
+    derived schemas advertise and must therefore honour.
+    """
+    async def handler(tok, a, _wid=wid):
+        wf = next((w for w in rows if w.get("id") == _wid), {"id": _wid})
+        wait = a.get("wait", True) is not False
+        inputs = _inputs_from_args(a)
+        files = _files_from_args(a)
+        # persona_id is reserved out of inputs, so honour it here too — a
+        # derived tool given one must run AS that identity, not drop it into
+        # form_data or the void.
+        persona_id = _run_persona_id(a)
+        fkey = _freshness_key(_wid, inputs, files, persona_id)
+        requested = _requested_max_age(a)
+        if requested > 0:
+            hit = _cached_run(fkey, requested)
+            if hit is not None:
+                return _content(hit)
+        res = await _run_workflow_id(
+            tok, wf, inputs, wait,
+            int(a.get("timeout_seconds") or 120), files, persona_id)
+        _store_run(fkey, res)
+        return _content(res)
+    return handler
+
+
 # ── Tool handlers ────────────────────────────────────────────────────────────
 
 def _inputs_from_args(args: dict) -> dict:
     """Everything that isn't a control key is treated as a run input."""
     reserved = {"workflow", "workflow_id", "id", "name", "wait", "timeout_seconds",
-                "files", FRESHNESS_ARG}
+                "files", "persona_id", FRESHNESS_ARG}
     if isinstance(args.get("inputs"), dict):
         return dict(args["inputs"])
     return {k: v for k, v in args.items() if k not in reserved}
+
+
+def _run_persona_id(args: dict) -> Optional[int]:
+    """The run's persona override (run AS this saved identity).
+
+    Malformed values HARD-fail rather than degrade to None — silently running
+    anonymously when the caller asked for an identity is the worst outcome (the
+    run "works" and returns the logged-out site).
+    """
+    raw = args.get("persona_id")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise _Upstream(422, "persona_id must be the numeric id of one of your "
+                             "personas — list them with writ_personas.")
 
 
 def _files_from_args(args: dict) -> dict:
@@ -364,6 +470,14 @@ RUN_CONTROL_PROPERTIES = {
         "type": "integer",
         "description": "Max seconds to wait for completion (default 120).",
     },
+    "persona_id": {
+        "type": "integer",
+        "description": (
+            "Run AS this saved identity (see writ_personas) — the run signs in with "
+            "the persona's warm session. Omit to use the workflow's default persona, "
+            "if it has one."
+        ),
+    },
     FRESHNESS_ARG: {
         "type": "integer",
         "minimum": 0,
@@ -386,12 +500,16 @@ def _requested_max_age(args: dict) -> int:
         return 0
 
 
-def _freshness_key(wf_id: int, inputs: dict, files: dict = None) -> tuple:
+def _freshness_key(wf_id: int, inputs: dict, files: dict = None,
+                   persona_id: Optional[int] = None) -> tuple:
     # The FILES map is part of the key: uploading a different file is a different
     # question, so a run bound to file B must never be served file A's cached answer.
+    # The PERSONA is part of it too: a run signed in as identity A sees different
+    # pages than an anonymous run or identity B.
     return (wf_id,
             json.dumps(inputs or {}, sort_keys=True, default=str),
-            json.dumps(files or {}, sort_keys=True, default=str))
+            json.dumps(files or {}, sort_keys=True, default=str),
+            persona_id)
 
 
 def _cached_run(key: tuple, max_age: int) -> Optional[dict]:
@@ -422,7 +540,7 @@ def _store_run(key: tuple, result: dict) -> None:
 
 
 async def _run_workflow_id(token: str, wf: dict, inputs: dict, wait: bool, timeout_s: int,
-                           files: dict = None) -> dict:
+                           files: dict = None, persona_id: Optional[int] = None) -> dict:
     wid = wf["id"]
     dispatch_ts = time.time()
     body: dict = {"form_data": inputs}
@@ -431,6 +549,11 @@ async def _run_workflow_id(token: str, wf: dict, inputs: dict, wait: bool, timeo
     # a workflow with a pinned file keeps resolving it server-side.
     if files:
         body["files"] = files
+    # Same top-level rule for the run-as persona: the run endpoint reads it from
+    # the body root, and omitting it keeps the workflow's default_persona_id in
+    # charge server-side.
+    if persona_id is not None:
+        body["persona_id"] = persona_id
     disp = await _call(
         "POST", f"/api/automation/workflows/{wid}/run", token,
         json_body=body,
@@ -508,6 +631,9 @@ async def _tool_list_workflows(token: str, args: dict) -> dict:
             "schedule_enabled": w.get("schedule_enabled"),
             "schedule_kind": w.get("schedule_kind"),
         }
+        # Marker only when set — the common (unpinned) case stays compact.
+        if w.get("mcp_tool_pinned"):
+            row["mcp_tool_pinned"] = True
         # File inputs, so a caller can discover the slot names it may bind (and
         # which ones it MUST) without a second round-trip. Names only — the pinned
         # file's id stays server-side; only its filename is descriptive.
@@ -530,18 +656,46 @@ async def _tool_run_workflow(token: str, args: dict) -> dict:
     timeout_s = int(args.get("timeout_seconds") or 120)
     inputs = _inputs_from_args(args)
     files = _files_from_args(args)
+    persona_id = _run_persona_id(args)
 
     # FRESHNESS first: a reusable answer means no dispatch at all.
     max_age = _requested_max_age(args)
-    key = _freshness_key(wf["id"], inputs, files)
+    key = _freshness_key(wf["id"], inputs, files, persona_id)
     if max_age > 0:
         hit = _cached_run(key, max_age)
         if hit is not None:
             return _content(hit)
 
-    res = await _run_workflow_id(token, wf, inputs, wait, timeout_s, files)
+    res = await _run_workflow_id(token, wf, inputs, wait, timeout_s, files, persona_id)
     _store_run(key, res)
     return _content(res)
+
+
+async def _tool_pin_workflow_tool(token: str, args: dict) -> dict:
+    """Pin/unpin one workflow as its own derived run_<name> tool.
+
+    Thin translation onto the workflows PUT endpoint (scope-checked there). After
+    pinning, re-derive the tool list to report the exact tool name — or that the
+    cap is full, in which case the pin is stored but not advertised.
+    """
+    wf = await _resolve_workflow(token, args)
+    pinned = args.get("pinned", True) is not False
+    await _call("PUT", f"/api/automation/workflows/{wf['id']}", token,
+                json_body={"mcp_tool_pinned": pinned})
+    out: dict = {"workflow_id": wf["id"], "name": wf.get("name"), "mcp_tool_pinned": pinned}
+    if pinned:
+        rows = await _list_workflows(token)
+        tool_name = next(
+            (t["name"] for t in _derived_run_tools(rows) if t["_workflow_id"] == wf["id"]), None)
+        if tool_name:
+            out["tool"] = tool_name
+            out["note"] = "Clients pick the new tool up on their next tool listing."
+        else:
+            out["note"] = (
+                f"Pinned, but the {MCP_DERIVED_TOOL_CAP}-tool cap is full, so no tool is "
+                "advertised for it — it still runs via writ_run_workflow. Unpin a less-used "
+                "workflow to free a slot.")
+    return _content(out)
 
 
 async def _tool_workflow_data(token: str, args: dict) -> dict:
@@ -673,7 +827,8 @@ async def _tool_expose_workflow_api(token: str, args: dict) -> dict:
 # Crawl settings a saved definition accepts. One list, so the ad-hoc and save-as
 # paths cannot drift into accepting different things.
 _CRAWL_CONFIG_KEYS = (
-    "name", "extract_mode", "extract_schema", "include_paths", "exclude_paths",
+    "name", "executor", "extract_mode", "extract_schema", "extract_prompt",
+    "include_paths", "exclude_paths",
     "max_depth", "page_budget", "same_domain", "allow_subdomains", "respect_robots",
     "render_mode", "ocr_mode", "intent", "seed_urls", "relevance_threshold",
     "content_spec", "persona_id", "shard_size", "delay_ms", "max_concurrent_shards",
@@ -717,11 +872,16 @@ async def _tool_crawl_site(token: str, args: dict) -> dict:
                            json_body={"name": save_as, "slug": save_as, "config": config})
 
     run_body = {"max_age": _requested_max_age(args)}
+    call_timeout: Optional[float] = None
     if args.get("wait") is not None:
         run_body["wait"] = args["wait"] is not False
         run_body["timeout"] = int(args.get("timeout_seconds") or 120)
+        if run_body["wait"]:
+            # The run endpoint holds the response up to `timeout` seconds — give the
+            # loopback client that long plus margin, or it ReadTimeouts at 30s.
+            call_timeout = run_body["timeout"] + 15
     result = await _call("POST", f"/api/crawl/definitions/{defn['slug']}/run", token,
-                         json_body=run_body)
+                         json_body=run_body, timeout=call_timeout)
     return _content(result)
 
 
@@ -743,13 +903,18 @@ async def _tool_run_saved_crawl(token: str, args: dict) -> dict:
     ref = args.get("crawl") or args.get("slug") or args.get("definition_id")
     if not ref:
         raise _Upstream(400, "writ_run_saved_crawl requires `crawl` (a saved crawl slug, name or id).")
+    wait = args.get("wait") is True
     body = {
         "max_age": _requested_max_age(args),
-        "wait": args.get("wait") is True,
+        "wait": wait,
         "timeout": int(args.get("timeout_seconds") or 120),
         "limit": int(args.get("limit") or 50),
     }
-    res = await _call("POST", f"/api/crawl/definitions/{ref}/run", token, json_body=body)
+    # A held wait outlives the loopback client's default 30s read timeout — give
+    # it the wait budget plus margin, or the tool dies in a ReadTimeout mid-wait.
+    call_timeout: Optional[float] = (body["timeout"] + 15) if wait else None
+    res = await _call("POST", f"/api/crawl/definitions/{ref}/run", token,
+                      json_body=body, timeout=call_timeout)
     return _content(res)
 
 
@@ -768,6 +933,150 @@ async def _tool_crawl_status(token: str, args: dict) -> dict:
         raise _Upstream(400, "writ_crawl_status requires a `crawl_id`.")
     crawl = await _call("GET", f"/api/crawl/{int(cid)}", token)
     return _content(crawl)
+
+
+async def _tool_scrape(token: str, args: dict) -> dict:
+    """One page → clean markdown. The single-page twin of writ_crawl_site
+    (name/behaviour parity with the cloud connector)."""
+    url = (args.get("url") or "").strip()
+    if not url:
+        raise _Upstream(400, "writ_scrape requires a `url`.")
+    body: dict = {"url": url}
+    if args.get("persona_id") is not None:
+        body["persona_id"] = args["persona_id"]
+    # A single page can still ride a real browser render on an agent, which
+    # routinely exceeds the shared 30s loopback limit.
+    res = await _call("POST", "/api/crawl/scrape", token, json_body=body, timeout=75)
+    return _content(res)
+
+
+# ── Personas (saved sign-in identities) ──────────────────────────────────────
+
+#: The agent-facing projection of one persona. A deliberate SUBSET of the REST
+#: response: mailbox/relay plumbing has no read use in an agent loop, so it never
+#: enters the model's context. Secrets are already absent at the source — the
+#: REST layer only ever returns has_* booleans for them.
+_PERSONA_ALWAYS = ("id", "name", "is_active", "twofa_method", "has_password",
+                   "has_warm_session", "can_self_login")
+_PERSONA_OPTIONAL = ("description", "target_domain", "login_username",
+                     "email_otp_mode", "validation_status", "has_totp_seed",
+                     "session_expires_at", "login_workflow_id", "login_workflow_name",
+                     "last_login_at", "last_login_error", "last_used_at",
+                     "has_proxy", "linked_workflows")
+
+
+def _persona_view(row: dict) -> dict:
+    out = {k: row.get(k) for k in _PERSONA_ALWAYS}
+    out.update({k: row[k] for k in _PERSONA_OPTIONAL if row.get(k) not in (None, [], {})})
+    return out
+
+
+def _personas_usage_note(rows: list) -> str:
+    """What to do next — the part a connected model gets wrong without guidance:
+    personas are USED via persona_id on the run/crawl/scrape tools, and they are
+    CREATED only in the Writ dashboard (credentials must never transit MCP)."""
+    if not rows:
+        return (
+            "No personas saved. A persona is a saved sign-in identity (username + "
+            "credentials sealed server-side, optional 2FA) that lets runs act behind a "
+            "login. Creating one requires credentials, which never pass through this "
+            "connection — ask the user to add it in the Writ dashboard on the Personas "
+            "page, then use it here by persona_id."
+        )
+    stale = [r["id"] for r in rows if r.get("is_active") and not r.get("has_warm_session")]
+    note = (
+        "Use a persona by passing its persona_id to writ_crawl_site, writ_scrape or "
+        "writ_run_workflow — the run then acts signed in as that identity, with any "
+        "2FA code minted server-side. "
+    )
+    if stale:
+        note += (
+            f"Personas {stale} have no warm session right now: action='sign_in' "
+            "refreshes one that can_self_login; otherwise action='record_login' has "
+            "the AI record its sign-in once. "
+        )
+    note += (
+        "Credentials are managed only in the Writ dashboard (Personas page) — this "
+        "tool cannot create, edit or delete a persona."
+    )
+    return note
+
+
+async def _tool_personas(token: str, args: dict) -> dict:
+    """Operate the coordinator's saved sign-in identities, end to end minus creation.
+
+    list/get answer "which identity can I act as, and is it ready?"; sign_in
+    establishes/refreshes the warm session by running the persona's login workflow;
+    record_login makes an existing persona ABLE to sign itself in by having a
+    local AI session record the flow once. Lifecycle mutations (create / edit /
+    delete) stay in the dashboard on purpose: they carry credentials, and no
+    secret may transit the MCP surface in either direction.
+    """
+    action = str(args.get("action") or "list").strip().lower()
+
+    if action == "list":
+        params = {}
+        if args.get("domain"):
+            params["domain"] = str(args["domain"]).strip()
+        rows = await _call("GET", "/api/personas", token, params=params or None)
+        out = [_persona_view(r) for r in (rows or []) if isinstance(r, dict)]
+        return _content({
+            "personas": out,
+            "total": len(out),
+            "next": _personas_usage_note(out),
+        })
+
+    try:
+        pid = int(args.get("persona_id"))
+    except (TypeError, ValueError):
+        return _content(
+            f"Error: action '{action}' needs a numeric persona_id — find it with "
+            "writ_personas action='list'.", is_error=True)
+
+    if action == "get":
+        row = await _call("GET", f"/api/personas/{pid}", token)
+        out = _persona_view(row if isinstance(row, dict) else {})
+        if args.get("include_runs") is True:
+            runs = await _call("GET", f"/api/personas/{pid}/runs", token,
+                               params={"limit": 10})
+            out["recent_runs"] = runs or []
+        return _content(out)
+
+    if action == "sign_in":
+        # The REST endpoint runs the persona's login workflow synchronously and holds
+        # the response up to its own LOGIN_TIMEOUT_SECONDS (240s) — the shared 30s
+        # loopback limit would abort every real login mid-run.
+        res = await _call("POST", f"/api/personas/{pid}/sign-in", token,
+                          json_body={"force": args.get("force") is True}, timeout=270)
+        res = res if isinstance(res, dict) else {}
+        if not res.get("ok"):
+            res["next"] = (
+                "The persona is not signed in. If it cannot self-login (no login "
+                "workflow), run writ_personas action='record_login' so the AI records "
+                "the sign-in once; if the error points at wrong credentials, the user "
+                "must fix them in the Writ dashboard (Personas page)."
+            )
+        return _content(res)
+
+    if action == "record_login":
+        body = {}
+        if args.get("login_url"):
+            body["login_url"] = str(args["login_url"])
+        res = await _call("POST", f"/api/personas/{pid}/record-login-ai", token,
+                          json_body=body)
+        res = res if isinstance(res, dict) else {}
+        res["next"] = (
+            "An AI session is signing in as this persona and recording the flow "
+            "(credentials stay masked; it never needs you). Poll writ_personas "
+            "action='get' for this persona_id: when can_self_login turns true the "
+            "recording became its login workflow — then action='sign_in' establishes "
+            "the warm session. A last_login_error instead means the attempt failed."
+        )
+        return _content(res)
+
+    return _content(
+        f"Error: unknown action '{action}'. Use one of: list, get, sign_in, "
+        "record_login.", is_error=True)
 
 
 _AUTOMATION_EVENTS = {
@@ -827,10 +1136,25 @@ async def _tool_create_automation(token: str, args: dict) -> dict:
         if isinstance(args.get("recipients"), list):
             cfg["recipients"] = args["recipients"]
         actions.append({"type": "notification", "config": cfg})
+    if args.get("ai_prompt"):
+        # Wake an AI agent when the event fires. The goal supports the same
+        # {{placeholders}} as notification templates; entry_url falls back to
+        # the event's page (the monitored URL on change_detected) — for
+        # workflow_*/webhook events give `ai_entry_url` explicitly or the wake
+        # is skipped with a clear reason.
+        ai_cfg: dict = {"goal": str(args["ai_prompt"]).strip()}
+        if args.get("ai_entry_url"):
+            ai_cfg["entry_url"] = str(args["ai_entry_url"]).strip()
+        if args.get("cooldown_minutes") is not None:
+            try:
+                ai_cfg["cooldown_minutes"] = max(0, int(args["cooldown_minutes"]))
+            except (TypeError, ValueError):
+                raise _Upstream(400, "`cooldown_minutes` must be an integer.")
+        actions.append({"type": "ai_session", "config": ai_cfg})
     if isinstance(args.get("actions"), list):
         actions.extend(a for a in args["actions"] if isinstance(a, dict))
     if not actions:
-        raise _Upstream(400, "Give the automation something to do: `run_workflow`, `notify`, or a raw `actions` list.")
+        raise _Upstream(400, "Give the automation something to do: `run_workflow`, `notify`, `ai_prompt`, or a raw `actions` list.")
     body["actions"] = actions
 
     created = await _call("POST", "/api/triggers", token, json_body=body)
@@ -874,7 +1198,7 @@ async def _tool_create_monitor(token: str, args: dict) -> dict:
             raise _Upstream(400, "`interval_minutes` must be >= 1.")
         body["check_period_ms"] = minutes * 60_000
     created = await _call("POST", "/api/targets", token, json_body=body)
-    return _content({
+    out = {
         "monitor_id": (created or {}).get("id"),
         "url": (created or {}).get("url") or url,
         "check_type": body["check_type"],
@@ -883,7 +1207,16 @@ async def _tool_create_monitor(token: str, args: dict) -> dict:
         "requires_browser": body["requires_playwright"],
         "enabled": (created or {}).get("enabled", body["enabled"]),
         "next": "Call writ_wire_monitor with this monitor_id to choose what happens on a detected change (run a saved workflow, or notify).",
-    })
+    }
+    if selector and body["requires_playwright"]:
+        # Browser-mode selectors are validated against the rendered,
+        # frame-flattened DOM on the first check — not against a raw-HTML fetch
+        # at create time — so a mistyped selector surfaces there, not here.
+        out["note"] = (
+            "Browser-rendered monitor: the selector is verified against the "
+            "rendered (frame-flattened) DOM on the first check, not the raw HTML."
+        )
+    return _content(out)
 
 
 async def _tool_wire_monitor(token: str, args: dict) -> dict:
@@ -891,7 +1224,11 @@ async def _tool_wire_monitor(token: str, args: dict) -> dict:
 
     action='workflow' runs a saved workflow when the monitored page changes;
     action='notify' sends a notification (needs `channels` + `recipients` the
-    account has configured, e.g. channels=["pushover"], recipients=["pushover:1"]).
+    account has configured, e.g. channels=["pushover"], recipients=["pushover:1"]);
+    action='ai_task' WAKES AN AI AGENT with a task `prompt` — a fleet agent with
+    local AI opens the monitored page with the change context (diff, extracted
+    values) and works the prompt autonomously (self-host is goal-only: there are
+    no saved AI-session recipes to re-run).
     Backed by POST /api/triggers (event_type=change_detected, scoped to target_id).
     """
     monitor_id = args.get("monitor_id") if args.get("monitor_id") is not None else args.get("target_id")
@@ -908,6 +1245,8 @@ async def _tool_wire_monitor(token: str, args: dict) -> dict:
         "parentId": None, "config": {"target_id": monitor_id},
     }
     note = None
+    extra_actions: list = []
+    extra_blocks: list = []
     if action == "workflow":
         wf = await _resolve_workflow(token, {
             "workflow": args.get("workflow"), "workflow_id": args.get("workflow_id")})
@@ -931,15 +1270,62 @@ async def _tool_wire_monitor(token: str, args: dict) -> dict:
                     "deliver until channels + recipients are configured (pass `channels` and "
                     "`recipients`, e.g. channels=[\"pushover\"], recipients=[\"pushover:1\"], or set "
                     "them on the automation in the Writ app).")
+    elif action in ("ai_task", "ai", "wake_agent"):
+        prompt = str(args.get("prompt") or args.get("goal") or "").strip()
+        if not prompt:
+            raise _Upstream(400, (
+                "action='ai_task' requires a `prompt` — what the AI agent should do when "
+                "the monitor fires."
+            ))
+        cfg = {"goal": prompt}
+        if args.get("entry_url"):
+            cfg["entry_url"] = str(args["entry_url"]).strip()
+        if args.get("max_steps") is not None:
+            try:
+                cfg["max_steps"] = max(1, min(100, int(args["max_steps"])))
+            except (TypeError, ValueError):
+                raise _Upstream(400, "`max_steps` must be an integer.")
+        if args.get("cooldown_minutes") is not None:
+            try:
+                cfg["cooldown_minutes"] = max(0, int(args["cooldown_minutes"]))
+            except (TypeError, ValueError):
+                raise _Upstream(400, "`cooldown_minutes` must be an integer.")
+        act = {"type": "ai_session", "config": cfg}
+        action_block = {"id": "act", "type": "action", "blockType": "ai_session",
+                        "parentId": "evt", "config": cfg}
+        # Optional finish alert: channels given → chain change → agent →
+        # (ai_session_completed) → notification.
+        channels = args.get("channels") if isinstance(args.get("channels"), list) else []
+        recipients = args.get("recipients") if isinstance(args.get("recipients"), list) else []
+        if channels:
+            notify_cfg = {
+                "channels": channels,
+                "recipients": recipients,
+                "title": args.get("title") or "Your AI agent finished",
+                "template": args.get("message") or "Status: {{session_status}}",
+            }
+            extra_blocks.extend([
+                {"id": "wait", "type": "event", "blockType": "ai_session_completed",
+                 "parentId": "act", "config": {"linked_to_block": "act"}},
+                {"id": "act2", "type": "action", "blockType": "notification",
+                 "parentId": "wait", "config": notify_cfg},
+            ])
+            extra_actions.append({"type": "notification", "config": notify_cfg})
+        note = (
+            "The agent wakes with the monitor's change context (page URL, diff snippet, "
+            "extracted values) and starts on the monitored page unless `entry_url` overrides it. "
+            "It runs on a fleet agent with local AI configured (Settings → AI); "
+            "`cooldown_minutes` suppresses re-wakes within the window."
+        )
     else:
-        raise _Upstream(400, "`action` must be 'workflow' or 'notify'.")
+        raise _Upstream(400, "`action` must be 'workflow', 'notify' or 'ai_task'.")
     body = {
         "name": name,
         "event_type": "change_detected",
         "target_id": monitor_id,
         "enabled": args.get("enabled", True) is not False,
-        "actions": [act],
-        "blocks": [event_block, action_block],
+        "actions": [act] + extra_actions,
+        "blocks": [event_block, action_block] + extra_blocks,
     }
     created = await _call("POST", "/api/triggers", token, json_body=body)
     return _content({
@@ -1203,9 +1589,10 @@ async def _tool_record_save(token: str, args: dict) -> dict:
         "browser": ("still open — call writ_browser_cancel when finished"
                     if args.get("keep_open") is True else "closed"),
         "next": (
-            "Saved. It now runs on demand with writ_run_workflow (or its own run_<name> "
-            "tool) with no model in the loop, can be scheduled with writ_set_schedule, and "
-            "can be exposed as a REST endpoint with writ_expose_workflow_api."
+            "Saved. It now runs on demand with writ_run_workflow (pin it with "
+            "writ_pin_workflow_tool for its own run_<name> tool) with no model in the loop, "
+            "can be scheduled with writ_set_schedule, and can be exposed as a REST endpoint "
+            "with writ_expose_workflow_api."
         ),
     })
 
@@ -1223,7 +1610,7 @@ async def _tool_record_cancel(token: str, args: dict) -> dict:
 _STATIC_TOOLS: list[dict] = [
     {
         "name": "writ_list_workflows",
-        "description": "List the workflows you have already saved on this self-hosted Writ coordinator — each runs at zero AI cost. Returns id, name, declared inputs, and schedule.",
+        "description": "List the workflows you have already saved on this self-hosted Writ coordinator — each runs at zero AI cost. Returns id, name, declared inputs, schedule, and whether it is pinned as its own run_<name> tool.",
         "inputSchema": {"type": "object", "properties": {
             "search": {"type": "string", "description": "Optional name/description filter."}}},
         "_handler": _tool_list_workflows,
@@ -1238,6 +1625,21 @@ _STATIC_TOOLS: list[dict] = [
             "files": _FILES_PROPERTY_GENERIC,
             **RUN_CONTROL_PROPERTIES}},
         "_handler": _tool_run_workflow,
+    },
+    {
+        "name": "writ_pin_workflow_tool",
+        "description": (
+            "Pin (or unpin) a saved workflow as its own run_<name> tool on this server. "
+            "Workflows are NOT exposed as individual tools by default — every one is always "
+            "callable via writ_run_workflow — so pin only the few the user runs often enough "
+            "to deserve a first-class tool (the derived list is capped). Do this when the "
+            "user asks for it, or after saving a workflow the user clearly intends to call "
+            "as a tool from here."),
+        "inputSchema": {"type": "object", "properties": {
+            "workflow": {"type": "string", "description": "Workflow name (or use workflow_id)."},
+            "workflow_id": {"type": "integer"},
+            "pinned": {"type": "boolean", "description": "true (default) pins; false unpins."}}},
+        "_handler": _tool_pin_workflow_tool,
     },
     {
         "name": "writ_workflow_data",
@@ -1299,6 +1701,44 @@ _STATIC_TOOLS: list[dict] = [
         "_handler": _tool_expose_workflow_api,
     },
     {
+        "name": "writ_personas",
+        "description": (
+            "See and operate this coordinator's saved sign-in identities (personas) so "
+            "tasks behind a login run unattended. A persona holds a site's username plus "
+            "credentials sealed server-side (never readable here), optional 2FA whose "
+            "codes are minted server-side, and a warm signed-in session. USE one by "
+            "passing its persona_id to writ_crawl_site, writ_scrape or "
+            "writ_run_workflow. BEFORE asking the user for credentials for a site, call "
+            "action='list' (filter by domain) — an existing persona already answers a "
+            "login-gated task. action='get' inspects one persona (include_runs adds its "
+            "recent runs); action='sign_in' runs its login workflow NOW to establish or "
+            "refresh the warm session (force=true re-logs-in even when the session still "
+            "looks usable); action='record_login' launches an AI session that signs in "
+            "as the persona once and RECORDS the flow as its login workflow, after which "
+            "it can always sign itself back in. This tool can NOT create, edit or delete "
+            "personas, and no credential or one-time code ever passes through it — the "
+            "user manages those in the Writ dashboard on the Personas page; send them "
+            "there when no persona fits."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["list", "get", "sign_in", "record_login"],
+                       "description": "What to do (default list)."},
+            "persona_id": {"type": "integer", "description": (
+                "Which persona — required for get / sign_in / record_login.")},
+            "domain": {"type": "string", "description": (
+                "list: only personas usable on this host (suffix match), e.g. 'github.com'.")},
+            "include_runs": {"type": "boolean", "description": (
+                "get: include the persona's recent runs (which workflows acted as it, "
+                "and whether they succeeded).")},
+            "force": {"type": "boolean", "description": (
+                "sign_in: re-run the login even when the current session still looks usable.")},
+            "login_url": {"type": "string", "description": (
+                "record_login: exact sign-in page URL when known; defaults to the "
+                "persona's domain root (the AI finds the form from there).")},
+        }, "required": ["action"]},
+        "_handler": _tool_personas,
+    },
+    {
         "name": "writ_crawl_site",
         "description": (
             "Start a Dragnet distributed crawl of a website across your self-hosted agent fleet. "
@@ -1311,13 +1751,55 @@ _STATIC_TOOLS: list[dict] = [
             "name": {"type": "string"},
             "extract_mode": {"type": "string", "description": "markdown (default) or schema"},
             "extract_schema": {"type": "object"},
+            "executor": {"type": "string", "description": (
+                "regular (default) = deterministic crawl, no AI. ai = every page is read "
+                "against `extract_prompt` by the AI provider configured in Settings → AI "
+                "(or a connected agent's own keys) — for data with no clean CSS selector. "
+                "Refused when no provider is configured.")},
+            "extract_prompt": {"type": "string", "description": (
+                "Required with executor=ai: what every page should yield, in plain language "
+                "(e.g. 'the product name, price and SKU').")},
             "max_depth": {"type": "integer"}, "page_budget": {"type": "integer"},
             "include_paths": {"type": "array", "items": {"type": "string"}},
             "exclude_paths": {"type": "array", "items": {"type": "string"}},
             "same_domain": {"type": "boolean"}, "allow_subdomains": {"type": "boolean"},
-            "render_mode": {"type": "string", "description": "auto (default) | http | browser"},
+            "render_mode": {"type": "string", "description": (
+                "How each page is FETCHED — independent of `executor`, which decides who READS "
+                "it. auto (default) = plain HTTP first, warm browser only for JS-challenge or "
+                "near-empty pages; http = never open a browser (fastest, static HTML); browser = "
+                "warm-render every page (JS/SPA sites). executor=ai works on either lane.")},
             "ocr_mode": {"type": "string", "description": "auto (default) | off | force"},
             "intent": {"type": "string", "description": "Plain-English goal; scopes the crawl to matching pages."},
+            "persona_id": {"type": "integer", "description": (
+                "Saved identity to crawl AS (list them with writ_personas) — for pages "
+                "behind a login. The crawl replays the persona's signed-in session; 2FA "
+                "is minted server-side.")},
+            # These knobs were always FORWARDED to POST /api/crawl (see
+            # _CRAWL_CONFIG_KEYS) but never declared, so no MCP client could
+            # discover them — the same advertised-vs-honoured drift the cloud
+            # schema fixed. Descriptions mirror the cloud connector's.
+            "seed_urls": {"type": "array", "items": {"type": "string"}, "description": (
+                "Exact pages to start from, when you already know them — the crawl "
+                "collects these instead of discovering its own. Cheapest way to scrape "
+                "a known set.")},
+            "relevance_threshold": {"type": "number", "minimum": 0, "maximum": 1, "description": (
+                "0-1. Score every discovered page against `intent` and SKIP anything "
+                "below the bar, so a broad crawl collects only what the goal needs "
+                "(≈0.3 for 'the pricing and docs pages'). Leave unset for a whole-site "
+                "sweep.")},
+            "content_spec": {"type": "object", "description": (
+                "Which ELEMENTS of each page to keep: {preset: 'full'|'main', "
+                "include_comments: bool, exclude_selectors: [css], include_selectors: "
+                "[css], keep: {images: bool}}. 'main' = article body only; 'full' = the "
+                "whole page INCLUDING comment and discussion threads — use 'full' with "
+                "include_comments when the ask mentions comments, replies or "
+                "discussion, or they will be stripped out.")},
+            "respect_robots": {"type": "boolean", "description": "Honor robots.txt (default true)."},
+            "delay_ms": {"type": "integer", "description": "Politeness delay between fetches per host (default 250)."},
+            "shard_size": {"type": "integer", "description": "Pages per dispatched shard (default 25)."},
+            "max_concurrent_shards": {"type": "integer", "description": (
+                "Concurrent shard cap; unset = a conservative default. Your own fleet "
+                "size is the real ceiling.")},
             "save_as": {"type": "string", "description": (
                 "Save these settings under this name so the crawl becomes callable by API and "
                 "re-runnable. Reusing the same name updates that saved crawl instead of "
@@ -1374,6 +1856,21 @@ _STATIC_TOOLS: list[dict] = [
         "_handler": _tool_saved_crawl_data,
     },
     {
+        "name": "writ_scrape",
+        "description": (
+            "Scrape ONE page to clean markdown — the single-page twin of writ_crawl_site "
+            "when you only need one URL, not a whole site. Pass persona_id to scrape a "
+            "page behind a login as that saved identity."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "url": {"type": "string", "description": "Page URL (required)."},
+            "persona_id": {"type": "integer", "description": (
+                "Saved identity to scrape AS (list them with writ_personas) — for a page "
+                "behind a login.")},
+        }, "required": ["url"]},
+        "_handler": _tool_scrape,
+    },
+    {
         "name": "writ_crawl_status",
         "description": "Poll a running or finished Dragnet crawl by its crawl id — page counts, status, and the dataset workflow id.",
         "inputSchema": {"type": "object", "properties": {
@@ -1383,9 +1880,11 @@ _STATIC_TOOLS: list[dict] = [
     {
         "name": "writ_create_automation",
         "description": (
-            "Create an automation: on an EVENT, run a workflow and/or send a notification. "
-            "Chain workflows (when workflow A completes → run workflow B), or alert on completion. "
-            "Give a source workflow via `on_workflow` for workflow_* events, and at least one of `run_workflow` / `notify`."
+            "Create an automation: on an EVENT, run a workflow, send a notification, and/or wake an "
+            "AI agent. Chain workflows (when workflow A completes → run workflow B), alert on "
+            "completion, or have an agent act on the event (`ai_prompt`). "
+            "Give a source workflow via `on_workflow` for workflow_* events, and at least one of "
+            "`run_workflow` / `notify` / `ai_prompt`."
         ),
         "inputSchema": {"type": "object", "properties": {
             "name": {"type": "string", "description": "Name for the automation (required)."},
@@ -1399,6 +1898,9 @@ _STATIC_TOOLS: list[dict] = [
             "channels": {"type": "array", "items": {"type": "string"}, "description": "Notification channels for `notify`, e.g. [\"pushover\",\"email\"] (required for delivery)."},
             "recipients": {"type": "array", "items": {"type": "string"}, "description": "Notification recipients, e.g. [\"email:3\",\"pushover:1\"]."},
             "title": {"type": "string", "description": "Notification title (with `notify`)."},
+            "ai_prompt": {"type": "string", "description": "Wake an AI agent with this task when the event fires. The agent gets the event context (page URL, diff, extracted values) and works the task on a fleet agent with local AI. Supports {{placeholders}}."},
+            "ai_entry_url": {"type": "string", "description": "Page the woken agent starts on. Defaults to the event's page (the monitored URL on change_detected); required in practice for workflow_*/webhook events."},
+            "cooldown_minutes": {"type": "integer", "description": "Minimum minutes between AI wakes for `ai_prompt` (0 disables)."},
             "enabled": {"type": "boolean"},
             "priority": {"type": "integer"},
             "description": {"type": "string"}}, "required": ["name"]},
@@ -1416,7 +1918,7 @@ _STATIC_TOOLS: list[dict] = [
             "url": {"type": "string", "description": "URL to monitor (required)."},
             "selector": {"type": "string", "description": "CSS selector for content-change monitoring; omit for uptime/status monitoring."},
             "interval_minutes": {"type": "integer", "description": "How often to check, in minutes (minimum 1; omit to use the instance's global check period)."},
-            "requires_browser": {"type": "boolean", "description": "Render with a real browser (JS) instead of plain HTTP."},
+            "requires_browser": {"type": "boolean", "description": "Render with a real browser (JS) instead of plain HTTP. Set it for JS-rendered/SPA pages and framed pages (framesets/iframes): the check matches the rendered, frame-flattened DOM, and selector validation is deferred to the first browser render instead of a raw-HTML fetch."},
             "enabled": {"type": "boolean", "description": "Start the monitor enabled (default true)."}}, "required": ["url"]},
         "_handler": _tool_create_monitor,
     },
@@ -1425,17 +1927,24 @@ _STATIC_TOOLS: list[dict] = [
         "description": (
             "Wire a monitor's change_detected event to an action. action='workflow' runs a saved "
             "workflow when the monitored page changes; action='notify' sends a notification "
-            "(provide `channels` + `recipients` the account has configured). Use after "
-            "writ_create_monitor to make the monitor DO something on change."
+            "(provide `channels` + `recipients` the account has configured); action='ai_task' "
+            "WAKES AN AI AGENT with a task `prompt` — a fleet agent with local AI opens the "
+            "monitored page, sees what changed (diff + extracted values) and works the prompt "
+            "autonomously (add `channels`/`recipients` to also get notified when it finishes). "
+            "Use after writ_create_monitor to make the monitor DO something on change."
         ),
         "inputSchema": {"type": "object", "properties": {
             "monitor_id": {"type": "integer", "description": "Monitor id from writ_create_monitor."},
-            "action": {"type": "string", "enum": ["workflow", "notify"], "description": "What to do on a detected change."},
+            "action": {"type": "string", "enum": ["workflow", "notify", "ai_task"], "description": "What to do on a detected change."},
             "workflow": {"type": "string", "description": "Workflow to run (name) — required for action='workflow'."},
             "workflow_id": {"type": "integer"},
-            "channels": {"type": "array", "items": {"type": "string"}, "description": "Notification channels for action='notify', e.g. [\"pushover\",\"email\"]."},
+            "channels": {"type": "array", "items": {"type": "string"}, "description": "Notification channels, e.g. [\"pushover\",\"email\"] — required for action='notify'; optional with action='ai_task' (finish alert)."},
             "recipients": {"type": "array", "items": {"type": "string"}, "description": "Notification recipients, e.g. [\"pushover:1\",\"email:3\"]."},
             "title": {"type": "string"}, "message": {"type": "string", "description": "Notification body template (supports {{event.url}})."},
+            "prompt": {"type": "string", "description": "action='ai_task': what the agent should do when the monitor fires, e.g. \"Check whether the price dropped below $500 and summarize what changed\". Supports {{placeholders}} like {{diff_snippet}} and {{extracted.price}}."},
+            "entry_url": {"type": "string", "description": "action='ai_task': page the agent starts on (defaults to the monitored URL)."},
+            "max_steps": {"type": "integer", "description": "action='ai_task': cap on agent steps per wake (default 20, max 100)."},
+            "cooldown_minutes": {"type": "integer", "description": "action='ai_task': minimum minutes between wakes (0 disables)."},
             "name": {"type": "string", "description": "Optional automation name."},
             "enabled": {"type": "boolean"}}, "required": ["monitor_id", "action"]},
         "_handler": _tool_wire_monitor,
@@ -1583,8 +2092,9 @@ _STATIC_TOOLS: list[dict] = [
         "name": "writ_record_save",
         "description": (
             "Finish a browser session and save everything recorded so far as a runnable "
-            "workflow. It then replays on demand with no model in the loop, gains its own "
-            "run_<name> tool, and can be scheduled or exposed as REST. Only save once the task "
+            "workflow. It then replays on demand with no model in the loop via "
+            "writ_run_workflow (pin it with writ_pin_workflow_tool for its own run_<name> "
+            "tool), and can be scheduled or exposed as REST. Only save once the task "
             "actually worked on the live page — verify first. Returns the new workflow_id."
         ),
         "inputSchema": {"type": "object", "properties": {
@@ -1666,8 +2176,9 @@ _STATIC_TOOLS += [
             "record, capture, teach, automate, or repeat actions on a website. Opens a live "
             "browser on a connected fleet agent and returns a page observation; drive it with "
             "writ_browser_act and call writ_browser_save when the goal is complete — the saved "
-            "workflow then replays on demand with no model in the loop, can be scheduled, and "
-            "becomes its own run_<name> tool on this server."
+            "workflow then replays on demand with no model in the loop (writ_run_workflow, or "
+            "its own run_<name> tool once pinned with writ_pin_workflow_tool) and can be "
+            "scheduled."
         ),
         "inputSchema": _build_schema(
             "What should be recorded on the website, in plain language"),
@@ -1744,15 +2255,16 @@ _INSTRUCTIONS = (
     "pulls, price/stock checks, form submissions, actions behind a login) into "
     "workflows that REPLAY on demand and run locally at zero AI-token cost — no "
     "live browsing, no re-solving, no scraping code. Every workflow the owner "
-    "saved is exposed to you as its own run_<name> tool (and via writ_run_workflow), "
-    "so a website effectively becomes a callable function that returns structured "
-    "data.\n\n"
+    "saved is callable via writ_run_workflow (the ones the owner PINNED also "
+    "appear as their own run_<name> tools — manage that with "
+    "writ_pin_workflow_tool), so a website effectively becomes a callable "
+    "function that returns structured data.\n\n"
     "THE REPLAY REFLEX — when the user wants something one of these workflows "
     "already does (recurring data, a site with no practical API, an action behind a "
     "login), do NOT browse or write a scraper. Instead:\n"
     "1. writ_list_workflows — find the matching saved workflow.\n"
-    "2. Run it (its run_<name> tool or writ_run_workflow) and return the extracted "
-    "data; it replays locally at zero AI cost.\n"
+    "2. Run it (writ_run_workflow, or its own run_<name> tool when pinned) and "
+    "return the extracted data; it replays locally at zero AI cost.\n"
     "3. For questions about data ALREADY collected, answer from writ_search_data / "
     "writ_workflow_data BEFORE running anything.\n"
     "4. Inspect run history/errors with writ_workflow_runs; export with "
@@ -1762,6 +2274,13 @@ _INSTRUCTIONS = (
     "writ_crawl_site / writ_crawl_status; WATCH a page for changes with "
     "writ_create_monitor then act on a change with writ_wire_monitor; chain or "
     "alert on other events with writ_create_automation.\n\n"
+    "BEHIND A LOGIN — before asking the user for credentials, call writ_personas: it "
+    "lists the coordinator's saved sign-in identities. Pass a persona_id to "
+    "writ_crawl_site / writ_scrape / writ_run_workflow and the task runs signed in, "
+    "with any 2FA code minted server-side; writ_personas also refreshes a persona's "
+    "session (sign_in) and teaches one to sign itself in (record_login). Credentials "
+    "themselves never transit this connection — personas are created and edited only "
+    "in the Writ dashboard.\n\n"
     "USE A BROWSER — Writ IS your browser. Whenever you actually need to browse and "
     "no saved workflow already fits, do NOT reach for a separate/built-in browser or "
     "write a scraper: call writ_browser_use. It opens a live browser on a fleet agent "
@@ -1863,34 +2382,36 @@ async def _dispatch(body: dict, token: str, auth: "AuthContext" = None) -> Optio
             if name in _STATIC_BY_NAME:
                 handler = _STATIC_BY_NAME[name]["_handler"]
             else:
-                # Derived run_<workflow> tool → route to the generic runner.
+                # Derived run_<workflow> tool (pinned) → route to the generic runner.
                 rows = await _list_workflows(token)
                 for t in _derived_run_tools(rows):
                     if t["name"] == name:
-                        wid = t["_workflow_id"]
-                        async def handler(tok, a, _wid=wid):  # noqa: E731
-                            wf = next((w for w in rows if w.get("id") == _wid), {"id": _wid})
-                            wait = a.get("wait", True) is not False
-                            inputs = _inputs_from_args(a)
-                            files = _files_from_args(a)
-                            # The derived tools advertise `max_age` (they inherit
-                            # RUN_CONTROL_PROPERTIES), so they must honour it —
-                            # advertising a control that silently does nothing is
-                            # worse than not offering it at all.
-                            fkey = _freshness_key(_wid, inputs, files)
-                            requested = _requested_max_age(a)
-                            if requested > 0:
-                                hit = _cached_run(fkey, requested)
-                                if hit is not None:
-                                    return _content(hit)
-                            res = await _run_workflow_id(
-                                tok, wf, inputs, wait,
-                                int(a.get("timeout_seconds") or 120), files)
-                            _store_run(fkey, res)
-                            return _content(res)
+                        handler = _derived_tool_handler(rows, t["_workflow_id"])
                         break
+                if handler is None and name.startswith("run_"):
+                    # Stale-name fallback: the caller's tool list predates an
+                    # unpin/rename (or the opt-in flip itself). Resolve by exact
+                    # slug over ALL workflows so the cached name keeps working.
+                    matches = _match_run_tool_name(rows, name)
+                    if len(matches) == 1:
+                        handler = _derived_tool_handler(rows, matches[0]["id"])
+                    elif len(matches) > 1:
+                        opts = "; ".join(
+                            f"“{w.get('name')}” (workflow_id {w.get('id')})" for w in matches[:6])
+                        return _ok(req_id, _content(
+                            f"Tool name {name!r} matches several saved workflows: {opts}. "
+                            "Call writ_run_workflow with the workflow_id instead.",
+                            is_error=True))
 
             if handler is None:
+                if name.startswith("run_"):
+                    # Guidance, not a bare protocol error: the name plausibly came
+                    # from a cached tool list, and the caller's next move matters.
+                    return _ok(req_id, _content(
+                        f"No tool or saved workflow matches {name!r}. Saved workflows appear "
+                        "as run_<name> tools only when pinned (writ_pin_workflow_tool); every "
+                        "workflow runs via writ_run_workflow — find it with writ_list_workflows.",
+                        is_error=True))
                 return _err(req_id, INVALID_PARAMS, f"Unknown tool: {name}")
 
             if handler in _PRIVILEGED_HANDLERS and auth is not None \

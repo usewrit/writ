@@ -1782,15 +1782,26 @@ function AISessionConfig({ block, blocks, sessions: _sessions, updateBlockConfig
             className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-sm text-ink focus:border-border-strong outline-none transition-colors"
           />
         </div>
-        <label className="mt-4 flex flex-1 items-center gap-2 text-xs text-secondary">
+        <div className="flex-1">
+          <label className="mb-1 block text-xs font-medium text-secondary">{t('Cooldown (minutes)')}</label>
           <input
-            type="checkbox"
-            checked={block.config.generate_workflow !== false}
-            onChange={e => updateBlockConfig(block.id, { ...block.config, generate_workflow: e.target.checked })}
+            type="number"
+            min={0}
+            value={block.config.cooldown_minutes ?? 0}
+            onChange={e => updateBlockConfig(block.id, { ...block.config, cooldown_minutes: e.target.value === '' ? undefined : Math.max(0, Number(e.target.value) || 0) })}
+            className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-sm text-ink focus:border-border-strong outline-none transition-colors"
           />
-          {t('Save what it did as a workflow')}
-        </label>
+        </div>
       </div>
+
+      <label className="flex items-center gap-2 text-xs text-secondary">
+        <input
+          type="checkbox"
+          checked={block.config.generate_workflow !== false}
+          onChange={e => updateBlockConfig(block.id, { ...block.config, generate_workflow: e.target.checked })}
+        />
+        {t('Save what it did as a workflow')}
+      </label>
 
       <div className="flex items-center gap-1.5 text-[11px] text-tertiary">
         <CpuChipIcon className="h-3 w-3" />

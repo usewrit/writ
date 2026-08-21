@@ -143,6 +143,8 @@ Served by the coordinator, not by this package:
 | `writ_set_schedule` | Schedule a workflow (interval / daily / weekly) |
 | `writ_expose_workflow_api` | Publish a workflow as a callable REST endpoint |
 | `writ_crawl_site` / `writ_crawl_status` | Start and poll a distributed site crawl |
+| `writ_scrape` | Scrape one page to clean markdown |
+| `writ_personas` | See your saved sign-in identities and get them ready (see below) |
 | `writ_create_automation` | Event → run-workflow / notify chains |
 | `writ_create_monitor` / `writ_wire_monitor` | Watch a page and react to changes |
 
@@ -202,6 +204,22 @@ runs them, so the crawl becomes callable by REST as well. Re-using the same `sav
 updates that saved crawl instead of piling up duplicates. Saving needs an
 `admin`-scoped credential (it creates reusable, callable configuration); running one
 needs only `run`.
+
+### Sites behind a login (`writ_personas`)
+
+A **persona** is a saved sign-in identity — username, credentials sealed
+server-side, optional 2FA, and a warm signed-in session. `writ_personas` lists
+yours (with per-persona readiness), inspects one (`get`), refreshes its session
+by running its login workflow (`sign_in`), or has the AI record the sign-in flow
+once so the persona can sign itself in from then on (`record_login`). The
+assistant then passes a `persona_id` to `writ_run_workflow` (and each `run_<name>`
+tool), `writ_crawl_site`, or `writ_scrape` — plus `writ_browser_use` on Writ
+Cloud — and the task runs signed in, with 2FA codes minted server-side.
+
+By design the connector can only **use** personas, never manage them: creating,
+editing or deleting one involves credentials, and no credential or one-time code
+ever crosses the MCP connection in either direction. Personas are created in the
+Writ dashboard.
 
 ### If a tool call times out
 

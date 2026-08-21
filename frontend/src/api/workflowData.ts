@@ -96,6 +96,10 @@ export interface DataRow {
   fields: Record<string, unknown>;
   /** Lineage payload — only on view=latest / view=run rows from lineage-aware backends. */
   _lineage?: RowLineage;
+  /** Preview mode (`preview_chars` requests): the string fields the server cut
+   * to preview size. Fetch the complete record via getRowsByRefs before any
+   * full-content use (expand, viewer, copy, send). */
+  _truncated?: string[];
 }
 
 /** A nested array-of-records reachable from the current view (e.g. posts.items). */
@@ -221,7 +225,15 @@ export interface WorkflowFacets {
   workflow_id: number;
   columns: string[];
   facets: Record<string, ColumnFacet>;
+  /** Rows the facets describe. On a sampled response this is the SAMPLE size —
+   * the coherent denominator for non_empty ratios. */
   row_count: number;
+  /** view=all only: true when a heavy dataset's facets were computed over its
+   * newest rows within a sample budget instead of every row (older backends
+   * omit both fields — facets were always whole-rowset there). */
+  sampled?: boolean;
+  /** Exact whole-window row total, present alongside `sampled`. */
+  total_rows?: number;
   scanned_runs: number;
   truncated: boolean;
 }
@@ -248,6 +260,10 @@ export interface WorkflowDataParams {
   include_missing?: boolean;
   /** view=latest/run: only records from this originating list key ("" = untagged). */
   source?: string;
+  /** Grid preview mode: string fields longer than this are served truncated
+   * (rows flag them under `_truncated`). Older backends ignore the param and
+   * serve full rows — the grid must treat truncation as optional. */
+  preview_chars?: number;
 }
 
 function toParams(params: WorkflowDataParams): URLSearchParams {
@@ -265,6 +281,7 @@ function toParams(params: WorkflowDataParams): URLSearchParams {
   if (params.include_missing != null) sp.append('include_missing', params.include_missing ? 'true' : 'false');
   // "" is meaningful (the untagged bucket) — only omit when unset.
   if (params.source != null) sp.append('source', params.source);
+  if (params.preview_chars != null) sp.append('preview_chars', String(params.preview_chars));
   return sp;
 }
 
@@ -298,6 +315,23 @@ export const workflowDataApi = {
     const qs = sp.toString();
     const response = await client.get(`/automation/workflows/${workflowId}/data/facets${qs ? `?${qs}` : ''}`);
     return response.data;
+  },
+
+  /** FULL (untruncated) rows for specific (run_id, record_index) refs — the
+   * hydration lane behind `preview_chars`. Unknown refs are absent from the
+   * result; at most 100 refs per call (callers chunk). */
+  getRowsByRefs: async (
+    workflowId: number,
+    refs: Array<{ run_id: number; record_index: number }>,
+  ): Promise<DataRow[]> => {
+    const out: DataRow[] = [];
+    for (let i = 0; i < refs.length; i += 100) {
+      const sp = new URLSearchParams();
+      for (const r of refs.slice(i, i + 100)) sp.append('ref', `${r.run_id}:${r.record_index}`);
+      const response = await client.get(`/automation/workflows/${workflowId}/data/rows?${sp.toString()}`);
+      out.push(...(response.data?.rows || []));
+    }
+    return out;
   },
 
   /** The dated snapshot index (chain members, newest first) with per-run deltas.

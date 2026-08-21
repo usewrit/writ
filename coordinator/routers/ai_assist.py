@@ -927,7 +927,8 @@ You get the recorded UI steps AND the API calls the page actually made during re
 
 HARD SAFETY RULES (never break the flow):
 - NEVER remove a fill/select whose value is later used or submitted, unless it's folded into an api_call replacement.
-- NEVER remove navigate / navigated_to (they establish page + cookies/session), extract, or return steps.
+- NEVER remove the ENTRY navigate (the first one — it establishes the origin + cookie jar every page-context request rides on) or return steps. An INTERMEDIATE navigate MAY be dropped when EVERY step after it (up to the next navigate) is an api_call/login_post — those fetch their URL directly and need no positioning. Do NOT refuse an api_call substitution "because of the navigate".
+- An extract/evaluate MAY be folded into an api_call replacement ONLY when the api_call's response_extractions reproduce its output under the SAME variable name and the captured response demonstrably contains that data; otherwise NEVER remove extract/evaluate steps.
 - NEVER reorder across a navigate.
 - NEVER change selectors/values on steps you keep; preserve their ids and all fields.
 - A login/auth sequence may ONLY be replaced by an api_call if a matching auth request was captured; otherwise keep it untouched.

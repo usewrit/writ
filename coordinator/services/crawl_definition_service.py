@@ -87,8 +87,10 @@ def config_from_crawl(crawl: CrawlJob) -> dict:
     return {
         "url": crawl.seed_url,
         "name": crawl.name,
+        "executor": crawl.executor,
         "extract_mode": crawl.extract_mode,
         "extract_schema": crawl.extract_schema,
+        "extract_prompt": crawl.extract_prompt,
         "content_spec": crawl.content_spec,
         "render_mode": crawl.render_mode,
         "ocr_mode": crawl.ocr_mode,
@@ -203,7 +205,8 @@ async def find_fresh_run(
 # `url` is excluded because it is renamed to `seed_url`; `ai_session_id` is
 # caller-supplied identity a stored blob must never be able to set.
 _START_CRAWL_KEYS = frozenset({
-    "name", "extract_mode", "extract_schema", "content_spec", "render_mode",
+    "name", "executor", "extract_mode", "extract_schema", "extract_prompt",
+    "content_spec", "render_mode",
     "ocr_mode", "persona_id", "intent", "seed_urls", "relevance_threshold",
     "include_paths", "exclude_paths", "max_depth", "page_budget",
     "max_concurrent_shards", "shard_size", "delay_ms", "respect_robots",
@@ -227,11 +230,17 @@ async def wait_for_crawl(db: AsyncSession, crawl_id: int, *, timeout: int,
                          poll_seconds: float = 2.0) -> Optional[CrawlJob]:
     """Poll a crawl to terminal state, or return it still-running at timeout.
 
-    Returns the row either way — the caller decides whether non-terminal is a
-    504 or a status report. The session is expired between polls because the
-    crawl converges in a DIFFERENT session (the orchestrator's background task);
-    without that this would re-read its own stale identity map forever and never
-    observe the crawl finishing.
+    Returns the row either way (None only if it vanished mid-wait) — the caller
+    decides whether non-terminal is a 504 or a status report. Each poll
+    re-SELECTs the row with ``populate_existing`` because the crawl converges in
+    a DIFFERENT session (the orchestrator's background task); re-reading the
+    identity map would report the crawl running forever.
+
+    Deliberately NOT ``db.expire_all()``: that also expires every OTHER object
+    the caller still holds in this session — the run route serializes its
+    CrawlDefinition right after this returns, and sync attribute access on an
+    expired instance of an AsyncSession raises MissingGreenlet. That 500'd
+    every wait=true run whose crawl outlived a single poll interval.
     """
     import asyncio
 
@@ -239,8 +248,11 @@ async def wait_for_crawl(db: AsyncSession, crawl_id: int, *, timeout: int,
     crawl = await db.get(CrawlJob, crawl_id)
     while crawl is not None and not crawl.is_terminal and datetime.utcnow() < deadline:
         await asyncio.sleep(poll_seconds)
-        db.expire_all()
-        crawl = await db.get(CrawlJob, crawl_id)
+        crawl = (await db.execute(
+            select(CrawlJob)
+            .where(CrawlJob.id == crawl_id)
+            .execution_options(populate_existing=True)
+        )).scalar_one_or_none()
     return crawl
 
 

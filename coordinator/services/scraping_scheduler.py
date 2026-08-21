@@ -32,9 +32,20 @@ async def scraping_scheduler():
     await asyncio.sleep(15)  # Stagger startup to avoid thundering herd
     logger.info("Scraping scheduler started")
 
-    # Reclaim abandoned MCP browser sessions every Nth tick (30s * 10 = 5min). A
-    # session the connected client walked away from holds a real fleet browser
-    # open, and only an explicit close frees it — see services.mcp_record.reap_stale.
+    # Reclaim abandoned MCP browser sessions. A session the connected client walked
+    # away from holds a real browser open, and only an explicit close frees it —
+    # see services.mcp_record.reap_stale.
+    #
+    # THE SWEEP INTERVAL ADDS DIRECTLY TO THE LEAK: a session goes stale at
+    # _IDLE_TTL_S but is only closed on the next sweep, so the real window is
+    # TTL + interval (30 + 5 = 35 minutes at the original settings). Derived from
+    # the TTL so shortening one can never silently leave the other coarse.
+    from services import mcp_record as _mcp_record
+
+    _BROWSER_REAP_SWEEPS_PER_TTL = 4
+    browser_reap_every = max(1, int(
+        _mcp_record._IDLE_TTL_S / (_BROWSER_REAP_SWEEPS_PER_TTL * SCHEDULER_INTERVAL_S)
+    ))
     browser_reap_ticks = 0
 
     while True:
@@ -47,10 +58,9 @@ async def scraping_scheduler():
             logger.error(f"Scraping scheduler error: {e}", exc_info=True)
 
         browser_reap_ticks += 1
-        if browser_reap_ticks % 10 == 0:
+        if browser_reap_ticks % browser_reap_every == 0:
             try:
-                from services import mcp_record
-                await mcp_record.reap_stale()
+                await _mcp_record.reap_stale()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 — housekeeping never stops the loop

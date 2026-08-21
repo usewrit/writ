@@ -9,11 +9,17 @@ to the cloud service; only the workflow load, the AI call signature, and the rep
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+# Bound the replay below the caller's patience: the browser gives up on this request long
+# before the dispatch primitive does, so an uncapped wait would leave the button looking
+# dead while the run continued. Leaves room for the AI pass that follows.
+_REPLAY_TIMEOUT_S = 110
 
 _RISKY_TERMS = (
     "buy", "order", "checkout", "pay", "purchase", "submit", "delete", "remove", "send", "transfer",
@@ -93,9 +99,89 @@ def _trace_confirms(cfg: dict, network_calls: list) -> bool:
     return False
 
 
-def assemble_optimized(original: list, proposal: dict, network_calls: list) -> tuple:
+def _secret_keys_in_steps(steps) -> list:
+    """Credential key names the steps already reference as `{{secret:key}}`.
+
+    A step that fills `{{secret:password}}` names the credential the sign-in uses,
+    so a bare `{{password}}` the capture left in a proposed body means that same
+    credential and belongs on the same channel.
+    """
+    import json
+    import re
+
+    try:
+        blob = json.dumps(steps or [], default=str)
+    except Exception:
+        return []
+    return sorted(set(re.findall(r"\{\{\s*secret:\s*(\w+)\s*\}\}", blob)))
+
+
+def _steps_perform_login(steps, credential_keys) -> bool:
+    """True when these steps type the persona's credentials themselves.
+
+    Such a workflow signs in on its own, so replaying it COLD reproduces the sign-in (and
+    captures its request) with no login recipe prepended. Matches only the
+    `{{secret:<key>}}` channel, which is where the agent reads credentials from — a bare
+    `{{key}}` resolves against form data, so it names ordinary run input.
+    """
+    import json
+    import re
+
+    keys = [str(k) for k in (credential_keys or []) if k]
+    if not steps or not keys:
+        return False
+    try:
+        blob = json.dumps(steps, default=str)
+    except Exception:
+        return False
+    pattern = re.compile(
+        r"\{\{\s*secret:\s*(" + "|".join(re.escape(k) for k in keys) + r")\s*\}\}")
+    return bool(pattern.search(blob))
+
+
+def _normalize_credential_placeholders(node, credential_keys):
+    """Rewrite bare `{{key}}` onto the `{{secret:key}}` channel for credential keys.
+
+    The agent reveals a held credential inside a captured request as a BARE
+    `{{key}}` placeholder, and the AI quotes the trace verbatim — so a proposed
+    login_post carries `password={{password}}`. Replayed, a bare placeholder reads
+    FORM_DATA, never the credentials channel, so the applied optimization signs in
+    with no password and lands signed-out — silently, since the request succeeds.
+
+    Only keys the steps actually use as credentials are rewritten; a bare
+    placeholder naming genuine run input keeps its form_data meaning. Pure.
+    """
+    import re
+
+    keys = [str(k) for k in (credential_keys or []) if k]
+    if not keys:
+        return node
+    pattern = re.compile(
+        r"\{\{\s*(" + "|".join(re.escape(k) for k in sorted(keys, key=len, reverse=True)) + r")\s*\}\}")
+
+    def _sub(n):
+        if isinstance(n, str):
+            return pattern.sub(lambda m: "{{secret:" + m.group(1) + "}}", n)
+        if isinstance(n, list):
+            return [_sub(x) for x in n]
+        if isinstance(n, dict):
+            return {k: _sub(v) for k, v in n.items()}
+        return n
+
+    return _sub(node)
+
+
+def assemble_optimized(original: list, proposal: dict, network_calls: list,
+                       credential_keys=None) -> tuple:
     from services.agent_brain import prune_navigates_before_api_only
 
+    # The proposal quotes the captured trace, where held credentials appear as BARE
+    # placeholders. Move them onto the credentials channel before anything is verified
+    # or assembled, so the substitution bodies and headers carry the form that resolves.
+    # The replay reports which keys it actually supplied; without that (an in-recorder
+    # draft) the steps' own `{{secret:...}}` usages name the same credentials.
+    keys = list(credential_keys or []) or _secret_keys_in_steps(original)
+    proposal = _normalize_credential_placeholders(proposal, keys)
     n = len(original)
     slots = [("keep",) for _ in range(n)]
     assigned = [False] * n
@@ -202,7 +288,7 @@ async def optimize_workflow_live(db, workflow_id: int, confirm_side_effects: boo
                 0, True, False,
             )
 
-    network_calls, final_url = await _replay_and_capture(db, row)
+    network_calls, final_url, credential_keys = await _replay_and_capture(db, row)
     if not network_calls:
         return _envelope(
             original, [],
@@ -215,7 +301,8 @@ async def optimize_workflow_live(db, workflow_id: int, confirm_side_effects: boo
     if proposal is None:
         return _envelope(original, [], ["AI optimization could not be parsed; the workflow is unchanged."], 0, False, False)
 
-    steps, changes, warnings, removed, verified = assemble_optimized(original, proposal, network_calls)
+    steps, changes, warnings, removed, verified = assemble_optimized(
+        original, proposal, network_calls, credential_keys)
     if not changes:
         warnings.insert(0, "No verified optimizations were found — the workflow is unchanged.")
     return _envelope(steps, changes, warnings, removed, False, verified)
@@ -245,32 +332,202 @@ async def _run_optimize_pass(original: list, network_calls: list, final_url: str
         return None
 
 
-async def _replay_and_capture(db, workflow) -> tuple:
-    """Replay the workflow on a fleet agent with network capture and return (network_calls, final_url).
-    Best-effort — returns ([], None) when no fleet agent is available or the replay yields no calls, so
-    the endpoint always returns a valid envelope. The fleet agent (Rust) reveals held credentials as
-    {{placeholders}} before returning, so no plaintext reaches the coordinator.
+async def _load_login_steps(db, login_workflow_id: int) -> list:
+    """The persona's login workflow steps, or [] when it is unusable here.
+
+    A row with no steps is [] rather than "found": prepending nothing would leave the cold
+    replay signed out while looking like it had signed in.
     """
     try:
+        from sqlalchemy import select
+        from models.automation_workflow import AutomationWorkflow
+
+        row = (await db.execute(
+            select(AutomationWorkflow).where(AutomationWorkflow.id == login_workflow_id)
+        )).scalar_one_or_none()
+    except Exception as e:  # noqa: BLE001 — never block optimizing
+        logger.info("optimize-live login workflow load failed: %s", e)
+        return []
+    if row is None or not (row.steps or []):
+        return []
+    return list(row.steps)
+
+
+async def _replay_and_capture(db, workflow) -> tuple:
+    """Replay the workflow on a fleet agent with network capture ON and return
+    (network_calls, final_url, credential_keys).
+
+    Best-effort — returns ([], "", []) when no fleet agent is available, the build/dispatch
+    fails, or the replay yields no calls, so the endpoint always returns a valid envelope
+    and this NEVER raises. The agent reveals held credentials as {{placeholders}} before
+    returning, so no plaintext reaches the coordinator; `credential_keys` is the NAMES of
+    the credentials this run supplied, which is what tells the caller which bare
+    placeholders in the trace belong on the secrets channel.
+
+    THE SIGN-IN MUST HAPPEN DURING THE REPLAY, NOT BEFORE IT. Restoring the persona's warm
+    session makes the browser arrive already authenticated: the sign-in form never renders,
+    the credential fills type into nothing, and no auth request enters the trace — so an
+    authenticated workflow could never become an API-shaped one, which is the whole point.
+    We keep the persona (credentials, 2FA, identity) and drop the session: either this
+    workflow types the persona's credentials itself, or the persona's login workflow is
+    PREPENDED so the cold browser authenticates first. Only when neither exists do we hand
+    over the stored session — a cold replay would then just trace the login wall.
+
+    BILLING / METERING — avoided by construction: the task_id is a SYNTHETIC, non-persisted
+    id, so the completion handler resolves the in-memory future and returns before any DB
+    lookup or run accounting. `push_to_recorder` itself never touches the DB.
+    """
+    credential_keys: list = []
+    try:
         from routers.ai_sessions import _pick_agent
-    except Exception as e:  # pragma: no cover
+        from routers.automation import build_execute_workflow_msg
+        from routers.user_recorder_ws import push_to_recorder
+    except Exception as e:  # pragma: no cover - wiring differs across deployments
         logger.info("optimize-live replay unavailable (dispatch imports): %s", e)
-        return [], None
+        return [], "", credential_keys
     try:
         agent_id = _pick_agent(None)
     except Exception:
         agent_id = None
     if not agent_id:
-        return [], None
-    # The fleet-agent replay-with-capture dispatch is the remote seam; when it's wired the agent runs
-    # the workflow with capture on and returns network_calls. Until then, degrade to no-capture.
+        logger.info("optimize-live replay: no fleet agent available")
+        return [], "", credential_keys
+
+    # --- Resolve the persona + the sign-in the replay must perform --------------------
+    persona_cfg = None
+    session_state = None
+    login_steps: list = []
+    _orig_creds = getattr(workflow, "credentials_encrypted", None)
+    _creds_folded = False
     try:
-        from services.fleet_dispatch import replay_workflow_capture  # optional, deployment-specific
-    except Exception:
-        return [], None
+        if getattr(workflow, "default_persona_id", None):
+            from sqlalchemy import select
+            from models.persona import Persona
+            from routers.automation import encrypt_credentials, decrypt_credentials
+            from services.persona_service import PersonaService
+
+            persona = (await db.execute(
+                select(Persona).where(Persona.id == workflow.default_persona_id)
+            )).scalar_one_or_none()
+            if persona is not None and getattr(persona, "is_active", True):
+                try:
+                    persona_creds = PersonaService.resolve_login_credentials(persona)
+                except Exception:
+                    persona_creds = None
+                login_wf = None
+                if not _steps_perform_login(getattr(workflow, "steps", None), persona_creds):
+                    login_wf_id = getattr(persona, "login_workflow_id", None)
+                    if login_wf_id and login_wf_id != getattr(workflow, "id", None):
+                        login_steps = await _load_login_steps(db, login_wf_id)
+                    if not login_steps:
+                        session_state = PersonaService.load_session(persona)
+                    else:
+                        login_wf = login_wf_id
+                # TRANSIENTLY fold the credentials the replay needs into the run
+                # credentials for the frame build; restored in the finally below. This
+                # function never commits, so no mutation is persisted.
+                all_creds = {}
+                if _orig_creds:
+                    try:
+                        all_creds.update(decrypt_credentials(_orig_creds) or {})
+                    except Exception:
+                        all_creds = {}
+                if persona_creds:
+                    all_creds.update(persona_creds)
+                if all_creds:
+                    workflow.credentials_encrypted = encrypt_credentials(all_creds)
+                    _creds_folded = True
+                    credential_keys = sorted(all_creds.keys())
+                from config import settings
+                persona_cfg = {
+                    "persona_id": persona.id,
+                    "twofa_method": getattr(persona, "twofa_method", None) or "none",
+                    "otp_extract_config": getattr(persona, "otp_extract_config", None) or {},
+                    "otp_token": PersonaService.make_otp_token(persona.id, None),
+                    "coordinator_url": settings.coordinator_url,
+                }
+                logger.info(
+                    "optimize-live replay: persona %s, cold=%s, login steps prepended=%s",
+                    persona.id, session_state is None, bool(login_wf),
+                )
+    except Exception as e:  # noqa: BLE001 — an unauthenticated replay still traces public pages
+        logger.info("optimize-live replay persona resolution skipped: %s", e)
+
+    # --- Build the execute_workflow frame + enable capture ---------------------------
+    import random
+    # Synthetic, non-persisted task_id in a reserved high range so it cannot collide with a
+    # real row in flight; push_to_recorder correlates purely by this, in memory.
+    task_id = random.randint(2_000_000_000, 2_147_483_000)
+    _orig_steps = getattr(workflow, "steps", None)
+    _steps_folded = False
+    if login_steps:
+        try:
+            workflow.steps = login_steps + list(_orig_steps or [])
+            _steps_folded = True
+        except Exception as e:  # noqa: BLE001 — replay signed-out rather than not at all
+            logger.info("optimize-live login step prepend skipped: %s", e)
     try:
-        result = await replay_workflow_capture(db, agent_id, workflow)
-        return (result or {}).get("network_calls") or [], (result or {}).get("final_url") or ""
+        frame = build_execute_workflow_msg(
+            task_id=task_id,
+            workflow=workflow,
+            form_data=(getattr(workflow, "form_data", None) or {}),
+            session_state=session_state,
+            persona_cfg=persona_cfg,
+        )
     except Exception as e:
-        logger.info("optimize-live fleet replay failed: %s", e)
-        return [], None
+        logger.info("optimize-live replay frame build failed: %s", e)
+        return [], "", credential_keys
+    finally:
+        # Restore the ORM row exactly as found — this function never commits, and restoring
+        # here keeps a later caller commit non-destructive.
+        if _creds_folded:
+            try:
+                workflow.credentials_encrypted = _orig_creds
+            except Exception:
+                pass
+        if _steps_folded:
+            try:
+                workflow.steps = _orig_steps
+            except Exception:
+                pass
+
+    if not isinstance(frame, dict):
+        return [], "", credential_keys
+    # Thread capture ON via the config key the agent reads. The builder does not take this
+    # kwarg, so stamp the built frame; guard the config type so this can never raise.
+    _cfg = frame.get("config")
+    if not isinstance(_cfg, dict):
+        _cfg = {}
+        frame["config"] = _cfg
+    _cfg["capture_network"] = True
+
+    # --- Dispatch + await -------------------------------------------------------------
+    # BOUNDED BELOW THE CALLER'S PATIENCE: push_to_recorder waits far longer than the
+    # browser will, so a slow replay would outlive the request and the button would look
+    # dead. Capping here degrades a silent agent into the honest "couldn't capture live API
+    # calls" warning, INSIDE the window the UI is waiting, and leaves room for the AI pass.
+    try:
+        reply = await asyncio.wait_for(
+            push_to_recorder(agent_id, frame), timeout=_REPLAY_TIMEOUT_S
+        )
+    except asyncio.TimeoutError:
+        logger.info("optimize-live replay exceeded %ss on %s", _REPLAY_TIMEOUT_S, agent_id)
+        return [], "", credential_keys
+    except Exception as e:
+        logger.info("optimize-live replay dispatch failed: %s", e)
+        return [], "", credential_keys
+    if not isinstance(reply, dict) or reply.get("error"):
+        if isinstance(reply, dict):
+            logger.info("optimize-live replay returned error: %s", reply.get("error"))
+        return [], "", credential_keys
+
+    data = reply.get("result_data")
+    if not isinstance(data, dict):
+        data = reply.get("result") if isinstance(reply.get("result"), dict) else reply
+    network_calls = (data.get("network_calls") if isinstance(data, dict) else None) or []
+    final_url = (
+        (data.get("final_url") if isinstance(data, dict) else None)
+        or reply.get("final_url")
+        or ""
+    )
+    return network_calls, final_url, credential_keys

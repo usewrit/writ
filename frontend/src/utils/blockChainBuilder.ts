@@ -59,6 +59,43 @@ export function buildWorkflowOnChange(targetId: number, workflowId: number, work
   };
 }
 
+// Goal-shaped AI wake: no saved session needed — the trigger runtime creates a
+// per-run AI session on a fleet agent, opens the monitored page with the change
+// context (diff, extracted values) and works the prompt. cooldown_minutes
+// suppresses re-wakes within the window.
+export function buildAITaskOnChange(targetId: number, goal: string, opts?: {
+  entryUrl?: string;
+  maxSteps?: number;
+  cooldownMinutes?: number;
+}): { blocks: FlowBlock[]; payload: any } {
+  const eventId = genId();
+  const aiActionId = genId();
+  const waitId = genId();
+  const notifyId = genId();
+
+  const aiConfig: Record<string, any> = { goal };
+  if (opts?.entryUrl) aiConfig.entry_url = opts.entryUrl;
+  if (opts?.maxSteps != null) aiConfig.max_steps = opts.maxSteps;
+  if (opts?.cooldownMinutes != null) aiConfig.cooldown_minutes = opts.cooldownMinutes;
+
+  const blocks: FlowBlock[] = [
+    { id: eventId, type: 'event', blockType: 'change_detected', config: { target_id: targetId } },
+    { id: aiActionId, type: 'action', blockType: 'ai_session', config: aiConfig, parentId: eventId },
+    { id: waitId, type: 'event', blockType: 'ai_session_completed', config: { linked_to_block: aiActionId }, parentId: aiActionId },
+    { id: notifyId, type: 'action', blockType: 'notification', config: { channels: ['pushover'], recipients: [], title: 'Your AI agent finished', template: 'Status: {{session_status}}' }, parentId: waitId },
+  ];
+
+  return {
+    blocks,
+    payload: {
+      event_type: 'change_detected',
+      target_id: targetId,
+      actions: blocks.filter(b => b.type === 'action').map(b => ({ type: b.blockType, config: b.config })),
+      blocks,
+    },
+  };
+}
+
 export function buildAISessionOnChange(targetId: number, sessionId: number, sessionName: string): { blocks: FlowBlock[]; payload: any } {
   const eventId = genId();
   const aiActionId = genId();

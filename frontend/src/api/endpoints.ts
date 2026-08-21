@@ -1145,6 +1145,21 @@ export const personasApi = {
     const response = await client.post(`/personas/${id}/sign-in`, { force }, { timeout: 300_000 });
     return response.data;
   },
+  // Ask a connected fleet agent to sign in AS this persona and RECORD the flow.
+  // Returns immediately with the AI session to poll (`automationApi.getAISession`)
+  // and watch live on channel `ai-{session_id}`; the coordinator materializes the
+  // returned recipe as a workflow and wires personas.login_workflow_id itself, so
+  // re-read the persona for the outcome. 409s when no agent is online — the loop
+  // runs on the agent, not here.
+  recordLoginAi: async (
+    id: number,
+    loginUrl?: string,
+  ): Promise<{ session_id: number; already_running: boolean }> => {
+    const response = await client.post(`/personas/${id}/record-login-ai`, {
+      login_url: loginUrl || null,
+    });
+    return response.data;
+  },
   runs: async (id: number, limit = 20): Promise<PersonaRun[]> => {
     const response = await client.get(`/personas/${id}/runs?limit=${limit}`);
     return response.data;

@@ -168,3 +168,30 @@ export const downloadBlob = (blob: Blob, filename: string): void => {
   window.URL.revokeObjectURL(url);
   document.body.removeChild(a);
 };
+
+/**
+ * A backend JSON value rendered as editable text.
+ *
+ * `form_data` (and the run-input maps derived from it) is arbitrary JSON: the API
+ * types it `Record<string, string>`, but a workflow can genuinely hold a number, a
+ * boolean, or a nested object there — a recorded numeric field, a JSON body, a
+ * toggle. `(value ?? '')` only guards null/undefined, so any of those reached
+ * `.trim()` and threw `(...).trim is not a function`, which crashed the whole
+ * workflow detail page (the run modal is mounted there on every render, so the
+ * blast radius was every subtab, not just the run form).
+ *
+ * Objects/arrays are JSON-stringified rather than rendered "[object Object]", so
+ * an editable field shows something the user can actually read and correct.
+ */
+export const asText = (value: unknown): string => {
+  if (typeof value === 'string') return value;
+  if (value == null) return '';
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return '';
+    }
+  }
+  return String(value);
+};

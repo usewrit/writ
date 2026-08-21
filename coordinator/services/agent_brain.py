@@ -496,9 +496,11 @@ RULES:
 
 _AGENT_MODE_MANUAL = """MODE: MANUAL RECORDING. The workflow is a list of replayable steps. When done, put the step(s) that fulfill the request in "steps_to_add" (an array, in execution order). Step shapes:
 
-EXTRACTION (when the goal is to READ/scrape data):
-- single-page extraction: {"type":"extract","description":"...","config":{"variable":"<name>","extract_type":"computed","script":"<JS function body that returns the data>"}}
-- complex scrape (lists, per-item detail drill-down, pagination): {"type":"evaluate","description":"...","config":{"variable":"<name>","script":"(async () => { ...; return { total, items }; })()","iframe":<iframe-src substring or null>}}
+EXTRACTION (when the goal is to READ/scrape data, or the user asks for a SCRIPT):
+- DEFAULT — a script step: {"type":"evaluate","description":"...","config":{"variable":"<name>","script":"(async () => { ...; return { total, items }; })()","iframe":<iframe-src substring or null>}}
+    Use "evaluate" for ANYTHING scripted or structured: lists, tables, multiple fields, computed values, per-item detail drill-down, pagination. The script is the BODY of the step — it does the querying itself and RETURNS the data as JSON. When the user says "write/create a script", this evaluate step IS the deliverable.
+- ONE element's visible text only: {"type":"extract","description":"...","config":{"selector":"<css>","variable":"<name>"}}
+    Reads a single element's text via a CSS selector you verified in the observation. NEVER emit "extract" carrying a script — a scripted extraction is an "evaluate" step; an extract without a working selector fails at replay ("Primary selector not found for extract"). When in doubt, use "evaluate".
 
 INTERACTION (when the goal is to DO something — log in, fill/submit a form, click through a flow). Emit an ORDERED list of these replayable steps (one per user action), targeting a robust CSS selector you confirmed exists in the observation/a11y tree:
 - navigate: {"type":"navigate","description":"...","config":{"url":"https://..."}}
@@ -511,7 +513,12 @@ INTERACTION (when the goal is to DO something — log in, fill/submit a form, cl
 - wait for the page to settle: {"type":"wait","description":"...","config":{"seconds":2}}
 For credentials/secrets use placeholders in value: {{secret:password}}; for other dynamic user inputs use {{field_name}}. Do NOT hardcode real passwords.
 
-Drive the flow with run_actions to confirm each selector works on the LIVE page BEFORE proposing; for extraction verify the script returns real data via evaluate_js. Extraction goals are usually ONE step; interaction goals are the ordered sequence of actions you performed.
+API CALL (when the data should come from the site's BACKEND API — the user asks to use/call an endpoint, or a captured API call already returns the goal's data):
+- {"type":"api_call","description":"...","config":{"method":"GET|POST|PUT","url":"<absolute URL>","headers":{...},"body_template":"<string or null>","response_extractions":{"<name>":"$.json.path"},"variable":"<name>"}}
+    Prefer reusing a captured call (shown in your context; discover more with the capture_network action) — it replays with the session's cookies/auth. Parameterize dynamic values as {{placeholders}} and secrets as {{secret:name}}. NEVER wrap a fetch() inside an "evaluate" or "extract" script when an api_call step can make the request: api_call is the step type FOR endpoints — it needs no browser page, survives layout changes, and its response_extractions pull the fields out of the JSON directly.
+    CSRF/XSRF: when the captured request carries an anti-CSRF header (X-XSRF-TOKEN, X-CSRF-Token, X-Requested-With+token, ...) whose value came from a COOKIE, you MUST reproduce that header — set it to the placeholder {{cookie:<cookie-name>}} (e.g. "X-XSRF-TOKEN":"{{cookie:XSRF-TOKEN}}"), which is read FRESH from the live cookie jar at every replay. Never bake the captured literal token (it expires — the replay 403s) and never drop the header (same result). Cookies themselves ride automatically; only the header/body ECHO of a cookie needs this placeholder.
+
+Drive the flow with run_actions to confirm each selector works on the LIVE page BEFORE proposing; for extraction verify the script returns real data via evaluate_js. Extraction goals are usually ONE step; interaction goals are the ordered sequence of actions you performed. CHOOSING THE DELIVERABLE: endpoint/API goal -> api_call step | scripted/structured scrape -> evaluate step | one element's text -> extract step.
 
 EXAMPLE of a good complex-scrape script (list + per-row detail + pagination inside an iframe):
 """ + SCRAPER_EXAMPLE + """

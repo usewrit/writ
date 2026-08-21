@@ -72,6 +72,96 @@ def session_is_usable(session: Optional[dict]) -> bool:
     return False
 
 
+# Cookie NAME fragments that mark a real authentication/session cookie across the
+# common stacks. Deliberately BROAD — the goal is to recognize EVERY auth shape
+# (server sessions, framework cookies, OAuth/JWT, "remember me", SSO) so a real
+# login is never misread as anonymous. Matched case-insensitively as substrings.
+_AUTH_COOKIE_HINTS = (
+    "session", "sess", "sid", "auth", "token", "jwt", "login", "logged", "loggedin",
+    "account", "identity", "credential", "access", "refresh", "remember", "rememberme",
+    "oauth", "openid", "saml", "sso", "bearer", "apikey", "api_key", "passport",
+    "phpsessid", "jsessionid", "asp.net", "aspxauth", "connect.sid", "csrftoken",
+    "_session", "user_session", "auth_token", "id_token", "access_token", "ss-id",
+    "ss-pid", "laravel_session", "django", "rails", "_forum_session", "wordpress_logged_in",
+)
+# Cookie names that are NEVER, on their own, evidence of a login — analytics,
+# consent banners, CDN/anti-bot, A/B tests. A session made of ONLY these is the
+# anonymous logged-OUT state a failed login leaves behind.
+_ANON_COOKIE_HINTS = (
+    "consent", "cookieconsent", "cookie_consent", "gdpr", "optanon", "onetrust",
+    "_ga", "_gid", "_gat", "_gcl", "_fbp", "_fbc", "fr", "_hj", "hotjar", "amplitude",
+    "mixpanel", "segment", "intercom", "_pk_", "matomo", "analytics", "utm",
+    "__cf", "cf_", "cf-", "_cfuvid", "__cflb", "ak_bmsc", "bm_", "_abck", "datadome",
+    "incap_", "visid_incap", "nr_", "newrelic", "ab_test", "experiment", "gtm",
+)
+
+
+def _cookie_is_auth_like(cookie: dict) -> bool:
+    """Does ONE cookie look like it carries a login? True when it is HttpOnly (a
+    server-set session/auth cookie the page's JS can't read — analytics/consent
+    cookies are readable, so never HttpOnly), OR its name matches an auth hint and
+    is not a known-anonymous name. Broad by design (see the hint lists)."""
+    if not isinstance(cookie, dict):
+        return False
+    name = str(cookie.get("name") or "").lower()
+    if not name:
+        return False
+    # A known analytics/consent/anti-bot cookie is not auth on its own — but an
+    # HttpOnly one still is (some anti-bot names collide; HttpOnly wins as the
+    # stronger signal). Check the anonymous list only for the name-based branch.
+    http_only = bool(cookie.get("httpOnly") or cookie.get("http_only"))
+    if http_only:
+        return True
+    if any(h in name for h in _ANON_COOKIE_HINTS):
+        return False
+    return any(h in name for h in _AUTH_COOKIE_HINTS)
+
+
+def session_has_auth_material(session: Optional[dict]) -> bool:
+    """STRICTER than session_is_usable: does the session carry material that
+    actually proves a LOGIN, rather than merely SOME state?
+
+    session_is_usable stays permissive (any cookie/storage counts) because the
+    crawl gate must not block a working persona over a heuristic. This is the
+    verification the "Sign in now" TEST reports: after a login run, a session made
+    of ONLY anonymous cookies (consent/analytics, no HttpOnly, no auth-named
+    cookie, no token store) means the login did NOT take — the workflow ran but
+    landed logged-out — and the user must be told the truth, not "signed in".
+
+    Recognizes EVERY auth shape so a real login is never misread as anonymous:
+      • a token store — localStorage / sessionStorage / captured auth `headers` /
+        the HTTP-lane `tokens` map (SPA JWT auth lives here, never in a cookie);
+      • Playwright `origins[]` carrying localStorage (storage_state SPA shape);
+      • at least one auth-like COOKIE (HttpOnly, or an auth-named non-anonymous one).
+    """
+    if not isinstance(session, dict):
+        return False
+
+    # 1. Any token store is auth material — a logged-out page rarely writes one,
+    #    and token-auth SPAs keep their WHOLE session here with no auth cookie.
+    for key in ("localStorage", "sessionStorage", "headers", "tokens"):
+        val = session.get(key)
+        if isinstance(val, dict) and val:
+            return True
+        if isinstance(val, list) and val:
+            return True
+
+    # 2. Playwright storage_state origins[] with localStorage entries.
+    origins = session.get("origins")
+    if isinstance(origins, list):
+        for o in origins:
+            if isinstance(o, dict) and (o.get("localStorage") or o.get("sessionStorage")):
+                return True
+
+    # 3. An auth-like cookie among the jar (HttpOnly or auth-named, not anonymous).
+    cookies = session.get("cookies")
+    if isinstance(cookies, list):
+        if any(_cookie_is_auth_like(c) for c in cookies):
+            return True
+
+    return False
+
+
 async def _load_persona_session(persona_id: int) -> Optional[dict]:
     """Re-read the persona on a FRESH session and return its usable warm session.
 
@@ -204,6 +294,106 @@ async def _await_login_task(task_id: int) -> Tuple[bool, Optional[str]]:
     return False, f"The login run did not finish within {LOGIN_TIMEOUT_SECONDS} seconds."
 
 
+def has_login_credentials(persona) -> bool:
+    """Does this persona carry anything an agent could type into a login form?"""
+    return bool(
+        getattr(persona, "login_username", None)
+        or getattr(persona, "credentials_encrypted", None)
+    )
+
+
+async def _session_is_signed_out(persona_id: int, session: dict) -> bool:
+    """True only when the SITE proves this session is signed out.
+
+    Three-valued underneath (see persona_session_probe) and collapsed to a single
+    actionable bool: unknown, unprobeable, or transport-failed all mean "carry on
+    with the session we have", because a re-login costs a real agent run and a
+    flaky probe must never trigger one. Never raises.
+    """
+    try:
+        from services import persona_session_probe
+
+        async with AsyncSessionLocal() as db:
+            persona = await PersonaService.get_owned(db, persona_id)
+            if persona is None:
+                return False
+            probe_url = await persona_session_probe.gated_url_for_persona(db, persona)
+            if not probe_url:
+                return False
+            fingerprint = persona.fingerprint or {}
+        verdict, detail = await persona_session_probe.probe_session_authenticated(
+            url=probe_url, session=session, user_agent=fingerprint.get("user_agent"),
+        )
+        if verdict is False:
+            logger.info(
+                f"[PersonaLogin] persona {persona_id}: site says signed out ({detail})"
+            )
+            return True
+        return False
+    except Exception as e:  # noqa: BLE001 — verification is a safety net, never a gate
+        logger.warning(
+            f"[PersonaLogin] persona {persona_id}: session verification errored "
+            f"({e}); reusing the existing session"
+        )
+        return False
+
+
+async def _bootstrap_login_via_ai(persona) -> Tuple[bool, Optional[str], Optional[dict]]:
+    """Sign a credentials-only persona in for the FIRST time, via the AI recorder.
+
+    Reuses services.persona_login_record: the coordinator dispatches one
+    `ai_session_start` to a fleet agent, which opens a real browser, fills the
+    site's own sign-in form from the sealed credentials as `{{secret:...}}`
+    placeholders (the model sees only `[SECURE:key]`), and returns the recorded
+    recipe — which the terminal-frame handler materializes as a coordinator
+    workflow and wires on as `login_workflow_id`. Runs ONCE per persona.
+
+    Returns (ok, error, session). Never raises.
+    """
+    from models.ai_session import AiSession
+    from sqlalchemy import select
+
+    try:
+        from services.persona_login_record import start_login_record_session
+
+        async with AsyncSessionLocal() as db:
+            fresh = await PersonaService.get_owned(db, persona.id)
+            if fresh is None:
+                return False, "The persona disappeared before its first sign-in.", None
+            session_pk, already = await start_login_record_session(db, fresh)
+        logger.info(
+            f"[PersonaLogin] persona {persona.id}: bootstrapping first sign-in via the "
+            f"AI recorder (ai session {session_pk}{', already running' if already else ''})"
+        )
+    except Exception as e:  # noqa: BLE001 — surface as a normal login failure
+        detail = getattr(e, "detail", None) or str(e)
+        return False, f"Could not start the first sign-in for this persona: {detail}", None
+
+    waited = 0
+    while waited < LOGIN_TIMEOUT_SECONDS:
+        await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+        waited += _POLL_INTERVAL_SECONDS
+        try:
+            async with AsyncSessionLocal() as db:
+                status = (await db.execute(
+                    select(AiSession.status).where(AiSession.id == session_pk)
+                )).scalar_one_or_none()
+        except Exception as poll_e:  # noqa: BLE001 — retry next tick
+            logger.warning(f"[PersonaLogin] bootstrap poll failed: {poll_e}")
+            continue
+        # Agent vocabulary: complete | blocked | max_steps | stuck | error | cancelled.
+        if status and status != "running":
+            break
+
+    session = await _load_persona_session(persona.id)
+    if session is None:
+        return False, (
+            "The AI tried to sign this persona in but no logged-in session was "
+            "captured. Check the credentials, or record the sign-in manually."
+        ), None
+    return True, None, session
+
+
 async def ensure_fresh_session(
     persona_id: int,
     *,
@@ -220,7 +410,23 @@ async def ensure_fresh_session(
     if not force:
         session = await _load_persona_session(persona_id)
         if session is not None:
-            return True, None, session
+            # SHAPE IS NOT PROOF — ASK THE SITE. A jar can look perfect and still be
+            # anonymous: plenty of stacks (Laravel/Symfony and friends) hand a
+            # logged-OUT visitor an HttpOnly session cookie, which sails through both
+            # session_is_usable and session_has_auth_material. Reusing it means the
+            # run proceeds signed out and quietly returns public pages.
+            #
+            # Only a PROVEN sign-in bounce (False) re-logins; unknown/transport
+            # problems (None) reuse the session exactly as before, so a flaky probe
+            # can never cost an extra login. The probe needs a GATED url — a public
+            # page answers "signed in" for anyone — so a persona with no known gated
+            # page keeps the old behavior.
+            if not await _session_is_signed_out(persona_id, session):
+                return True, None, session
+            logger.info(
+                f"[PersonaLogin] persona {persona_id}: warm session is signed OUT — "
+                f"signing in again before the run uses it"
+            )
 
     async with AsyncSessionLocal() as db:
         persona = await PersonaService.get_owned(db, persona_id)
@@ -229,10 +435,18 @@ async def ensure_fresh_session(
                 "The login identity for this crawl is missing or inactive. "
                 "Re-link a persona for the site, then start the crawl."
             ), None
-        if not persona.login_workflow_id:
+        # NO LOGIN WORKFLOW IS NOT A DEAD END — the credentials are enough. A
+        # persona carrying a username/password can be signed in by the AI recorder
+        # (it drives a fleet agent's browser, fills the site's own form with
+        # {{secret:...}} placeholders, and wires the recorded recipe back on as
+        # login_workflow_id), so the FIRST sign-in bootstraps the workflow and every
+        # later one replays it.
+        needs_bootstrap = not persona.login_workflow_id
+        if needs_bootstrap and not has_login_credentials(persona):
             return False, (
-                "This persona has no login workflow, so it can't sign itself in. "
-                "Record or attach a login workflow for it, then start the crawl."
+                "This persona has no login workflow and no stored credentials, so "
+                "it can't sign itself in. Add its username and password (or record "
+                "a login workflow), then try again."
             ), None
         persona_snapshot = persona
 
@@ -261,6 +475,16 @@ async def ensure_fresh_session(
         ), None
 
     try:
+        if needs_bootstrap:
+            # First sign-in for a credentials-only persona: let the AI recorder
+            # establish BOTH the session and the reusable login workflow. Held under
+            # this lock like any other login, so shards can't stampede it.
+            ok, err, session = await _bootstrap_login_via_ai(persona_snapshot)
+            if not ok:
+                await _record_login_error(persona_id, err)
+                return False, err, None
+            return True, None, session
+
         logger.info(
             f"[PersonaLogin] persona {persona_id}: running login workflow "
             f"{persona_snapshot.login_workflow_id}"

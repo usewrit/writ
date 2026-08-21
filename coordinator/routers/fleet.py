@@ -770,7 +770,11 @@ def _workflow_secret_keys(steps: list, form_data: Optional[dict]) -> set[str]:
     from services.secret_resolver import VAULT_REF
 
     keys: set[str] = set()
-    for p in _extract_placeholders(steps or [], form_data or {}):
+    # include_channel_refs: this caller WANTS the `secret:NAME` keys the run-input
+    # path deliberately hides (they would otherwise be prompted for twice in the
+    # Run modal). Deploy bundles the vault rows a workflow references, so it must
+    # see every channel ref, not the user-facing input subset.
+    for p in _extract_placeholders(steps or [], form_data or {}, include_channel_refs=True):
         k = p.get("key") or ""
         if k.startswith("secret:"):
             name = k[len("secret:"):]

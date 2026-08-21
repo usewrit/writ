@@ -470,6 +470,16 @@ class StreamingManager:
         try:
             from models.persona import Persona
             from services.persona_service import PersonaService
+            from services.persona_login import session_has_auth_material
+            # Only bank a session that PROVES a login: a streamed run that never
+            # signed in still ends holding the site's anonymous cookies, and saving
+            # those overwrites a good session while stamping the persona "valid".
+            if not session_has_auth_material(session_state):
+                logger.info(
+                    "streaming: harvested session for persona %s carries no auth "
+                    "material — not overwriting the stored session", sess.persona_id,
+                )
+                return
             persona = await db.get(Persona, sess.persona_id)
             if persona is not None:
                 await PersonaService.save_session(db, persona, session_state)

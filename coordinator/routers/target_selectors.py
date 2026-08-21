@@ -470,12 +470,22 @@ async def test_selector(
                     error=None
                 )
             else:
+                # A raw-HTML miss on a browser-mode target is expected, not a
+                # verdict: the real check matches the rendered, frame-flattened
+                # DOM this static fetch cannot reproduce.
                 return SelectorTestResponse(
                     selector=db_selector.selector,
                     status="no_match",
                     matched_count=0,
                     content_preview=None,
-                    error="Selector did not match any elements"
+                    error=(
+                        "Selector did not match in the raw HTML. This monitor renders "
+                        "in a real browser (JavaScript and same-site frames applied), "
+                        "where the selector can still match — the next live check "
+                        "verifies it."
+                        if target is not None and target.requires_playwright
+                        else "Selector did not match any elements"
+                    )
                 )
 
     except Exception as e:
@@ -518,9 +528,18 @@ async def set_selector_baseline(
     target = target_result.scalar_one_or_none()
 
     # Visual (screenshot-region) checks have no HTML text baseline — the agent
-    # captures a screenshot of the region at run time. Treat this as a no-op
-    # success rather than failing with "Selector does not match any elements".
-    if db_selector.content_type == "visual" or (db_selector.selector or "").startswith("viewport-zone"):
+    # captures a screenshot of the region at run time. The same applies to ANY
+    # selector on a browser-mode (requires_playwright) target: its baseline must
+    # come from the rendered, frame-flattened DOM an agent captures, not from a
+    # raw-HTML fetch (which may not even contain the element — a frameset page
+    # has no raw <body>). Treat both as a no-op success that clears the stored
+    # baseline so the next rendered check re-seeds it, rather than failing with
+    # "Selector does not match any elements".
+    if (
+        db_selector.content_type == "visual"
+        or (db_selector.selector or "").startswith("viewport-zone")
+        or (target is not None and target.requires_playwright)
+    ):
         db_selector.baseline_content = None
         db_selector.baseline_hash = None
         db_selector.baseline_fetched_at = datetime.now(timezone.utc)
@@ -651,6 +670,35 @@ async def set_all_selector_baselines(
         select(Target).where(Target.id == target_id)
     )
     target = target_result.scalar_one_or_none()
+
+    # Browser-mode (requires_playwright) targets: every baseline must come from
+    # the rendered, frame-flattened DOM an agent captures — a raw-HTML fetch here
+    # would miss JS-rendered and framed content (and wrongly report no_match).
+    # Clear the stored baselines and let the next rendered check re-seed them,
+    # mirroring the single-selector visual/browser no-op in set_selector_baseline.
+    if target is not None and target.requires_playwright:
+        deferred = []
+        for selector in selectors:
+            selector.baseline_content = None
+            selector.baseline_hash = None
+            selector.baseline_fetched_at = datetime.now(timezone.utc)
+            deferred.append({
+                "selector_id": selector.id,
+                "name": selector.name,
+                "status": "success",
+                "baseline_hash": None,
+            })
+        await db.commit()
+        logger.info(
+            f"Cleared {len(deferred)} selector baselines of browser-mode target "
+            f"{target_id}; the next rendered check re-seeds them"
+        )
+        return {
+            "target_id": target_id,
+            "total": len(deferred),
+            "success": len(deferred),
+            "results": deferred,
+        }
 
     results = []
     try:

@@ -7,12 +7,13 @@ import { Q } from '../stores/queryKeys';
  *
  * A crawl maps a seed URL, fans the discovered pages out across the agent fleet
  * as shards, and lands the collected pages into a synthetic per-crawl workflow
- * whose extracted-data grid the app already renders (Workflow Data API). The
- * self-hosted coordinator does DETERMINISTIC crawls only — its one axis is the
- * output shape (markdown | schema); there is no AI-agent (`ai`) executor, so the
- * `executor` / `extract_prompt` fields below are OPTIONAL: the shared cloud UI
- * reads them defensively, but the coordinator response never carries them (and it
- * ignores them on the start request).
+ * whose extracted-data grid the app already renders (Workflow Data API).
+ *
+ * Two orthogonal axes: `executor` decides WHO reads each page ('regular' =
+ * deterministic, or 'ai' = a per-page AI read against `extract_prompt`, running on
+ * the provider configured in Settings → AI), and `extract_mode` the output SHAPE
+ * (markdown | schema). Both fields stay optional on the wire so a response from an
+ * older coordinator still parses.
  *
  * Three read-only endpoints scope a crawl BEFORE it starts — none creates a crawl
  * or dispatches an agent: `preview` (the scope it would use + a kept/dropped URL
@@ -34,10 +35,10 @@ export type CrawlStatus =
   | 'stopping';
 
 /**
- * WHO reads each page: 'regular' (deterministic crawl) or 'ai' (an agent fleet
- * reads each page). The self-hosted coordinator only runs the 'regular'
- * executor, so the field is optional and absent on its responses — the UI
- * treats a missing/`regular` value as the deterministic crawl.
+ * WHO reads each page: 'regular' (deterministic crawl — free, fast) or 'ai' (every
+ * fetched page is read against `extract_prompt` by the owner's OWN AI provider).
+ * A missing value reads as 'regular', so a response from an older coordinator —
+ * which had no AI executor at all — still renders as the deterministic crawl.
  */
 export type CrawlExecutor = 'regular' | 'ai';
 /** The SHAPE the collected pages land in. */
@@ -83,7 +84,7 @@ export interface CrawlView {
   ocr_mode?: CrawlOcrMode;
   /** The login identity this crawl runs as (id only — never the session). */
   persona_id?: number | null;
-  /** For the ai executor: the per-page extraction instruction (unused on self-host). */
+  /** For the ai executor: the per-page extraction instruction. */
   extract_prompt?: string | null;
   /** Plain-English goal: derives the scope and ranks the frontier by relevance. */
   intent?: string | null;
@@ -136,7 +137,7 @@ export interface StartCrawlRequest {
   render_mode?: CrawlRenderMode;
   /** OCR policy for PDF/office/image docs + DOM-empty renders: 'auto' | 'off' | 'force'. */
   ocr_mode?: CrawlOcrMode;
-  /** For the ai executor — IGNORED by the self-hosted coordinator. */
+  /** For the ai executor: what every page should yield. Required when executor='ai'. */
   extract_prompt?: string;
   /** Plain-English goal; derives scope + ranks the frontier by relevance. */
   intent?: string;

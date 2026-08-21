@@ -502,6 +502,25 @@ async def queue_processor_loop():
                             executor_role=recorder.get('role'),
                             wants_residential=_wants_residential,
                         )
+                        # A persona's LOGIN run must start COLD — and cold means
+                        # EVERY seed, not just the persona's own session. The
+                        # record-time seed below is a stale session in exactly the
+                        # same way: restoring it mints the sign-in page's CSRF token
+                        # against a dead session, so the POST bounces back to the
+                        # form, the run reports success, and the persona banks
+                        # ANONYMOUS cookies (see the matching guard in
+                        # _dispatch_to_recorder_or_queue). Only the sign-in run
+                        # itself is affected — ordinary runs keep their warm session.
+                        if (ctx or {}).get("_persona_login"):
+                            session_state = None
+                        # RECORD-TIME SEED (lowest precedence): when no persona
+                        # session resolved, queued runs seed from the session
+                        # captured off the recording browser (captcha clearance,
+                        # cookie consent, logins).
+                        elif session_state is None:
+                            from services.recorded_session_service import RecordedSessionService
+                            session_state = RecordedSessionService.load(workflow)
+
                         # Snapshot the (possibly inverted) workflow into the WS message
                         # SYNCHRONOUSLY now — before any further await — so the deferred
                         # dispatch can't read a later task's in-memory mutation.

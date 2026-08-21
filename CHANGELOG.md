@@ -6,6 +6,86 @@ file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] - 2026-08-21
+
+### Added
+
+- **AI reader for crawls (`executor=ai`).** A crawl can now have every fetched
+  page read against a plain-language instruction, coming back as structured
+  records instead of raw markdown — for data with no clean CSS selector. It runs
+  on **your own** AI provider (Settings → AI, or a connected agent carrying its
+  own keys): nothing is metered and nothing is billed.
+
+  `executor` is independent of `render_mode`. The AI reads whatever the fetch
+  lane produced, so an AI crawl of a JavaScript-rendered site is
+  `executor=ai` + `render_mode=browser`, and a bulk pass over static pages is
+  `executor=ai` + `render_mode=http`. The agent always returns markdown for an AI
+  crawl; the coordinator's per-shard pass is what turns it into records, and
+  finalize waits for that pass so the reconciled record count is complete.
+
+  Failure is contained rather than silent: a page whose read fails keeps its
+  markdown, and a crawl started with the AI reader on while **no** provider is
+  configured is refused up front instead of fetching a whole site to produce
+  exactly what a regular crawl would have. Available from the crawl screen, the
+  `Crawl Site` automation block, `POST /api/crawl`, and the `writ_crawl_site` MCP
+  tool. Migration `0020` adds `crawl_jobs.executor` + `crawl_jobs.extract_prompt`;
+  existing crawls default to `regular` and are unaffected.
+
+- **Let AI sign a persona in, and keep the recording.** A persona could previously
+  only get a login workflow if you recorded one by hand or attached one you already
+  had. The coordinator can now ask a connected fleet agent to sign in with the
+  persona's credentials, record the flow, turn it into a workflow and wire it onto
+  the persona — which `persona_login` then replays on every session expiry.
+  Migration `0019` adds `ai_sessions.login_for_persona_id`.
+
+  The coordinator runs no AI of its own: it dispatches the session to an agent that
+  carries its own provider keys, so nothing here is metered or billed.
+
+### Changed
+
+- **MCP `run_<name>` tools are now opt-in per workflow.** The `/mcp` server used to
+  mint one tool for *every* saved workflow. MCP clients inject every advertised tool
+  schema into model context on each request and several enforce hard tool caps, so an
+  instance with many workflows either burned thousands of tokens per turn or had its
+  tool list truncated at the client. Pin the workflows you want exposed; everything
+  stays reachable through `writ_run_workflow` regardless. Migration `0022` adds
+  `automation_workflows.mcp_tool_pinned`, defaulting to off.
+
+- **The extracted-data endpoints serve from bounded reads.** Every request used to
+  load the full payload of the whole scan window and flatten it in Python just to
+  answer "the newest 50 rows". On a crawl dataset — hundreds of pages of captured
+  markdown per run — that was tens of megabytes of JSON parsed per request, and the
+  Data page fires several concurrently on open and then polls. Window scans now read
+  only the columns they need, and row content is served truncated with the full value
+  fetched on demand.
+
+### Fixed
+
+- **A crawl could bank a site's sign-in page as content, 1069 times.** Every check
+  applied to a warm session inspected its *shape* — does it carry cookies, is one
+  HttpOnly, does an auth-looking name appear. Plenty of sites hand an anonymous
+  visitor a perfectly well-formed HttpOnly session cookie, so a login that silently
+  failed produced a session that passed every test there was. A crawl then ran to
+  completion capturing the logged-out page as its result, and nothing in the pipeline
+  could tell.
+
+  Sessions are now probed *behaviourally* — the site itself is asked whether the
+  session is signed in — and a crawl whose persona turns out to be signed out is
+  refused up front rather than producing a corpus of login screens.
+
+- **Inline extraction returned page furniture instead of the article.** The paths that
+  extract without a fleet agent used a regex block-tag stripper whose "first N lines"
+  are a page's nav and header. Those paths now mirror the agent's own extraction
+  ladder server-side, so an inline fallback returns main content like the fleet does.
+
+- **`transfer_imports` could fail to be created at all.** `created_by_user_id` was
+  declared `String(36)` while `users.id` is a UUID column, and the model placed a
+  foreign key across that mismatch. A strict engine refuses such a constraint
+  outright, so `Base.metadata.create_all` — the path a fresh boot and every dev
+  database take — died on this table and took the rest of the schema with it.
+  Migration `0021` aligns the type.
+
+
 ## [1.0.3] - 2026-08-13
 
 ### Fixed

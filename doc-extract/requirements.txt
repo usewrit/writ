@@ -18,7 +18,7 @@ python-pptx>=0.6.23       # .pptx
 # --- HTML → markdown (a .pdf/doc URL that actually served HTML: soft-404s,
 # login walls, WAF interstitials). Same layered pipeline as the crawl agents;
 # each layer degrades gracefully if its dep is absent. ---
-trafilatura>=1.8.0        # boilerplate-stripped main content + metadata + tables
+trafilatura>=2.0,<2.2     # boilerplate-stripped main content + metadata + tables (range bisected 2026-08: 2.0–2.1 emit real GFM tables; <2.0 drops the leading pipe, 2.2.0 flattens pages to one line — same pin as pagesurveil-agent)
 readability-lxml>=0.8.1   # main-content isolation (fallback engine)
 markdownify>=0.11.6       # HTML → markdown
 beautifulsoup4>=4.12.0    # chrome strip + text/meta helpers

@@ -142,12 +142,25 @@ class WorkflowRouter:
         is_ai = WorkflowRouter.requires_ai(workflow)
         traffic = WorkflowRouter.classify_traffic(trigger_type, trigger_context)
 
-        # Interactive (direct/called) and AI runs need a full recorder; only plain
-        # scheduled non-AI work can prefer desktop agents.
+        # Interactive (direct/called) and AI runs need a full recorder. Plain
+        # scheduled non-AI work defaults to the recorder/queue lane like every
+        # other run — the desktop lane is an EXPLICIT venue choice
+        # (execution_target='local'), never a preference. The old unconditional
+        # DESKTOP_PREFERRED parked scheduled tasks as 'pending' for a claimant
+        # most deployments don't have, so scheduled runs hung forever.
         if is_ai or traffic != TrafficType.SCHEDULED:
             target = TargetAgent.RECORDER_ONLY
         else:
-            target = TargetAgent.DESKTOP_PREFERRED
+            _et = (
+                getattr(workflow, "_runtime_execution_target", None)
+                or getattr(workflow, "execution_target", None)
+                or "auto"
+            )
+            target = (
+                TargetAgent.DESKTOP_PREFERRED
+                if str(_et).lower() == "local"
+                else TargetAgent.RECORDER_ONLY
+            )
 
         return RoutingDecision(target=target, traffic_type=traffic, requires_ai=is_ai)
 

@@ -499,7 +499,27 @@ async def _resolve_own_streaming_persona(db, auth, wf):
     }
     # The persona's saved auth (cookies/localStorage) so the live browser is logged
     # in before any 2FA challenge — same as the run path's persona_session.
-    persona_session = PersonaService.load_session(persona)
+    #
+    # VERIFIED, not merely loaded. A streamed browser is the one place a USER may
+    # sign in by hand, and restoring a dead session first is what poisons that: the
+    # sign-in page renders under the stale session, so its CSRF token is rejected
+    # and the login silently fails. Falls back to the stored blob when the refresh
+    # can't run — never worse than handing it over unconditionally.
+    persona_session = None
+    try:
+        from services.persona_login import ensure_fresh_session
+        _ok, _err, _fresh = await ensure_fresh_session(persona.id)
+        if _ok and _fresh:
+            persona_session = _fresh
+        else:
+            logger.info(
+                f"Streaming: persona {persona.id} could not be freshened ({_err}); "
+                f"handing over its stored session as-is"
+            )
+    except Exception as _e:  # noqa: BLE001 — never block a stream on the guard
+        logger.warning(f"Streaming: persona {persona.id} session check failed: {_e}")
+    if persona_session is None:
+        persona_session = PersonaService.load_session(persona)
     return {
         "persona": persona_cfg,
         "session_state": persona_session,

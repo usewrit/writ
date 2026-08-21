@@ -15,6 +15,7 @@ import {
   GlobeAltIcon,
   DocumentTextIcon,
   BoltIcon,
+  SparklesIcon,
   TrashIcon,
   ArrowPathIcon,
   CircleStackIcon,
@@ -113,7 +114,10 @@ function pickString(fields: Record<string, unknown>, keys: string[]): string | u
 
 function toCollectedPage(row: DataRow): CollectedPage {
   const f = row.fields || {};
-  const url = pickString(f, ['url', 'link', 'href', 'page_url', 'source_url', 'loc']) || '';
+  // `_source_url` is how a MULTI-ROW page tags its origin — schema records and
+  // AI-extracted records both carry it instead of `url` (the row IS the record,
+  // not the page). Without it every AI/schema row rendered as a dash with no link.
+  const url = pickString(f, ['url', 'link', 'href', 'page_url', 'source_url', '_source_url', 'loc']) || '';
   const title = pickString(f, ['title', 'name', 'heading', 'h1', 'page_title']) || url || '—';
   const words = (() => {
     const w = (f['word_count'] ?? f['words']) as unknown;
@@ -591,6 +595,9 @@ export const CrawlDetailView: React.FC<{
   // NOT the workflow detail page, whose Run/Publish/Steps/Connect/Edit chrome and
   // "how it runs" settings don't apply to a crawl's collected dataset.
   const dataHref = `/data?workflow=${crawl.data_workflow_id}`;
+  // WHO read each page. Absent on a crawl banked before the AI executor existed —
+  // those were all deterministic, so a missing value correctly reads as 'regular'.
+  const isAi = crawl.executor === 'ai';
   const isSchema = crawl.extract_mode === 'schema';
   const name = crawl.name?.trim() || hostOf(crawl.seed_url);
   const renderMode = crawl.render_mode;
@@ -637,7 +644,9 @@ export const CrawlDetailView: React.FC<{
                 </a>
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
                   {/* The self-hosted coordinator runs deterministic crawls only. */}
-                  <ModePill icon={BoltIcon}>{t('Regular')}</ModePill>
+                  <ModePill icon={isAi ? SparklesIcon : BoltIcon}>
+                    {isAi ? t('AI reader') : t('Regular')}
+                  </ModePill>
                   <ModePill icon={isSchema ? TableCellsIcon : DocumentTextIcon}>
                     {isSchema ? t('Structured') : t('Markdown')}
                   </ModePill>

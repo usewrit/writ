@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { asText } from '../../utils/format';
 import { Modal } from '../ui/Modal';
 import { automationApi } from '../../api/endpoints';
 import { ExecutionTargetPicker } from './ExecutionTargetPicker';
@@ -115,7 +116,8 @@ function extractFileSlots(workflow: {
     slot: string, label?: string | null, isMultiple?: boolean,
     defaultFileId?: string | null, defaultFilename?: string | null,
   ) => {
-    const name = (slot || '').trim();
+    // Backend JSON: a slot name should be a string, but never assume it.
+    const name = asText(slot).trim();
     if (!name || seen.has(name)) return;
     seen.add(name);
     slots.push({
@@ -158,7 +160,7 @@ interface RunWorkflowModalProps {
   workflow: {
     id: number;
     name: string;
-    form_data?: Record<string, string>;
+    form_data?: Record<string, unknown>;
     placeholders?: Placeholder[];
     has_credentials?: boolean;
     /** Names of the workflow's stored credential-blob keys — no values. Present
@@ -298,7 +300,7 @@ export const RunWorkflowModal: React.FC<RunWorkflowModalProps> = ({
 
   // Saved plain fields = placeholders that already have a non-empty stored value.
   const savedPlainCount = (workflow.placeholders || [])
-    .filter((p) => (stored[p.key] ?? '').trim() !== '').length;
+    .filter((p) => asText(stored[p.key]).trim() !== '').length;
   // Secrets live in the workflow's SEALED `credentials_encrypted` column, not in
   // `form_data`. The API redacts the blob and returns `has_credentials: bool`
   // (no key names) — so we can't count them here, only detect presence.
@@ -313,7 +315,9 @@ export const RunWorkflowModal: React.FC<RunWorkflowModalProps> = ({
   if (isOpen && !initialized) {
     const initial: Record<string, string> = {};
     for (const p of effectivePlaceholders) {
-      initial[p.key] = stored[p.key] ?? '';
+      // Coerce at the boundary so every value in `formValues` is a string —
+      // the inputs are controlled and the empty-check on run calls .trim().
+      initial[p.key] = asText(stored[p.key]);
     }
     setFormValues(initial);
     setPersonaId(workflow.default_persona_id ?? null);
@@ -334,7 +338,7 @@ export const RunWorkflowModal: React.FC<RunWorkflowModalProps> = ({
     // When reusing saved data we send no form_data override — the backend falls
     // back to the workflow's stored form_data + encrypted credentials.
     if (!useSaved) {
-      const empty = Object.entries(formValues).filter(([_, v]) => !v.trim());
+      const empty = Object.entries(formValues).filter(([_, v]) => !asText(v).trim());
       if (empty.length > 0) {
         toast.error(t('Please fill in: {{fields}}', { fields: empty.map(([k]) => k).join(', ') }));
         return;
@@ -560,7 +564,7 @@ export const RunWorkflowModal: React.FC<RunWorkflowModalProps> = ({
  */
 export function workflowNeedsInput(workflow: {
   placeholders?: Placeholder[];
-  form_data?: Record<string, string>;
+  form_data?: Record<string, unknown>;
   file_slots?: Array<{
     slot: string; label?: string | null; is_multiple?: boolean;
     default_file_id?: string | null; default_filename?: string | null;

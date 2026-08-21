@@ -152,7 +152,14 @@ const WizardInner: React.FC<UnifiedCreationWizardProps> = ({ onComplete, onCance
       const crawl = await crawlApi.start({
         url: seed,
         name: config.name?.trim() || undefined,
+        executor: config.crawlExecutor,
         extract_mode: config.crawlOutput,
+        // Only meaningful for the ai executor; omitted otherwise so a stale prompt
+        // left in the form can never ride along on a deterministic crawl.
+        extract_prompt:
+          config.crawlExecutor === 'ai' && config.crawlPrompt.trim()
+            ? config.crawlPrompt.trim()
+            : undefined,
         render_mode: config.crawlRenderMode,
         ocr_mode: config.crawlOcrMode,
         intent: intent || undefined,

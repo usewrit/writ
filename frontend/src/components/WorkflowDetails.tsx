@@ -6,6 +6,7 @@ import type { WorkflowStep } from '../types/api';
 import { StepsEditor } from './steps/StepsEditor';
 import { StreamingScriptEditor } from '../pages/workflows/detail/StreamingScriptEditor';
 import { Checkbox, Select } from './ui';
+import { scheduleFromApi, scheduleLabel as scheduleSummary } from '../utils/schedule';
 import {
   ClockIcon,
   ArrowPathIcon,
@@ -24,7 +25,7 @@ interface Workflow {
   description?: string;
   workflow_type: string;
   steps: WorkflowStep[];
-  form_data?: Record<string, string>;
+  form_data?: Record<string, unknown>;
   credentials?: Record<string, string>;
   has_credentials?: boolean;
   entry_url?: string;
@@ -160,13 +161,7 @@ export const WorkflowDetails: React.FC<WorkflowDetailsProps> = ({ workflow, onUp
         {workflow.schedule_enabled && (
           <div className="flex items-center gap-1.5 px-2.5 py-1 bg-canvas border border-border rounded-lg text-[11px] text-secondary">
             <ClockIcon className="h-3 w-3 text-tertiary" />
-            {t('Every {{interval}}', {
-              interval: workflow.schedule_interval_ms && workflow.schedule_interval_ms >= 3600000
-                ? `${workflow.schedule_interval_ms / 3600000}h`
-                : workflow.schedule_interval_ms
-                  ? `${workflow.schedule_interval_ms / 60000}m`
-                  : '--',
-            })}
+            {scheduleSummary(scheduleFromApi(workflow, workflow.schedule_interval_ms || 3_600_000))}
           </div>
         )}
         {workflow.exit_condition && (

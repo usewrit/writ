@@ -51,6 +51,7 @@ import { RunWithTargetButton } from '../workflows/ExecutionTargetPicker';
 import { InlineScheduleControl } from '../schedule/InlineScheduleControl';
 import i18n from '../../i18n';
 import { EmptyHero } from '../ui';
+import { scheduleFromApi, scheduleLabel as scheduleSummary } from '../../utils/schedule';
 
 const RUNNING_STATES = ['running', 'pending', 'assigned', 'queued'];
 
@@ -292,10 +293,11 @@ export const WorkflowDetailPane: React.FC<WorkflowDetailPaneProps> = ({
   } else if (lastStatus === 'success' || lastStatus === 'completed') statusLabel = t('Succeeded');
   else if (lastStatus === 'cancelled' || lastStatus === 'timeout') statusLabel = t('Last run {{status}}', { status: lastStatus });
 
-  const scheduleLabel = w.schedule_enabled && w.schedule_interval_ms
-    ? (w.schedule_interval_ms >= 3600000
-        ? t('Every {{n}}h', { n: w.schedule_interval_ms / 3600000 })
-        : t('Every {{n}}m', { n: w.schedule_interval_ms / 60000 }))
+  // Kind-aware summary via the shared util (same one WorkflowFastActions uses):
+  // a daily/weekly schedule must read "Daily at 16:28", not the leftover
+  // interval_ms from before the kind switch ("Every 1h" — a lie).
+  const scheduleLabel = w.schedule_enabled
+    ? scheduleSummary(scheduleFromApi(w, w.schedule_interval_ms || 3_600_000))
     : t('Off');
 
   const hasData = w.last_run_has_extracted_data

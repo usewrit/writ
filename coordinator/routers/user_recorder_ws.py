@@ -2302,6 +2302,15 @@ async def _apply_ai_session_terminal(agent_id: str, msg: dict):
             row.error = msg.get("error")
             row.completed_at = datetime.now(timezone.utc)
             await db.commit()
+
+            # PERSONA LOGIN RECORDING: this session existed to record how a
+            # persona signs in. The agent recorded into ITS OWN workflows table,
+            # so the frame carries the recipe (`workflow_steps`) — materialize a
+            # coordinator-side workflow from it and attach it to the persona.
+            # Guarded inside the service: bookkeeping must never lose the frame.
+            if row.login_for_persona_id:
+                from services.persona_login_record import wire_login_record_result
+                await wire_login_record_result(db, row, msg)
     except Exception as e:
         logger.error(
             f"Failed to apply AI-session terminal frame from {agent_id} "

@@ -35,6 +35,7 @@ from models.crawl_job import CrawlJob
 from security.api_key import get_current_api_key
 from security.validation import InputValidator
 from services import (
+    content_extract,
     crawl_orchestrator,
     crawl_targeting,
     crawl_definition_service,
@@ -55,8 +56,10 @@ _SCREENSHOT_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 class StartCrawlRequest(BaseModel):
     url: str = Field(..., description="Seed URL to crawl")
     name: Optional[str] = None
+    executor: str = Field("regular", description="regular | ai — deterministic crawl vs a per-page AI read on your own provider")
     extract_mode: str = Field("markdown", description="markdown | schema")
     extract_schema: Optional[dict] = None
+    extract_prompt: Optional[str] = Field(None, description="For the ai executor: what every page should yield")
     render_mode: str = Field("auto", description="auto | http | browser — page render strategy")
     ocr_mode: str = Field("auto", description="auto | off | force — OCR policy for PDF/office/image docs")
     persona_id: Optional[int] = Field(None, description="Login identity for authenticated crawls")
@@ -127,8 +130,10 @@ async def start_crawl(
         db,
         seed_url=body.url,
         name=body.name,
+        executor=body.executor,
         extract_mode=body.extract_mode,
         extract_schema=body.extract_schema,
+        extract_prompt=body.extract_prompt,
         content_spec=body.content_spec,
         render_mode=body.render_mode,
         ocr_mode=body.ocr_mode,
@@ -228,8 +233,36 @@ async def _inline_crawl_data(db: AsyncSession, crawl: CrawlJob, limit: int) -> O
     if not crawl.workflow_id:
         return None
     try:
-        from routers.automation import _scan_workflow_data_tasks
+        from routers.automation import _data_scan_filters, _scan_workflow_data_tasks, _DATA_SCAN_CAP
         from services import extracted_data_table as edt
+
+        # Newest-first default page: serve it from the bounded fastpath so a
+        # big crawl's status call doesn't reload the whole corpus. Falls back
+        # to the legacy full scan on any fastpath error.
+        if isinstance(limit, int) and limit > 0:
+            try:
+                from models.automation_task import AutomationTask
+                from services import dataset_fastpath
+
+                table, _scanned, truncated = await dataset_fastpath.fast_table_page(
+                    db,
+                    AutomationTask,
+                    _data_scan_filters(crawl.workflow_id),
+                    _DATA_SCAN_CAP,
+                    declared=None,
+                    redactor=None,
+                    variant="raw",
+                    scope_id=crawl.workflow_id,
+                    offset=0,
+                    limit=limit,
+                )
+                table["truncated"] = truncated
+                return table
+            except Exception:
+                logger.warning(
+                    "crawl %s: inline data fastpath failed; serving via full scan",
+                    crawl.id, exc_info=True,
+                )
 
         tasks, truncated = await _scan_workflow_data_tasks(db, crawl.workflow_id)
         table = edt.build_table(tasks, declared=None, offset=0, limit=limit)
@@ -583,7 +616,18 @@ async def map_crawl(
         persona = await PersonaService.get_owned(db, int(body.persona_id))
         if not persona:
             raise HTTPException(404, "persona_id does not reference one of your personas")
-        auth_session = PersonaService.load_session(persona)
+        # Verified, not merely loaded: mapping with a dead session walks the LOGIN
+        # WALL's links — the exact failure the comment above describes. Falls back to
+        # the stored blob rather than refusing to map.
+        try:
+            from services.persona_login import ensure_fresh_session
+            _ok, _err, _fresh = await ensure_fresh_session(persona.id)
+            auth_session = _fresh if (_ok and _fresh) else None
+        except Exception as _e:  # noqa: BLE001
+            logger.warning(f"map: persona {persona.id} session refresh failed: {_e}")
+            auth_session = None
+        if auth_session is None:
+            auth_session = PersonaService.load_session(persona)
 
     text_by_url: dict = {}
     # Harvest depth is decoupled from the response limit: with cap=body.limit a
@@ -627,6 +671,12 @@ async def map_crawl(
 
 class ScrapeCrawlRequest(BaseModel):
     url: str = Field(..., description="Page to scrape to clean markdown")
+    # SIGNED-IN SCRAPE. Without this the endpoint could only ever reach public
+    # pages: its own "couldn't fetch that page" error even told the caller a
+    # persona-backed CRAWL could reach it, while scrape had no way to ask for one.
+    persona_id: Optional[int] = Field(
+        None, description="Saved identity to scrape as (for pages behind a login)"
+    )
 
 
 # Compact, dependency-free HTML → markdown-ish text. The full-fidelity pipeline
@@ -676,27 +726,89 @@ async def scrape_page(
     _api_key: dict = Depends(get_current_api_key),
 ):
     """Scrape ONE page to clean markdown. No crawl, no fleet dispatch, no cost —
-    the single-page twin of a depth-0 crawl."""
+    the single-page twin of a depth-0 crawl.
+
+    Runs AS A PERSONA when one is given, so a page behind a login is reachable
+    here instead of only through a full crawl. The session is verified (not just
+    loaded) first: a dead session would otherwise scrape the login wall and
+    return it as if it were the page.
+    """
     from services import safe_fetch
 
     url = await _guard_seed(db, body.url)
+
+    # IDENTITY. Verified, not merely loaded — see the same rule in /crawl/map.
+    auth_session = None
+    if body.persona_id:
+        from services.persona_service import PersonaService
+
+        persona = await PersonaService.get_owned(db, int(body.persona_id))
+        if not persona:
+            raise HTTPException(404, "persona_id does not reference one of your personas")
+        try:
+            from services.persona_login import ensure_fresh_session
+            _ok, _err, _fresh = await ensure_fresh_session(persona.id)
+            auth_session = _fresh if (_ok and _fresh) else None
+        except Exception as _e:  # noqa: BLE001 - fall back to the stored blob
+            logger.warning(f"scrape: persona {persona.id} session refresh failed: {_e}")
+            auth_session = None
+        if auth_session is None:
+            auth_session = PersonaService.load_session(persona)
+        if auth_session is None:
+            raise HTTPException(
+                422,
+                {
+                    "message": "That persona has no usable login session, so this page "
+                               "would be scraped signed out. Sign the persona in (or "
+                               "attach a login workflow) and try again.",
+                    "code": "persona_not_signed_in",
+                },
+            )
+
+    headers = None
+    cookie = crawl_orchestrator._session_cookie_header(auth_session, url)
+    if cookie:
+        headers = {"Cookie": cookie}
+        # Present the session's own user agent too: a jar minted by one browser
+        # and replayed by another is a different visitor to a lot of stacks.
+        _fp = (auth_session or {}).get("fingerprint")
+        if isinstance(_fp, dict):
+            _ua = _fp.get("userAgent") or _fp.get("user_agent")
+            if isinstance(_ua, str) and _ua:
+                headers["User-Agent"] = _ua
+
     try:
-        resp = await safe_fetch.safe_get(url, timeout=8.0)
+        resp = await safe_fetch.safe_get(url, timeout=8.0, headers=headers)
     except Exception:
         resp = None
     if resp is None or resp.status_code != 200:
         raise HTTPException(
             422,
             {
-                "message": "Couldn't fetch that page (it may block bots, require a "
-                           "login, or be down). A persona-backed crawl can reach it.",
+                "message": (
+                    "Couldn't fetch that page (it may block bots or be down)."
+                    if body.persona_id else
+                    "Couldn't fetch that page (it may block bots, require a "
+                    "login, or be down). Pass persona_id to scrape it signed in."
+                ),
                 "code": "scrape_unreachable",
             },
         )
 
-    title_m = _TITLE_RE.search(resp.text or "")
+    html = resp.text or ""
+    # MAIN-CONTENT LADDER (trafilatura -> readability+markdownify -> structural
+    # strip), the same one the crawl path uses. This used to be a regex tag
+    # stripper, so every scrape led with nav chrome and lost tables entirely.
+    # `or _html_to_markdown` keeps the old stripper as the LAST resort (same shape
+    # as cloud), so a page no engine can parse still returns something readable.
+    markdown = content_extract.extract_main_markdown(html, url) or _html_to_markdown(html)
+    # The <title> tag first (what cloud's scrape reports, and what the page itself
+    # calls the page); the extractor's metadata guess only fills a gap, since it can
+    # latch onto a site-wide banner heading instead.
+    title_m = _TITLE_RE.search(html)
     title = _WS_RE.sub(" ", _TAG_RE.sub("", title_m.group(1))).strip() if title_m else None
-    markdown = _html_to_markdown(resp.text or "")
+    if not title:
+        title = content_extract.extract_title(html, url)
 
     return {
         "verb": "scrape",
@@ -704,9 +816,12 @@ async def scrape_page(
         "title": title,
         "format": "markdown",
         "markdown": markdown,
+        # Says whether the bytes came back as an identity or as a stranger, so a
+        # caller can tell a login wall from the real page.
+        "persona_id": body.persona_id,
         "counts": {
             "chars": len(markdown),
-            "raw_tokens_est": len(resp.text or "") // 4,
+            "raw_tokens_est": len(html) // 4,
             "clean_tokens_est": len(markdown) // 4,
         },
         "brand": DRAGNET_NAME,

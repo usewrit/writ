@@ -37,6 +37,14 @@ passlib>=1.7.4
 alembic>=1.13.1
 beautifulsoup4>=4.12.3
 lxml>=4.9.0  # capable/fast parser used by BeautifulSoup in content extraction (extractor/targets/target_selectors/persona_service)
+# Main-content extraction ladder for the coordinator's own /crawl/scrape and
+# /crawl/map (services/content_extract.py). Same pins as the agent and the
+# doc-extract sidecar: 2.0-2.1 emit real GFM tables, <2.0 drops the leading
+# pipe and 2.2.0 flattens a page to one line. All three are optional at
+# import time - the ladder degrades to a structural strip without them.
+trafilatura>=2.0,<2.2
+readability-lxml>=0.8.1
+markdownify>=0.11.6
 websockets>=12.0
 dnspython>=2.4.0
 pyotp>=2.9.0

@@ -34,7 +34,13 @@ reconciles in-flight counts from real task state before re-pumping.
 Single-owner coordinator: no per-owner scoping. The whole DB (and the in-process
 Redis keyspace) belongs to the one operator, so shard tasks and the synthetic
 workflow are created without any owner column, and there is no billing, plan
-ladder, or metered-AI executor in this loop — a self-hosted crawl is free.
+ladder, or credit metering in this loop — a self-hosted crawl is free.
+
+The `ai` executor (a per-page AI read against `extract_prompt`) is available and
+equally free: it runs on the OWNER'S own provider (Settings → AI, or a BYO-key
+agent), so the only cost is their own key. It is orthogonal to `render_mode` —
+the AI reads the markdown whichever lane produced it (pure HTTP, warm browser, or
+the document/OCR lane).
 """
 from __future__ import annotations
 
@@ -177,6 +183,16 @@ def _k_host_cooldown(reg: str) -> str:
     """A host is cooling down (recently blocked an agent) — no crawl dispatches to
     it while this key lives."""
     return f"crawl:host:{reg}:cooldown"
+
+
+def _k_ai_inflight(cid: int) -> str:
+    """Shards whose per-page AI extraction is still running.
+
+    The AI pass runs OFF the shard-completion path (a background task per shard) so
+    a slow provider never stalls the fleet — which means convergence has to wait on
+    it too, or `_finalize` reconciles the dataset while records are still being
+    written and reports a records_total that is missing them."""
+    return f"crawl:{cid}:ai_inflight"
 
 
 # In-process serialization of the per-shard completion DB phase, keyed by crawl.
@@ -609,6 +625,113 @@ async def _sample_site_urls(seed_url: str, *, cap: int = 150, auth=None) -> list
 from services.persona_login import session_is_usable as _session_is_usable  # noqa: E402
 
 
+def _persona_user_agent(persona, session: Optional[dict]) -> Optional[str]:
+    """The UA this persona's session was minted with, so a replay presents the same
+    visitor. The session's own fingerprint wins (it is what the login actually sent);
+    the persona's stored fingerprint is the fallback."""
+    for src in ((session or {}).get("fingerprint"), getattr(persona, "fingerprint", None)):
+        if isinstance(src, dict):
+            ua = src.get("userAgent") or src.get("user_agent")
+            if isinstance(ua, str) and ua:
+                return ua
+    return None
+
+
+async def _verify_persona_session(
+    db, crawl: CrawlJob, persona, session: Optional[dict]
+) -> tuple:
+    """Ask the SITE whether this session is signed in (persona_session_probe).
+
+    A shape check cannot answer this. Anonymous visitors are handed HttpOnly session
+    cookies too, so a jar minted while logged OUT passes every structural test and
+    the crawl then banks copies of the sign-in page. The only reliable question is
+    the one the site answers: fetch a page that REQUIRES the login and see whether
+    it bounces.
+
+    Runs with the persona's own BYO proxy and user agent, so the probe is the same
+    visitor the shards will be — a session is bound to the address it was minted
+    from, and probing from somewhere else reports a healthy session as dead.
+
+    Three-valued, and only `False` is actionable (see persona_session_probe). Never
+    raises: verification is a safety net, and an internal fault here must not block
+    a crawl that would otherwise have worked."""
+    try:
+        from services import persona_session_probe
+        from services.persona_service import PersonaService
+
+        proxy = None
+        try:
+            _p = PersonaService.resolve_proxy(persona)
+            if isinstance(_p, dict):
+                proxy = _p.get("server") or _p.get("url") or None
+        except Exception:  # noqa: BLE001 - egress is a refinement, never a blocker
+            proxy = None
+
+        login_url, patterns = None, None
+        if getattr(persona, "login_workflow_id", None):
+            from models.automation_workflow import AutomationWorkflow
+
+            wf = (await db.execute(
+                select(AutomationWorkflow.entry_url, AutomationWorkflow.login_url_patterns)
+                .where(AutomationWorkflow.id == persona.login_workflow_id)
+            )).first()
+            if wf:
+                login_url, patterns = wf[0], wf[1]
+
+        # PROBE A GATED PAGE, NOT THE SEED. The seed is usually PUBLIC, and a public
+        # page never bounces to the sign-in page — so it answers "signed in" for an
+        # anonymous jar too, and the verdict is worthless. The persona's own login
+        # workflow ends on a signed-in page, so it tells us which URL requires the
+        # session.
+        probe_url = await persona_session_probe.gated_url_for_persona(db, persona)
+        if not probe_url:
+            logger.info(
+                f"[{DRAGNET_NAME}] crawl {crawl.id}: no gated URL known for persona "
+                f"{persona.id} — session verification skipped (cannot be proven either way)"
+            )
+            return None, None
+        return await persona_session_probe.probe_session_authenticated(
+            url=probe_url, session=session, proxy=proxy,
+            login_url=login_url, login_url_patterns=patterns,
+            user_agent=_persona_user_agent(persona, session),
+        )
+    except Exception as e:  # noqa: BLE001 - verification is a safety net, never a gate
+        logger.warning(
+            f"[{DRAGNET_NAME}] crawl {crawl.id}: session verification errored ({e}); "
+            f"proceeding without it"
+        )
+        return None, None
+
+
+async def _mark_persona_signed_out(db, persona, detail: Optional[str]) -> None:
+    """Record on the PERSONA that its session is signed out, so the identity itself
+    shows the problem — not just the one crawl that happened to trip over it. The
+    next crawl re-runs the login (validation_status is advisory, never a hard gate),
+    but the user sees why the last one stopped. Best-effort."""
+    try:
+        persona.validation_status = "invalid"
+        persona.last_login_error = (
+            f"Signed in successfully but the site did not keep the session: {detail}"
+        )[:500]
+        await db.flush()
+    except Exception as e:  # noqa: BLE001 - bookkeeping must never mask the real error
+        logger.warning(f"[{DRAGNET_NAME}] could not flag persona as signed out: {e}")
+
+
+# Told to the user when a persona's session is provably signed OUT. It has to explain
+# a failure whose cause is invisible from the UI — the login run SUCCEEDED — so it
+# names the evidence and the two things that actually fix it.
+_LOGGED_OUT_MESSAGE = (
+    "This crawl's persona is not actually signed in: {detail}. The sign-in run itself "
+    "reported success, so the site accepted the steps but did not keep the session — "
+    "usually the recorded login is missing a step (a confirmation, a second factor, a "
+    "cookie banner), or it moves on before the sign-in finishes. Open the persona's "
+    "login workflow, run it once while watching it, and confirm it ends on a signed-in "
+    "page. The crawl was stopped instead of started so it does not fill up with copies "
+    "of the sign-in page."
+)
+
+
 async def _ensure_persona_session(db, crawl: CrawlJob) -> tuple:
     """Login-before-crawl guard. A crawl with a persona MUST carry a fresh warm
     session so every shard fetches logged-IN (the persona's login was established
@@ -623,6 +746,7 @@ async def _ensure_persona_session(db, crawl: CrawlJob) -> tuple:
     if not crawl.persona_id:
         return True, None, None
     try:
+        from services.persona_login import has_login_credentials
         from services.persona_service import PersonaService
         persona = await PersonaService.get_owned(db, crawl.persona_id)
         if not persona or not getattr(persona, "is_active", True):
@@ -633,18 +757,54 @@ async def _ensure_persona_session(db, crawl: CrawlJob) -> tuple:
         if _session_is_usable(session):
             logger.info(f"[{DRAGNET_NAME}] crawl {crawl.id}: authenticated — reusing "
                         f"persona {persona.id} warm session")
-            return True, None, session
+            # SHAPE IS NOT PROOF. The jar can look perfect and still be anonymous
+            # (anonymous visitors get HttpOnly session cookies too), so confirm with
+            # the SITE before fanning out — otherwise the crawl silently banks copies
+            # of the sign-in page. A warm session that turns out to be signed out is
+            # the recoverable case this re-login exists for.
+            verdict, detail = await _verify_persona_session(db, crawl, persona, session)
+            if verdict is not False:
+                return True, None, session
+            logger.info(f"[{DRAGNET_NAME}] crawl {crawl.id}: persona {persona.id} warm "
+                        f"session is signed OUT ({detail}) — signing in again")
+            if not (getattr(persona, "login_workflow_id", None)
+                    or has_login_credentials(persona)):
+                await _mark_persona_signed_out(db, persona, detail)
+                return False, _LOGGED_OUT_MESSAGE.format(detail=detail), None
+            from services.persona_login import ensure_fresh_session
+            ok, login_err, fresh = await ensure_fresh_session(persona.id)
+            if not (ok and fresh):
+                return False, (login_err or "Could not sign this crawl's persona in."), None
+            # Verify the FRESH session too: if a just-completed login still comes back
+            # signed out, re-running it would only repeat the result, so stop and say so.
+            verdict, detail = await _verify_persona_session(db, crawl, persona, fresh)
+            if verdict is False:
+                await _mark_persona_signed_out(db, persona, detail)
+                return False, _LOGGED_OUT_MESSAGE.format(detail=detail), None
+            return True, None, fresh
 
         # STALE OR ABSENT — try to SIGN IN rather than failing the crawl. A persona
         # with a login workflow can re-establish its own session, so an expired
         # session is a recoverable condition, not a dead end. ensure_fresh_session
         # holds a per-persona lock, so a re-kicked seeder can't stack logins.
-        if getattr(persona, "login_workflow_id", None):
-            logger.info(f"[{DRAGNET_NAME}] crawl {crawl.id}: persona {persona.id} "
-                        f"session stale — running its login workflow")
+        if getattr(persona, "login_workflow_id", None) or has_login_credentials(persona):
+            # Credentials with no workflow yet are enough: ensure_fresh_session
+            # bootstraps the FIRST sign-in through the AI recorder (which fills the
+            # site's own form from the sealed credentials and wires the recorded
+            # recipe on as login_workflow_id), so the user never has to hand-record
+            # a login they already gave us the credentials for.
+            logger.info(
+                f"[{DRAGNET_NAME}] crawl {crawl.id}: persona {persona.id} session stale — "
+                f"{'running its login workflow' if getattr(persona, 'login_workflow_id', None) else 'bootstrapping its first sign-in'}"
+            )
             from services.persona_login import ensure_fresh_session
             ok, login_err, fresh = await ensure_fresh_session(persona.id)
             if ok and fresh:
+                # "The run succeeded" is not "we are signed in" — ask the site.
+                verdict, detail = await _verify_persona_session(db, crawl, persona, fresh)
+                if verdict is False:
+                    await _mark_persona_signed_out(db, persona, detail)
+                    return False, _LOGGED_OUT_MESSAGE.format(detail=detail), None
                 logger.info(f"[{DRAGNET_NAME}] crawl {crawl.id}: persona {persona.id} "
                             f"signed in — proceeding authenticated")
                 return True, None, fresh
@@ -801,9 +961,16 @@ async def _mint_shard_task(db, crawl: CrawlJob, batch: list) -> AutomationTask:
 
     target_id is left NULL (not 0): the coordinator enforces SQLite foreign keys,
     so a shard task is a target-less scheduled workflow run."""
+    # For the ai executor the AGENT only fetches clean page content — the AI read
+    # runs HERE on the coordinator (the owner's own provider) in on_shard_complete.
+    # So the agent's output mode is forced to "markdown" (the coordinator's AI pass
+    # turns that into the requested records); the schema/prompt still ride along.
+    agent_mode = "markdown" if crawl.executor == "ai" else crawl.extract_mode
     extract = {
-        "mode": crawl.extract_mode,
+        "executor": crawl.executor,
+        "mode": agent_mode,
         "schema": crawl.extract_schema,
+        "prompt": crawl.extract_prompt,
         "delay_ms": crawl.delay_ms,
         # Render + document-handling knobs the fleet agent's shard executor honors:
         # render_mode picks HTTP vs warm-browser per page; ocr_mode governs the
@@ -858,8 +1025,10 @@ async def _pump(crawl_id: int) -> None:
         if not crawl or crawl.is_terminal:
             return
         if crawl.status == "stopping":
-            # Draining — cut nothing more; finalize once in-flight hits zero.
+            # Draining — cut nothing more; finalize once in-flight hits zero. The AI
+            # pass counts as in-flight: it is still writing this crawl's records.
             inflight = int(await r.get(_k_inflight(crawl_id)) or 0)
+            inflight += int(await r.get(_k_ai_inflight(crawl_id)) or 0)
             if inflight <= 0:
                 await _finalize(db, crawl, "cancelled")
             return
@@ -923,10 +1092,14 @@ async def _pump(crawl_id: int) -> None:
                 )
             )
 
-        # Convergence: nothing queued, nothing running → done.
+        # Convergence: nothing queued, nothing running, no AI pass still writing
+        # records → done. Without the ai_inflight term an ai-executor crawl
+        # finalizes (and reconciles) while its background extraction is mid-flight,
+        # banking a records_total that misses whatever landed after.
         inflight = int(await r.get(_k_inflight(crawl_id)) or 0)
+        ai_inflight = int(await r.get(_k_ai_inflight(crawl_id)) or 0)
         frontier_len = await r.zcard(_k_frontier(crawl_id))
-        if dispatched == 0 and inflight <= 0 and frontier_len == 0:
+        if dispatched == 0 and inflight <= 0 and ai_inflight <= 0 and frontier_len == 0:
             await _finalize(db, crawl, "completed")
         else:
             await db.commit()
@@ -1039,7 +1212,7 @@ async def _finalize(db, crawl: CrawlJob, status: str) -> None:
     _emit_crawl_run_event(crawl, "ended")
     r = get_redis()
     for k in (_k_frontier(crawl.id), _k_visited(crawl.id), _k_inflight(crawl.id),
-              _k_shard_progress(crawl.id)):
+              _k_ai_inflight(crawl.id), _k_shard_progress(crawl.id)):
         try:
             await r.delete(k)
         except Exception:
@@ -1056,6 +1229,190 @@ async def _finalize(db, crawl: CrawlJob, status: str) -> None:
     _evt = {"completed": "crawl_completed", "failed": "crawl_failed"}.get(status)
     if _evt:
         asyncio.create_task(_emit_crawl_event(crawl.id, _evt))
+
+
+# --------------------------------------------------------------------------- #
+# AI extract lane (executor="ai")                                              #
+# --------------------------------------------------------------------------- #
+# The fleet fetches clean page content the normal way (markdown rows); the AI read
+# runs HERE, on the coordinator, through the OWNER'S OWN provider (Settings → AI,
+# or a BYO-key agent) — there is nothing to meter and nothing to bill, so unlike
+# the cloud there is no reason to push the call out to the agents. Each page = one
+# completion against the crawl's extract_prompt -> structured records.
+#
+# It runs OFF the shard-completion path (a background task per shard) so a slow
+# provider never stalls the fleet; a per-crawl ai_inflight counter holds finalize
+# until every shard's pass has drained.
+_AI_EXTRACT_CONCURRENCY = 4          # bounded provider calls per shard
+_AI_EXTRACT_MAX_CHARS = 24000        # page content sent to the model (token guard)
+_AI_EXTRACT_MAX_OUTPUT = 1200
+_AI_EXTRACT_SYSTEM = (
+    "You extract structured data from ONE web page's clean text content. "
+    "Return ONLY a JSON array of record objects — no prose, no markdown, no code fence. "
+    "Each object is one record that matches the user's extraction instruction. "
+    "If the page holds a single logical record, return a one-element array. "
+    "If nothing on the page matches the instruction, return []."
+)
+
+
+async def ai_extraction_available() -> bool:
+    """Whether an AI read can actually run: an active provider row (Settings → AI)
+    or a connected agent advertising its own keys (BYO).
+
+    Checked at CREATION so an ai-executor crawl with no provider is refused up
+    front instead of fetching a whole site and then keeping the markdown — the
+    per-page failure path is a silent no-op that looks like the AI simply found
+    nothing. Never raises: a lookup problem reads as "available" so the crawl is
+    attempted and fails loudly per page rather than being wrongly blocked."""
+    try:
+        from services.local_ai import has_local_provider
+        if await has_local_provider():
+            return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[{DRAGNET_NAME}] local AI provider probe failed: {e}")
+        return True
+    try:
+        from services.byo_ai_router import online_byo_agents
+        return bool(await online_byo_agents())
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[{DRAGNET_NAME}] BYO agent probe failed: {e}")
+        return True
+
+
+def _parse_ai_records(text, url: str) -> list:
+    """Lenient parse of a model reply into a list of record dicts, each tagged with
+    its source URL. Tolerates a bare object, an array, an array wrapped in prose or
+    a ```json fence, or an already-parsed list/dict. Returns [] on anything
+    unparseable — one unusable reply costs that page its records, never the shard."""
+    parsed = None
+    if isinstance(text, (list, dict)):
+        parsed = text
+    elif isinstance(text, str):
+        s = text.strip()
+        if s.startswith("```"):
+            s = re.sub(r"^```[a-zA-Z]*\s*", "", s)
+            s = re.sub(r"\s*```$", "", s).strip()
+        try:
+            parsed = json.loads(s)
+        except Exception:
+            # Grab the first [...] or {...} span.
+            for opener, closer in (("[", "]"), ("{", "}")):
+                i, j = s.find(opener), s.rfind(closer)
+                if 0 <= i < j:
+                    try:
+                        parsed = json.loads(s[i:j + 1])
+                        break
+                    except Exception:
+                        continue
+    if parsed is None:
+        return []
+    rows = parsed if isinstance(parsed, list) else [parsed]
+    out = []
+    for row in rows:
+        if isinstance(row, dict):
+            row.setdefault("_source_url", url)
+            out.append(row)
+    return out
+
+
+async def _ai_extract_one(
+    prompt: str,
+    page: dict,
+    crawl_id: Optional[int] = None,
+    task_id: Optional[int] = None,
+    idx: Optional[int] = None,
+) -> Optional[dict]:
+    """AI-extract a single page. Returns {"records": [...]} on success, or None to
+    keep the page's original markdown row (empty page / call failure) — a page is
+    never lost to a provider hiccup. ``crawl_id``/``task_id``/``idx`` are telemetry
+    only: they tag the failure log with the shard + page the call belongs to."""
+    md = (page or {}).get("markdown") or ""
+    url = (page or {}).get("url") or ""
+    if not md.strip():
+        return None
+    from services import agent_brain
+
+    _tag = f"crawl {crawl_id} shard {task_id} page {idx}"
+    try:
+        text, _in_tok, _out_tok, _model = await agent_brain.call_ai(
+            messages=[{"role": "user",
+                       "content": f"URL: {url}\n\nEXTRACTION INSTRUCTION: {prompt}\n\n"
+                                  f"PAGE CONTENT:\n{md[:_AI_EXTRACT_MAX_CHARS]}"}],
+            system_prompt=_AI_EXTRACT_SYSTEM,
+            max_tokens=_AI_EXTRACT_MAX_OUTPUT,
+            purpose="crawl_extract",
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[{DRAGNET_NAME}] AI extract call failed ({_tag}) for {url}: {e}")
+        return None
+    records = _parse_ai_records(text, url)
+    # The records REPLACE the page's markdown row, so anything the row carried is
+    # gone unless it rides along: `content_kind`/`depth` keep a document- or
+    # browser-lane page tagged as such, and the thumbnail keeps a warm-rendered
+    # page's image in the results table (a browser-lane crawl shows it whenever the
+    # AI reader is off). Thumbnails arrive ALREADY rewritten from inline base64 to a
+    # served path (attach_page_thumbnails runs at shard completion, before this
+    # background pass), so carry whichever key the row actually holds. setdefault
+    # throughout — a model that extracted a field of the same name still wins.
+    for rec in records:
+        rec.setdefault("content_kind", (page or {}).get("content_kind", "html"))
+        if (page or {}).get("depth") is not None:
+            rec.setdefault("depth", page["depth"])
+        for _shot_key in ("screenshot", "screenshot_b64"):
+            if (page or {}).get(_shot_key):
+                rec.setdefault(_shot_key, page[_shot_key])
+    return {"records": records}
+
+
+async def _ai_extract_shard(crawl_id: int, task_id: int, prompt: str) -> None:
+    """Background per-shard AI extraction: replace the shard task's markdown rows
+    with AI-extracted records (keeping the markdown row for any page the AI could
+    not extract, so nothing is lost). Decrements ai_inflight and re-pumps, so a
+    crawl whose fetch shards are all done finalizes once the AI pass drains."""
+    r = get_redis()
+    try:
+        async with AsyncSessionLocal() as db:
+            task = await db.get(AutomationTask, task_id)
+            if not task or not isinstance(task.result_data, dict):
+                return
+            pages = task.result_data.get("extracted_data") or []
+            if not pages:
+                return
+            sem = asyncio.Semaphore(_AI_EXTRACT_CONCURRENCY)
+
+            async def _one(i: int, page: dict) -> list:
+                async with sem:
+                    out = await _ai_extract_one(prompt, page, crawl_id, task_id, i)
+                if out is None:
+                    return [page]                       # keep markdown; nothing extracted
+                return out.get("records") or [page]
+
+            groups = await asyncio.gather(
+                *[_one(i, p) for i, p in enumerate(pages)], return_exceptions=True
+            )
+            new_rows: list = []
+            for g in groups:
+                if isinstance(g, list):
+                    new_rows.extend(g)
+            rd = dict(task.result_data)
+            rd["extracted_data"] = new_rows
+            rd["ai_extracted"] = True
+            task.result_data = rd
+            await db.commit()
+            logger.info(f"[{DRAGNET_NAME}] crawl {crawl_id} shard {task_id}: AI-extracted "
+                        f"{len(new_rows)} record(s) from {len(pages)} page(s)")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[{DRAGNET_NAME}] AI extract shard {task_id} failed: {e}")
+    finally:
+        try:
+            await r.decr(_k_ai_inflight(crawl_id))
+        except Exception:
+            pass
+    try:
+        async with _shard_phase_lock(int(crawl_id)):
+            await _pump(crawl_id)
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -1493,6 +1850,26 @@ async def on_shard_complete(task: AutomationTask, result_data: Optional[dict]) -
                         f"[{DRAGNET_NAME}] crawl {crawl_id}: host blocking — backed off "
                         f"(agent={_blocked_agent}, host={seed_reg} "
                         f"cooldown={_HOST_COOLDOWN_S}s+)")
+
+            # AI executor: this shard fetched clean page content on whichever lane
+            # the crawl asked for (pure HTTP, warm browser, or the document lane) —
+            # the AI read is lane-agnostic, it consumes the markdown each of them
+            # produced. Dispatched DETACHED so a slow provider never holds the
+            # completion path, with ai_inflight bumped first so convergence waits
+            # for it. `ai_extracted` is the agent's marker that it already did the
+            # pass itself; self-hosted agents have no provider of their own, so it
+            # is normally absent — honoring it keeps a future on-agent path from
+            # being extracted twice.
+            if (crawl.executor == "ai" and crawl.extract_prompt and pages
+                    and not rd.get("ai_extracted")):
+                try:
+                    await r.incr(_k_ai_inflight(crawl_id))
+                    await r.expire(_k_ai_inflight(crawl_id), _KEY_TTL)
+                    asyncio.create_task(_ai_extract_shard(
+                        crawl_id, task.id, crawl.extract_prompt))
+                except Exception as _aie:  # noqa: BLE001
+                    logger.warning(f"[{DRAGNET_NAME}] AI extract dispatch failed "
+                                   f"for shard {task.id}: {_aie}")
     except Exception as e:
         logger.warning(f"[{DRAGNET_NAME}] on_shard_complete failed for task {task.id}: {e}")
     # Pump outside the try so a fresh session drives the next wave / finalize.
@@ -1593,6 +1970,7 @@ async def _mint_crawl_workflow(db, crawl: CrawlJob) -> AutomationWorkflow:
             "id": "1",
             "type": CRAWL_STEP_TYPE,
             "config": {
+                "executor": crawl.executor,
                 "extract_mode": crawl.extract_mode,
                 "delay_ms": crawl.delay_ms,
             },
@@ -1611,8 +1989,10 @@ async def start_crawl(
     *,
     seed_url: str,
     name: Optional[str] = None,
+    executor: str = "regular",
     extract_mode: str = "markdown",
     extract_schema: Optional[dict] = None,
+    extract_prompt: Optional[str] = None,
     content_spec: Optional[dict] = None,
     render_mode: str = "auto",
     ocr_mode: str = "auto",
@@ -1649,6 +2029,27 @@ async def start_crawl(
     if not verdict.allowed:
         raise HTTPException(400, verdict.message or "Seed URL is not allowed.")
 
+    # AI EXECUTOR PRECONDITION. A self-hosted AI read runs on the OWNER'S provider,
+    # so with none configured every page's extraction fails and silently keeps its
+    # markdown — a whole site fetched to produce exactly what a regular crawl would
+    # have, with no error anywhere. Refuse up front instead.
+    executor = executor if executor in ("regular", "ai") else "regular"
+    extract_prompt = (extract_prompt or "").strip() or None
+    if executor == "ai":
+        if not extract_prompt:
+            raise HTTPException(
+                400,
+                "An AI crawl needs an extraction instruction — say what each page "
+                "should yield (e.g. 'the product name, price and SKU').",
+            )
+        if not await ai_extraction_available():
+            raise HTTPException(
+                409,
+                "No AI provider is configured, so the AI reader has nothing to run "
+                "on. Add one in Settings → AI (or connect an agent with its own "
+                "keys), or turn the AI reader off for a deterministic crawl.",
+            )
+
     # PERSONA OWNERSHIP + USABILITY, validated at CREATION. Without this a bad
     # persona id was accepted, queued, and only then died in the seeder with
     # "missing or inactive". Refusing here turns that into an immediate, actionable
@@ -1671,12 +2072,14 @@ async def start_crawl(
             # before fan-out. Rejecting here would block the very case the login
             # workflow exists to serve (attach it, start the crawl, never think about
             # sessions again). Only a persona that cannot self-login is a dead end.
-            if not getattr(_persona, "login_workflow_id", None):
+            from services.persona_login import has_login_credentials as _has_creds
+            if not (getattr(_persona, "login_workflow_id", None) or _has_creds(_persona)):
                 raise HTTPException(
                     422,
-                    "That persona has no live login session and no login workflow to "
-                    "establish one. Record or attach a login workflow for it (the crawl "
-                    "will then sign in automatically), then start the crawl.",
+                    "That persona has no live login session, no stored credentials and no "
+                    "login workflow to establish one. Add its username and password (the "
+                    "crawl signs in with them and saves the flow for next time), or record "
+                    "a login workflow, then start the crawl.",
                 )
             logger.info(
                 f"[{DRAGNET_NAME}] persona {_persona.id} has no warm session yet; the "
@@ -1725,8 +2128,10 @@ async def start_crawl(
         max_depth=int(eff["max_depth"]),
         same_domain=bool(same_domain),
         allow_subdomains=bool(allow_subdomains),
+        executor=executor,
         extract_mode=extract_mode if extract_mode in ("markdown", "schema") else "markdown",
         extract_schema=extract_schema,
+        extract_prompt=extract_prompt,
         content_spec=(content_spec if isinstance(content_spec, dict) else None),
         render_mode=render_mode if render_mode in ("auto", "http", "browser") else "auto",
         ocr_mode=ocr_mode if ocr_mode in ("auto", "off", "force") else "auto",

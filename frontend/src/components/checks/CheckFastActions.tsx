@@ -13,7 +13,7 @@ import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { triggersApi, automationApi, recipientsApi } from '../../api/endpoints';
-import { buildNotifyOnChange, buildWorkflowOnChange, buildAISessionOnChange } from '../../utils/blockChainBuilder';
+import { buildNotifyOnChange, buildWorkflowOnChange, buildAISessionOnChange, buildAITaskOnChange } from '../../utils/blockChainBuilder';
 import { SectionHead } from '../common/SectionHead';
 import { Checkbox, Select } from '../ui';
 
@@ -57,6 +57,8 @@ export const CheckFastActions: React.FC<CheckFastActionsProps> = ({ targetId, ta
   const [selectedRecipients, setSelectedRecipients] = useState<string[]>([]);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<number | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null);
+  const [aiMode, setAiMode] = useState<'prompt' | 'saved'>('prompt');
+  const [aiPrompt, setAiPrompt] = useState('');
   const [webhookUrl, setWebhookUrl] = useState('');
 
   const toggleChannel = (key: string) => {
@@ -93,6 +95,14 @@ export const CheckFastActions: React.FC<CheckFastActionsProps> = ({ targetId, ta
   };
 
   const handleAI = () => {
+    if (aiMode === 'prompt') {
+      if (!aiPrompt.trim()) return;
+      // Explicit cooldown (not just the cloud default) so the same automation
+      // behaves identically on self-host, where there is no implicit default.
+      const { payload } = buildAITaskOnChange(targetId, aiPrompt.trim(), { cooldownMinutes: 10 });
+      createTrigger(t('Wake AI agent on {{host}} change', { host: new URL(targetUrl).hostname }), payload);
+      return;
+    }
     if (!selectedSessionId) return;
     const sess = sessions.find(s => s.id === selectedSessionId);
     const { payload } = buildAISessionOnChange(targetId, selectedSessionId, sess?.name || t('AI Session'));
@@ -192,21 +202,46 @@ export const CheckFastActions: React.FC<CheckFastActionsProps> = ({ targetId, ta
     {
       id: 'ai',
       icon: SparklesIcon,
-      label: t('Run AI agent'),
-      description: t('Start an AI session when content changes'),
+      label: t('Wake AI agent'),
+      description: t('An AI agent opens the page and works a task when content changes'),
       active: hasAI,
       form: (
         <div className="space-y-3">
-          <Select<string>
-            value={selectedSessionId ? String(selectedSessionId) : ''}
-            onChange={(v) => setSelectedSessionId(v ? Number(v) : null)}
-            placeholder={t('Select an AI session...')}
-            className="w-full"
-            options={sessions.map(s => ({ value: String(s.id), label: `${s.name} — ${s.mode}` }))}
-          />
-          <button onClick={handleAI} disabled={saving || !selectedSessionId} className={clsx(
+          <div className="flex gap-1 bg-hover rounded-lg p-0.5 w-fit">
+            <button type="button" onClick={() => setAiMode('prompt')} className={clsx(
+              'px-2.5 py-1 rounded-[14px] text-[11px] font-medium transition-colors',
+              aiMode === 'prompt' ? 'bg-surface text-ink shadow-sm' : 'text-secondary',
+            )}>{t('Task prompt')}</button>
+            <button type="button" onClick={() => setAiMode('saved')} className={clsx(
+              'px-2.5 py-1 rounded-[14px] text-[11px] font-medium transition-colors',
+              aiMode === 'saved' ? 'bg-surface text-ink shadow-sm' : 'text-secondary',
+            )}>{t('Saved session')}</button>
+          </div>
+          {aiMode === 'prompt' ? (
+            <>
+              <textarea
+                value={aiPrompt}
+                onChange={e => setAiPrompt(e.target.value)}
+                placeholder={t('e.g. Check what changed and whether the price dropped below $500, then summarize it')}
+                rows={3}
+                className="w-full px-3 py-2.5 bg-surface border border-border rounded-xl text-sm text-ink resize-none focus:outline-none focus:border-ink/30 focus:ring-2 focus:ring-ink/5 placeholder:text-tertiary"
+              />
+              <p className="text-[11px] text-tertiary">
+                {t('The agent starts on the monitored page with the change context (diff and extracted values). Wakes are spaced at least 10 minutes apart.')}
+              </p>
+            </>
+          ) : (
+            <Select<string>
+              value={selectedSessionId ? String(selectedSessionId) : ''}
+              onChange={(v) => setSelectedSessionId(v ? Number(v) : null)}
+              placeholder={t('Select an AI session...')}
+              className="w-full"
+              options={sessions.map(s => ({ value: String(s.id), label: `${s.name} — ${s.mode}` }))}
+            />
+          )}
+          <button onClick={handleAI} disabled={saving || (aiMode === 'prompt' ? !aiPrompt.trim() : !selectedSessionId)} className={clsx(
             'w-full px-4 py-2.5 text-sm font-medium rounded-xl transition-colors',
-            saving || !selectedSessionId ? 'bg-hover text-tertiary' : 'bg-accent-strong text-accent-on hover:bg-accent-strong/90',
+            saving || (aiMode === 'prompt' ? !aiPrompt.trim() : !selectedSessionId) ? 'bg-hover text-tertiary' : 'bg-accent-strong text-accent-on hover:bg-accent-strong/90',
           )}>{saving ? t('Creating...') : t('Create')}</button>
         </div>
       ),

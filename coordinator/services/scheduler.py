@@ -478,6 +478,20 @@ async def _dispatch_one_scheduled(workflow_id: int, now: datetime, sem: asyncio.
             workflow = await db.get(AutomationWorkflow, workflow_id)
             if workflow is None:
                 return False
+            # INTERVAL-kind plain workflows are the agent-assignment lane's job
+            # (assign_workflows -> the agent's TimeSlotScheduler runs them by
+            # interval + offset). Dispatching them HERE as well ran every
+            # interval schedule TWICE — once per lane. Calendar kinds
+            # (daily/weekly) stay here: the agent scheduler has no time-of-day
+            # or timezone. AI workflows always dispatch here (agents never
+            # self-run AI). Mirrors the cloud central scheduler's split.
+            try:
+                from services.workflow_router import WorkflowRouter
+                _kind = (getattr(workflow, "schedule_kind", None) or "interval").lower()
+                if _kind not in ("daily", "weekly") and not WorkflowRouter.requires_ai(workflow):
+                    return False
+            except Exception:  # noqa: BLE001 — routing check must never block dispatch
+                pass
             try:
                 # target_id=None: a standalone scheduled workflow is not tied to a
                 # monitored target. AutomationTask.target_id is nullable for exactly

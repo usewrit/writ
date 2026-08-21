@@ -16,6 +16,7 @@ import {
   CheckIcon,
   MinusIcon,
   LockClosedIcon,
+  KeyIcon,
   ExclamationTriangleIcon,
   CursorArrowRaysIcon,
   SignalIcon,
@@ -188,6 +189,10 @@ const WorkflowRow: React.FC<WorkflowRowProps> = React.memo(({
   // Origin marker (cloud | mirrored | local:<agent>) added by the P1/coordinator
   // merged list; treat missing/unknown as plain cloud (unbadged).
   const origin = (w as any).origin as string | undefined;
+  // Reverse persona link: this workflow IS how one or more personas sign in.
+  // Only the list endpoint stamps it — read defensively like `origin`.
+  const loginPersonas = (((w as any).login_personas || []) as Array<{ id: number; name: string }>)
+    .filter((p) => p && p.name);
 
   return (
     <div
@@ -286,6 +291,15 @@ const WorkflowRow: React.FC<WorkflowRowProps> = React.memo(({
               {cleanTitle(w.name)}
             </span>
           </div>
+          {loginPersonas.length > 0 && (
+            <span
+              className="shrink-0 inline-flex items-center gap-0.5 text-[9px] font-semibold uppercase tracking-wide px-1 py-[1px] rounded bg-chrome text-secondary"
+              title={t('Signs in {{names}}', { names: loginPersonas.map((p) => p.name).join(', ') })}
+            >
+              <KeyIcon className="h-2.5 w-2.5" />
+              {t('Login')}
+            </span>
+          )}
           {monetized && (
             <span className="shrink-0 text-[9px] font-semibold uppercase tracking-wide px-1 py-[1px] rounded bg-success-bg text-success-fg">
               {t('Selling')}

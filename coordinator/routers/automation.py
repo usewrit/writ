@@ -154,6 +154,16 @@ class WorkflowCreate(BaseModel):
     streaming_config: Optional[dict] = Field(None, description="Streaming mode: handlers, advanced_script, openai_compat")
     # Callable functions (step-groups / script / extraction) created from recorded steps
     functions: Optional[List[dict]] = Field(None, description="Callable functions: [{name, type, description, step_range, step_indices, input_variables, output_fields, ...}]")
+    # RECORD-TIME SESSION PIN: the recording browser's auth state (cookies /
+    # storage / fingerprint), extracted by the recorder at stop and posted back
+    # with the save so replays seed from it (captcha clearance, cookie-wall
+    # consent, logins survive into runs). Sanitized + encrypted at rest; NEVER
+    # exposed back through the API. A linked persona's warm session always
+    # takes precedence over this seed at run time.
+    recorded_session: Optional[dict] = Field(
+        None,
+        description="Auth session captured from the recording browser {cookies, localStorage, sessionStorage, headers, fingerprint} — encrypted at rest, replay seed when no persona is linked",
+    )
 
 
 class WorkflowUpdate(BaseModel):
@@ -182,9 +192,16 @@ class WorkflowUpdate(BaseModel):
     schedule_tz: Optional[str] = None
     # Agent trust restriction
     trusted_agents_only: Optional[bool] = None
+    # Opt-in exposure as a dedicated run_<name> tool on the MCP server. Default
+    # OFF at creation; the derived tool list is capped server-side.
+    mcp_tool_pinned: Optional[bool] = None
     # Default sign-in identity. Explicit null DETACHES (distinguished from "absent"
     # via model_fields_set in the handler); an id must reference an existing persona.
     default_persona_id: Optional[int] = None
+    # Record-time session pin. Explicit null CLEARS the pinned session; a dict
+    # re-pins (e.g. after a re-record). Absent leaves it untouched — same
+    # model_fields_set convention as default_persona_id.
+    recorded_session: Optional[dict] = None
     # Session persistence
     session_persistence: Optional[bool] = None
     session_ttl_seconds: Optional[int] = Field(None, gt=0)
@@ -259,6 +276,8 @@ class WorkflowResponse(BaseModel):
     last_captcha_at: Optional[datetime]
     # Agent trust restriction
     trusted_agents_only: bool = False
+    # Pinned as its own run_<name> tool on the MCP server (opt-in).
+    mcp_tool_pinned: bool = False
     # Execution stats
     estimated_duration_ms: Optional[int] = None
     # Session persistence
@@ -267,6 +286,9 @@ class WorkflowResponse(BaseModel):
     login_url_patterns: Optional[List[str]] = None
     relogin_max_retries: int = 1
     has_saved_session: bool = False
+    # Record-time pinned session (blob NEVER exposed — presence + freshness only)
+    has_recorded_session: bool = False
+    recorded_session_captured_at: Optional[datetime] = None
     session_agent_id: Optional[str] = None
     # Streaming
     streaming_config: Optional[dict] = None
@@ -303,6 +325,10 @@ class WorkflowResponse(BaseModel):
     default_persona_id: Optional[int] = None
     has_login: bool = False  # True if the workflow authenticates (login/2FA detected) — gates persona UI
     has_twofa: bool = False  # True if a step enters a one-time code — runs need a persona with a 2FA method
+    # REVERSE persona link: personas whose login_workflow_id IS this workflow —
+    # this row is how those identities sign in ([{id, name}]). Only the LIST
+    # endpoint stamps it; other callers omit it (defaults []).
+    login_personas: List[dict] = []
     # Marketplace install PROXY (read-only mirror of an install). When
     # is_installed is True the recipe logic (steps/raw_replay/function code) is
     # OMITTED from the response — only the manifest + sanitized signatures are returned.
@@ -311,6 +337,14 @@ class WorkflowResponse(BaseModel):
     creator_name: Optional[str] = None
     installed_status: Optional[str] = None
     data_manifest: Optional[dict] = None
+
+
+class _SkipPersonaSessionSave(Exception):
+    """Control-flow marker: the harvested jar proves no login, so skip the write-back.
+
+    Raised (and caught) inside the completion handler only — the RUN succeeded, we
+    simply declined to overwrite the persona's session with an anonymous one.
+    """
 
 
 def _workflow_has_login(steps, form_data, credentials_encrypted) -> bool:
@@ -473,24 +507,48 @@ def _fold_vcard_into_credentials(credentials_encrypted, trigger_context):
         return credentials_encrypted
 
 
-def _deep_find_placeholders(obj, seen: set, found: list, context_label: str = ""):
+# Placeholder namespaces that are NOT run inputs: each is resolved from its own
+# channel at execution — `secret:`/`vault:` from the sealed credential blob,
+# `extracted:` from a previous step's output, `cookie:` from the live jar,
+# `file:` from the bound file slot. Surfacing them as plain inputs made the run
+# modal ask for the SAME value twice: `{{secret:password}}` appeared as a text
+# field keyed `secret:password` AND again as the client-detected unlinked secret
+# `__secret_password`. Only the secret channel may prompt, and the run modal
+# already owns that path.
+_RESERVED_PLACEHOLDER_PREFIXES = ("secret:", "vault:", "extracted:", "cookie:", "file:")
+
+
+def _is_reserved_placeholder(key: str) -> bool:
+    """True for a channel-resolved placeholder that must never be prompted as an input."""
+    k = (key or "").strip().lower()
+    return k.startswith(_RESERVED_PLACEHOLDER_PREFIXES)
+
+
+def _deep_find_placeholders(
+    obj, seen: set, found: list, context_label: str = "", include_channel_refs: bool = False
+):
     """Recursively find {{key}} patterns in any string value within a dict/list."""
     import re
     if isinstance(obj, str):
         for m in re.finditer(r"\{\{([^}]+)\}\}", obj):
             key = m.group(1)
+            # Channel-resolved refs are not user inputs — see the prefix list above.
+            if not include_channel_refs and _is_reserved_placeholder(key):
+                continue
             if key not in seen:
                 seen.add(key)
                 found.append({"key": key, "label": context_label or key, "field_type": None})
     elif isinstance(obj, dict):
         for k, v in obj.items():
-            _deep_find_placeholders(v, seen, found, context_label)
+            _deep_find_placeholders(v, seen, found, context_label, include_channel_refs)
     elif isinstance(obj, list):
         for item in obj:
-            _deep_find_placeholders(item, seen, found, context_label)
+            _deep_find_placeholders(item, seen, found, context_label, include_channel_refs)
 
 
-def _extract_placeholders(steps: list, form_data: dict = None) -> list:
+def _extract_placeholders(
+    steps: list, form_data: dict = None, include_channel_refs: bool = False
+) -> list:
     """Extract {{key}} placeholders from workflow steps and form_data keys.
 
     Step structure varies:
@@ -503,7 +561,13 @@ def _extract_placeholders(steps: list, form_data: dict = None) -> list:
     # 1. form_data keys are declared inputs (skip __secret_ keys)
     if form_data and isinstance(form_data, dict):
         for key in form_data:
-            if not key.startswith("__") and key not in seen:
+            # `__secret_*` is the sealed-value convention; a `secret:`-style key is a
+            # channel ref the dispatcher routes into credentials, not an input.
+            if key.startswith("__") or (
+                not include_channel_refs and _is_reserved_placeholder(key)
+            ):
+                continue
+            if key not in seen:
                 seen.add(key)
                 found.append({"key": key, "label": key.replace("_", " "), "field_type": None})
 
@@ -516,12 +580,14 @@ def _extract_placeholders(steps: list, form_data: dict = None) -> list:
         label = opts.get("label") or opts.get("field_name") or step.get("description") or ""
 
         # Deep scan the entire config for {{key}} patterns
-        _deep_find_placeholders(config, seen, found, label)
+        _deep_find_placeholders(config, seen, found, label, include_channel_refs)
         # Also scan step-level value (older format)
-        _deep_find_placeholders(step.get("value"), seen, found, label)
+        _deep_find_placeholders(step.get("value"), seen, found, label, include_channel_refs)
 
         # Check options.data_key explicitly
         dk = opts.get("data_key")
+        if dk and not include_channel_refs and _is_reserved_placeholder(dk):
+            dk = None
         if dk and dk not in seen:
             seen.add(dk)
             found.append({
@@ -790,6 +856,7 @@ def workflow_to_response(
     preferred_affinity=None,
     summary: bool = False,
     secret_key_names=None,
+    login_personas=None,
 ) -> WorkflowResponse:
     """Convert workflow model to response.
 
@@ -896,6 +963,7 @@ def workflow_to_response(
         captcha_blocked=workflow.captcha_blocked,
         last_captcha_at=workflow.last_captcha_at,
         trusted_agents_only=workflow.trusted_agents_only,
+        mcp_tool_pinned=bool(getattr(workflow, "mcp_tool_pinned", False)),
         estimated_duration_ms=workflow.estimated_duration_ms,
         session_persistence=workflow.session_persistence,
         session_ttl_seconds=workflow.session_ttl_seconds,
@@ -905,6 +973,13 @@ def workflow_to_response(
         session_agent_id=session_agent_id,
         session_expires_at=session_expires_at,
         session_status=session_status,
+        # Read from the loaded instance dict (never lazy-load): pin/clear always
+        # set captured_at together with the blob, so captured_at alone answers
+        # "is one pinned" — the encrypted blob itself is NEVER read on any
+        # response path, and a partial-column list query cannot trigger
+        # MissingGreenlet here.
+        has_recorded_session=workflow.__dict__.get("recorded_session_captured_at") is not None,
+        recorded_session_captured_at=workflow.__dict__.get("recorded_session_captured_at"),
         streaming_config=_streaming_config,
         api_functions=workflow.api_functions,
         functions=_safe_functions,
@@ -919,6 +994,7 @@ def workflow_to_response(
         default_persona_id=getattr(workflow, 'default_persona_id', None),
         has_login=_workflow_has_login(workflow.steps, workflow.form_data, workflow.credentials_encrypted),
         has_twofa=any(isinstance(s, dict) and s.get("type") == "twofa" for s in (workflow.steps or [])),
+        login_personas=login_personas or [],
         is_installed=_inst,
         source_listing_id=_source_listing_id,
         creator_name=_creator_name,
@@ -1078,6 +1154,7 @@ async def list_workflows(
                 AutomationWorkflow.schedule_tz,
                 AutomationWorkflow.last_scheduled_at,
                 AutomationWorkflow.next_scheduled_at,
+                AutomationWorkflow.recorded_session_captured_at,
                 AutomationWorkflow.created_at,
                 AutomationWorkflow.updated_at,
                 AutomationWorkflow.last_run_at,
@@ -1089,6 +1166,7 @@ async def list_workflows(
                 AutomationWorkflow.captcha_blocked,
                 AutomationWorkflow.last_captcha_at,
                 AutomationWorkflow.trusted_agents_only,
+                AutomationWorkflow.mcp_tool_pinned,
                 AutomationWorkflow.estimated_duration_ms,
                 AutomationWorkflow.session_persistence,
                 AutomationWorkflow.session_ttl_seconds,
@@ -1180,12 +1258,33 @@ async def list_workflows(
 
         secret_names_by_id = await asyncio.to_thread(_decrypt_secret_names, _enc_by_id)
 
+    # PERSONA LOGIN linkage — one query for the whole page: which of these
+    # workflows are some persona's sign-in workflow. The link lives on the persona
+    # side (personas.login_workflow_id); without this reverse stamp the list shows
+    # a persona's login recording as an anonymous recorded workflow.
+    login_personas_by_wf: dict[int, list] = {}
+    if workflow_ids:
+        from models.persona import Persona
+        persona_rows = (
+            await db.execute(
+                select(Persona.id, Persona.name, Persona.login_workflow_id)
+                .where(
+                    Persona.login_workflow_id.in_(workflow_ids),
+                    Persona.is_active.is_(True),
+                )
+                .order_by(Persona.id)
+            )
+        ).all()
+        for p_id, p_name, wf_id in persona_rows:
+            login_personas_by_wf.setdefault(wf_id, []).append({"id": p_id, "name": p_name})
+
     return [
         workflow_to_response(
             w,
             last_tasks.get(w.id),
             summary=True,
             secret_key_names=secret_names_by_id.get(w.id, []),
+            login_personas=login_personas_by_wf.get(w.id),
         )
         for w in workflows
     ]
@@ -1375,6 +1474,14 @@ async def create_workflow(
     # Feature #2: lift any advanced_script-step declared functions into
     # workflow.functions so MCP / Managed-API / output-manifest pick them up.
     _sync_advanced_script_functions(workflow)
+
+    # RECORD-TIME SESSION PIN: the recording browser's auth state rides the save
+    # payload; sanitize + encrypt it onto the row so replays seed from it
+    # (captcha clearance / cookie consent / logins earned while recording).
+    if request.recorded_session:
+        from services.recorded_session_service import RecordedSessionService
+        if RecordedSessionService.pin(workflow, request.recorded_session):
+            logger.info(f"Pinned recorded session to new workflow '{request.name}'")
 
     db.add(workflow)
     await db.commit()
@@ -1756,6 +1863,16 @@ async def update_workflow(
                 )
         workflow.default_persona_id = request.default_persona_id
 
+    # Record-time session pin: explicit null clears, a dict re-pins (re-record),
+    # absent leaves it untouched — same model_fields_set convention as the
+    # persona attach/detach just above.
+    if "recorded_session" in request.model_fields_set:
+        from services.recorded_session_service import RecordedSessionService
+        if request.recorded_session is None:
+            RecordedSessionService.clear(workflow)
+        elif RecordedSessionService.pin(workflow, request.recorded_session):
+            logger.info(f"Re-pinned recorded session on workflow {workflow.id}")
+
     # Handle schedule settings (structured recurrence, SPEC §2/§3).
     from services.schedule_recurrence import (
         normalize_schedule,
@@ -1811,6 +1928,8 @@ async def update_workflow(
 
     if request.trusted_agents_only is not None:
         workflow.trusted_agents_only = request.trusted_agents_only
+    if request.mcp_tool_pinned is not None:
+        workflow.mcp_tool_pinned = request.mcp_tool_pinned
     if request.session_persistence is not None:
         workflow.session_persistence = request.session_persistence
     if request.session_ttl_seconds is not None:
@@ -2101,6 +2220,13 @@ async def get_pending_task(
 
     # Self-host: single-user, no marketplace/consumer runs.
     _consumer_recipe = False
+
+    if _poll_session_state is None:
+        # RECORD-TIME SEED (lowest precedence) for polled desktop runs: the
+        # session captured off the recording browser (captcha clearance,
+        # cookie consent, logins).
+        from services.recorded_session_service import RecordedSessionService
+        _poll_session_state = RecordedSessionService.load(workflow)
 
     _task_steps = _strip_recipe_metadata(workflow.steps) if _consumer_recipe else workflow.steps
     _task_raw_replay = _strip_recipe_metadata(workflow.raw_replay) if _consumer_recipe else workflow.raw_replay
@@ -2485,6 +2611,25 @@ async def _process_task_completion(
 
     if result_data is not None:
         task.result_data = result_data
+        # DRAGNET: a crawl shard ships each browser-rendered page's thumbnail as
+        # inline base64. Move those into storage and rewrite each page/row to a
+        # served proxy path BEFORE this task's result_data is committed — the
+        # base64 must never persist into the crawl's result rows (kept lean, à la
+        # visual snapshots). The crawl-native THIN funnel (complete_shard_task)
+        # already does this; a shard that completes through THIS full funnel must
+        # produce the identical row shape. Offloaded to a thread (blocking storage
+        # puts); mutates result_data (== task.result_data) in place. Best-effort.
+        _crawl_id = (task.trigger_context or {}).get("_crawl_id")
+        if _crawl_id:
+            try:
+                from services import crawl_orchestrator
+                await asyncio.to_thread(
+                    crawl_orchestrator.attach_page_thumbnails, _crawl_id, result_data,
+                )
+            except Exception as _th_e:
+                logger.warning(
+                    f"[Dragnet] page-thumbnail reconcile failed for task {task.id}: {_th_e}"
+                )
     if error:
         task.error_message = str(error)[:2000]
     if screenshots:
@@ -2662,14 +2807,43 @@ async def _process_task_completion(
     if success and persona_id_used and auth_session:
         try:
             from services.persona_service import PersonaService
+            from services.persona_login import session_has_auth_material
             from models.persona import Persona
+            # ONLY BANK A SESSION THAT PROVES A LOGIN. `success` means the STEPS ran,
+            # not that the site authenticated us: a login whose form was rejected
+            # still ends holding the site's anonymous cookies. Saving those
+            # overwrites a good session AND stamps validation_status="valid"
+            # (PersonaService.save_session), so the persona reads healthy while every
+            # later run fetches signed-out pages. Dropping the jar leaves the previous
+            # session in place, which is never worse.
+            if not session_has_auth_material(auth_session):
+                logger.info(
+                    f"Task {task.id}: harvested session for persona {persona_id_used} "
+                    f"carries no auth material — not overwriting the stored session"
+                )
+                raise _SkipPersonaSessionSave()
             p = await db.get(Persona, persona_id_used)
             if p:
                 ttl = workflow.session_ttl_seconds if workflow else None
                 await PersonaService.save_session(db, p, auth_session, ttl_seconds=ttl)
                 logger.info(f"Saved warm session to persona {p.id} (task {task.id})")
+        except _SkipPersonaSessionSave:
+            pass  # Deliberate skip (anonymous jar) — already logged above.
         except Exception as p_e:
             logger.warning(f"Failed to save persona session for task {task.id}: {p_e}")
+
+    # Refresh the RECORD-pinned session so the replay seed stays fresh (captcha
+    # clearance and rotated cookies age out otherwise). Only when no persona
+    # handled this run (a linked persona owns the warm session then) and a
+    # snapshot is actually pinned (never auto-create one).
+    if success and auth_session and workflow \
+            and not persona_id_used and workflow.recorded_session_encrypted:
+        try:
+            from services.recorded_session_service import RecordedSessionService
+            if RecordedSessionService.pin(workflow, auth_session):
+                logger.info(f"Refreshed recorded session on workflow {workflow.id} (task {task.id})")
+        except Exception as rs_e:
+            logger.warning(f"Failed to refresh recorded session for task {task.id}: {rs_e}")
 
     await db.commit()
     await db.refresh(task)
@@ -4348,13 +4522,39 @@ async def _dispatch_to_recorder_or_queue(
                     et = 'auto'
             tk = None
             ds = None
-            if rec:
+            # A persona's LOGIN run must start COLD. Restoring the persona's stale
+            # session poisons the sign-in it is trying to repair: the login page's
+            # CSRF token gets minted against the dead session, the POST comes back
+            # to the form with no error rendered, the run reports SUCCESS, and the
+            # persona banks the site's ANONYMOUS cookies — after which every
+            # authenticated crawl quietly returns signed-out pages. Measured on
+            # grafikart.fr in the cloud edition, where this same guard fixed it.
+            #
+            # Cold means EVERY seed, not just the persona's: the per-workflow
+            # affinity blob and the record-time seed are stale sessions in exactly
+            # the same way. `_persona_login` is stamped by services.persona_login,
+            # so only the sign-in run itself starts cold — ordinary persona runs
+            # still reuse the warm session, which is the whole point of having one.
+            _is_persona_login_run = bool((trigger_context or {}).get("_persona_login"))
+            if rec and _is_persona_login_run:
+                logger.info(
+                    f"Persona {persona_id or '?'}: login run — starting COLD "
+                    f"(restoring any prior session breaks the sign-in's CSRF token)"
+                )
+            elif rec:
                 # A persona owns its warm session (identity-scoped, shared across
                 # workflows); it takes precedence over per-workflow+agent affinity.
                 if persona_session is not None:
                     ds = persona_session
                 else:
                     ds = session_state if rec['agent_id'] == preferred_agent_id else None
+                    if ds is None:
+                        # RECORD-TIME SEED (lowest precedence): the session
+                        # captured from the recording browser — captcha
+                        # clearance / cookie consent / logins earned while
+                        # recording.
+                        from services.recorded_session_service import RecordedSessionService
+                        ds = RecordedSessionService.load(workflow)
                 tk = AutomationTask(
                     target_id=target_id,
                     workflow_id=workflow.id,
@@ -4889,11 +5089,11 @@ async def _load_workflow_for_data(db: AsyncSession, workflow_id: int, _api_key: 
     return wf
 
 
-async def _scan_workflow_data_tasks(db: AsyncSession, workflow_id: int, *, workflow=None):
-    """Most-recent runs of a workflow that produced a real extracted_data value,
-    bounded by _DATA_SCAN_CAP. Returns (tasks, truncated). No row locks needed
-    for DELETE's in-transaction uid resolution — the coordinator is a
-    single-writer SQLite deployment.
+def _data_scan_filters(workflow_id: int, workflow=None) -> list:
+    """The WHERE clauses defining a workflow's data-bearing runs — the single
+    source of truth for BOTH the full scan below and the fastpath's stub/window
+    queries (services/dataset_fastpath.py), so the two can never disagree about
+    which runs a dataset is made of.
 
     SUBSYSTEM SCOPING. Crawl pages and workflow runs share automation_tasks, and
     ``automation_workflows.id`` is a bare SQLite rowid alias — deleting a crawl frees
@@ -4902,21 +5102,34 @@ async def _scan_workflow_data_tasks(db: AsyncSession, workflow_id: int, *, workf
     Pass ``workflow`` so the scan is pinned to the right side: a crawl dataset reads
     only shard runs, a workflow reads only its own. (Omitting it keeps the legacy
     id-only behaviour for callers that have no workflow row in hand.)"""
-    recency = func.coalesce(AutomationTask.completed_at, AutomationTask.created_at)
-    q = (
-        select(AutomationTask)
-        .where(AutomationTask.workflow_id == workflow_id)
-        .where(func.json_extract(AutomationTask.result_data, "$.extracted_data").isnot(None))
-        .order_by(recency.desc())
-        .limit(_DATA_SCAN_CAP)
-    )
+    clauses = [
+        AutomationTask.workflow_id == workflow_id,
+        func.json_extract(AutomationTask.result_data, "$.extracted_data").isnot(None),
+    ]
     if workflow is not None:
         # trigger_type is NOT NULL (defaults to on_change), so a plain != is exact.
-        q = q.where(
+        clauses.append(
             AutomationTask.trigger_type == CRAWL_TRIGGER_TYPE
             if _is_crawl_dataset(workflow)
             else AutomationTask.trigger_type != CRAWL_TRIGGER_TYPE
         )
+    return clauses
+
+
+async def _scan_workflow_data_tasks(db: AsyncSession, workflow_id: int, *, workflow=None):
+    """Most-recent runs of a workflow that produced a real extracted_data value,
+    bounded by _DATA_SCAN_CAP. Returns (tasks, truncated). No row locks needed
+    for DELETE's in-transaction uid resolution — the coordinator is a
+    single-writer SQLite deployment. The id tie-break keeps pagination
+    deterministic when several runs share a completion timestamp (and keeps this
+    ordering byte-identical to the fastpath's stub window)."""
+    recency = func.coalesce(AutomationTask.completed_at, AutomationTask.created_at)
+    q = (
+        select(AutomationTask)
+        .where(*_data_scan_filters(workflow_id, workflow))
+        .order_by(recency.desc(), AutomationTask.id.desc())
+        .limit(_DATA_SCAN_CAP)
+    )
     res = await db.execute(q)
     tasks = list(res.scalars().all())
     return tasks, len(tasks) >= _DATA_SCAN_CAP
@@ -4988,6 +5201,29 @@ async def get_workflow_data_facets(
         check_api_key_scope(_api_key, "workflows", "read", workflow_id)
     view = _validate_data_lens_params(view, run_id, collection)
     wf = await _load_workflow_for_data(db, workflow_id, _api_key)
+    if view == "all" and not include_inputs and not collection:
+        # Fastpath: exact for small windows; a heavy dataset gets facets over
+        # its NEWEST rows within a sample budget (`sampled: true`, `row_count`
+        # = rows faceted, `total_rows` = exact window total) instead of a
+        # whole-corpus load per request. Errors fall through to the full scan.
+        try:
+            from services import dataset_fastpath
+            fast = await dataset_fastpath.fast_facets(
+                db,
+                AutomationTask,
+                _data_scan_filters(workflow_id, wf),
+                _DATA_SCAN_CAP,
+                declared=_declared_output_fields(wf),
+                redactor=redact_result_data,
+                variant="red",
+                scope_id=wf.id,
+            )
+            return {"workflow_id": wf.id, **fast}
+        except Exception:
+            logger.warning(
+                "dataset facets fastpath failed for workflow %s; serving via full scan",
+                workflow_id, exc_info=True,
+            )
     tasks, truncated = await _scan_workflow_data_tasks(db, workflow_id, workflow=wf)
     if view == "all":
         columns, rows = edt.flatten(
@@ -5052,6 +5288,11 @@ async def get_workflow_data(
     key: Optional[str] = Query(None, description="Comma-separated identity fields for the lineage lenses"),
     include_missing: bool = Query(False, description="view=latest: include records absent from the newest snapshot"),
     source: Optional[str] = Query(None, description="view=latest/run: only records from this originating list key ('' = untagged); the response's sources counts stay unfiltered"),
+    preview_chars: Optional[int] = Query(
+        None, ge=64, le=100000,
+        description="Grid preview mode: string fields longer than this many characters are cut "
+                    "to it and the row lists them under `_truncated`; fetch full rows on demand "
+                    "via GET .../data/rows. JSON envelope only (`format=` renders stay full)."),
     db: AsyncSession = Depends(get_db),
     _api_key: dict = Depends(get_current_api_key),
 ):
@@ -5086,14 +5327,69 @@ async def get_workflow_data(
     fmt = dataset_formats.norm_format(format, default="json")
     view = _validate_data_lens_params(view, run_id, collection)
     wf = await _load_workflow_for_data(db, workflow_id, _api_key)
+    col_filters = _parse_col_filters(filter)
+    struct_filters = _parse_structured_filters(filters)
+    # DEFAULT PAGE FAST PATH — the shape every Data-page open and poll requests
+    # (view=all, newest-first, no search/filter/pivot). Served from the bounded
+    # fastpath so a heavy dataset (a crawl's captured pages) never loads its
+    # whole corpus per page. Anything it can't reproduce exactly — and any
+    # fastpath error — falls through to the full scan below.
+    if (
+        view == "all"
+        and not q
+        and not col_filters
+        and not struct_filters
+        and not collection
+        and not include_inputs
+        and sort_by in (None, "run_at")
+        and (sort_dir or "desc").strip().lower() != "asc"
+    ):
+        try:
+            from services import dataset_fastpath
+            table, scanned, truncated = await dataset_fastpath.fast_table_page(
+                db,
+                AutomationTask,
+                _data_scan_filters(workflow_id, wf),
+                _DATA_SCAN_CAP,
+                declared=_declared_output_fields(wf),
+                redactor=redact_result_data,
+                variant="red",
+                scope_id=wf.id,
+                offset=offset,
+                limit=limit,
+            )
+            if fmt != "json":
+                return dataset_formats.render_dataset(
+                    fmt,
+                    table["columns"],
+                    table["rows"],
+                    title=wf.name or f"Workflow {wf.id}",
+                    lineage=False,
+                )
+            if preview_chars is not None:
+                table["rows"] = dataset_fastpath.truncate_preview_rows(table["rows"], preview_chars)
+            return {
+                "workflow_id": wf.id,
+                "workflow_name": wf.name,
+                **table,
+                "scanned_runs": scanned,
+                "truncated": truncated,
+                "limit": limit,
+                "offset": offset,
+            }
+        except Exception:
+            logger.warning(
+                "dataset fastpath failed for workflow %s; serving via full scan",
+                workflow_id, exc_info=True,
+            )
     tasks, truncated = await _scan_workflow_data_tasks(db, workflow_id, workflow=wf)
     if view == "all":
         table = edt.build_table(
             tasks,
             declared=_declared_output_fields(wf),
             q=q,
-            col_filters=_parse_col_filters(filter),
-            filters=_parse_structured_filters(filters),
+            col_filters=col_filters,
+            filters=struct_filters,
             sort_by=sort_by,
             sort_dir=sort_dir,
             offset=offset,
@@ -5114,8 +5410,8 @@ async def get_workflow_data(
                 include_missing=include_missing,
                 source=source,
                 q=q,
-                col_filters=_parse_col_filters(filter),
-                filters=_parse_structured_filters(filters),
+                col_filters=col_filters,
+                filters=struct_filters,
                 sort_by=sort_by,
                 sort_dir=sort_dir,
                 offset=offset,
@@ -5136,6 +5432,13 @@ async def get_workflow_data(
             title=wf.name or f"Workflow {wf.id}",
             lineage=view != "all",
         )
+    if preview_chars is not None:
+        from services import dataset_fastpath
+        table["rows"] = dataset_fastpath.truncate_preview_rows(table["rows"], preview_chars)
+        if table.get("removed_records"):
+            table["removed_records"] = dataset_fastpath.truncate_preview_rows(
+                table["removed_records"], preview_chars
+            )
     return {
         "workflow_id": wf.id,
         "workflow_name": wf.name,
@@ -5145,6 +5448,38 @@ async def get_workflow_data(
         "limit": limit,
         "offset": offset,
     }
+
+
+@router.get("/workflows/{workflow_id}/data/rows")
+async def get_workflow_data_rows(
+    workflow_id: int,
+    ref: Optional[List[str]] = Query(None, description="Row ref as 'run_id:record_index' (repeatable, max 100)"),
+    db: AsyncSession = Depends(get_db),
+    _api_key: dict = Depends(get_current_api_key),
+):
+    """FULL (untruncated) rows for specific ``run_id:record_index`` refs — the
+    hydration lane behind the table's ``preview_chars`` mode: the grid loads
+    preview-sized cells, then fetches the complete record here only when the
+    user expands, views, copies, or sends it. Same flatten pipeline as the
+    table (same redaction + declared projection); unknown refs are simply
+    absent from the result."""
+    from services import dataset_fastpath
+    if isinstance(_api_key, dict):
+        check_api_key_scope(_api_key, "workflows", "read", workflow_id)
+    wf = await _load_workflow_for_data(db, workflow_id, _api_key)
+    try:
+        refs = dataset_fastpath.parse_row_refs(ref)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    rows = await dataset_fastpath.rows_by_refs(
+        db,
+        AutomationTask,
+        _data_scan_filters(workflow_id, wf),
+        refs,
+        declared=_declared_output_fields(wf),
+        redactor=redact_result_data,
+    )
+    return {"workflow_id": wf.id, "rows": rows}
 
 
 @router.get("/workflows/{workflow_id}/data/export")
@@ -5317,30 +5652,34 @@ async def list_data_workflows(
         select(AutomationWorkflow)
         .where(AutomationWorkflow.id.in_(candidate_ids))
     )
+    from services import dataset_fastpath
     out = []
     for w in wf_res.scalars().all():
-        # Materialize the SAME per-run entries the picker's table opens to; skip
-        # workflows whose runs all flatten to zero rows (the "empty runs" the
-        # picker must hide). The entries also feed last_delta — no second scan.
-        tasks, _ = await _scan_workflow_data_tasks(db, w.id, workflow=w)
-        if not tasks:
+        # Bounded picker line: run_count / last_data_at from cached per-run
+        # digests (real record_count semantics — zero-row workflows still
+        # hide), payloads loaded only for datasets small enough to compute
+        # the exact last_delta teaser (null past the size gates = the
+        # contract's "unknown"). This is what keeps opening the Data page
+        # from materializing every workflow's whole corpus.
+        summary = await dataset_fastpath.picker_summary(
+            db,
+            AutomationTask,
+            _data_scan_filters(w.id, w),
+            _DATA_SCAN_CAP,
+            declared=_declared_output_fields(w),
+            redactor=redact_result_data,
+            variant="red",
+            scope_id=w.id,
+        )
+        if summary is None:
             continue
-        declared_w = _declared_output_fields(w)
-        entries = edt.run_entries(tasks, declared=declared_w, redactor=redact_result_data)
-        bearing = [e for e in entries if e["records"]]
-        if not bearing:
-            continue
-        run_ids = {e["run_id"] for e in bearing if e["run_id"] is not None}
-        last_data_at = max((e["run_at"] for e in bearing if e["run_at"]), default=None)
         out.append({
             "workflow_id": w.id,
             "workflow_name": w.name,
             # Lets the Data explorer lock a crawl dataset to the aggregated view
             # (its shards are one dataset, not temporal snapshots).
             "workflow_type": w.workflow_type,
-            "run_count": len(run_ids),
-            "last_data_at": last_data_at,
-            "last_delta": edt.picker_last_delta(entries, declared=declared_w),
+            **summary,
         })
     # A crawl is not a workflow: the Data explorer links its dataset back to the
     # crawl detail (/crawls/{crawl_id}), not the workflow page. Map each crawl
@@ -5449,6 +5788,8 @@ async def delete_dataset_records(db: AsyncSession, wf, request: "DeleteExtracted
             task.result_data = rd
             _flag_modified(task, "result_data")
         await db.commit()
+        from services import dataset_fastpath
+        await dataset_fastpath.bump_epoch(wf.id)
         return {"deleted": deleted, "resolved": {}, "unmatched": []}
 
     if not request.records and not request.record_uids:
@@ -5502,6 +5843,11 @@ async def delete_dataset_records(db: AsyncSession, wf, request: "DeleteExtracted
             _flag_modified(task, "result_data")
 
     await db.commit()
+    if deleted:
+        # Rewritten payloads invalidate the fastpath's cached per-run digests
+        # deterministically (size-keying alone is only near-certain).
+        from services import dataset_fastpath
+        await dataset_fastpath.bump_epoch(wf.id)
     return {"deleted": deleted, "resolved": resolved, "unmatched": unmatched}
 
 

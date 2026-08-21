@@ -5,14 +5,17 @@ import {
   CheckIcon, ArrowPathIcon, ChevronDownIcon, ChevronRightIcon,
   ShieldCheckIcon, EnvelopeIcon, QrCodeIcon,
   NoSymbolIcon, PlusIcon, TrashIcon, CheckBadgeIcon, FingerPrintIcon,
+  SparklesIcon, VideoCameraIcon,
 } from '@heroicons/react/24/outline';
 import { useTranslation, Trans } from 'react-i18next';
 import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
 import { Checkbox, NumberInput, Select } from '../ui';
 import { ConfirmDialog } from '../ConfirmDialog';
+import { useNavigate } from 'react-router-dom';
 import { personasApi, agentsApi, vaultApi, automationApi } from '../../api/endpoints';
-import type { Persona, PersonaCreate, PersonaUpdate, TwoFactorMethod, ImapConfig, Agent } from '../../types/api';
+import { PersonaLoginWorkflow } from './PersonaLoginWorkflow';
+import type { Persona, PersonaCreate, PersonaUpdate, TwoFactorMethod, ImapConfig, Agent, WorkflowStep } from '../../types/api';
 import { parseOtpauthUri, decodeQrFromImageFile, canDecodeQr, isMigrationUri, parseMigrationUri, type ParsedOtpauth } from '../../utils/otpauth';
 
 // ---------------------------------------------------------------------------
@@ -59,6 +62,14 @@ interface WizardForm {
   /** Workflow that SIGNS THIS PERSONA IN. Null = it can't log itself in, so its
    * session can only ever be captured from elsewhere and an expiry is terminal. */
   login_workflow_id: number | null;
+  /** HOW the persona will get that workflow — the login-step chooser.
+   * 'ai' launches an AI session that signs in with these credentials and records
+   * the flow; 'manual' opens the recorder; 'existing' attaches the picked
+   * workflow; 'none' leaves the persona unable to sign itself in; 'recorded'
+   * materializes the steps just recorded (trimmed below) into one. */
+  loginSetup: 'ai' | 'manual' | 'existing' | 'none' | 'recorded';
+  /** The recorded steps as trimmed by the user — the 'recorded' path's source. */
+  recordedLoginSteps: WorkflowStep[];
   // ── BYO/residential proxy ──
   proxy_server: string;
   proxy_username: string;
@@ -107,7 +118,69 @@ export interface PersonaPrefill {
   target_domain?: string;
   login_username?: string;
   twofa_method?: TwoFactorMethod;
+  /** Password typed during the recording, so the persona stores what was used. */
+  password?: string;
+  /** Any other credential field the recording captured (account id, company code…). */
+  extra_fields?: { key: string; value: string }[];
+  /**
+   * The steps just recorded, ALREADY parameterized to {{secret:…}} placeholders
+   * by the caller (the recorder owns the plaintext, not this wizard). Offered as
+   * the persona's login workflow: the user trims them to the sign-in portion and
+   * the wizard materializes them as a real workflow on save.
+   */
+  recorded_steps?: WorkflowStep[];
+  /** Entry URL for that derived workflow (where the sign-in starts). */
+  entry_url?: string;
 }
+
+/** One-line, value-safe description of a recorded step for the trim list. */
+function stepSummary(s: WorkflowStep): string {
+  const cfg = s.config || {};
+  const value = String(s.value ?? cfg.value ?? cfg.value_template ?? '');
+  const target = s.selector || cfg.selector || '';
+  if (s.type === 'navigate' || s.type === 'navigated_to') return String(s.url || cfg.url || '');
+  if (s.type === 'twofa') return 'one-time code';
+  // A {{secret:…}} reference is safe to show (it names the field, not the
+  // value); a literal is NOT — the recording may hold a typed password.
+  const shownValue = /\{\{/.test(value) ? value : value ? '•'.repeat(Math.min(value.length, 8)) : '';
+  return s.description || [target, shownValue].filter(Boolean).join(' — ') || s.type;
+}
+
+/**
+ * Best-effort trim of a full recording down to just the SIGN-IN.
+ *
+ * A recording usually continues past the login into whatever the user came to
+ * do; replaying all of that on every session expiry is slow and fragile. The
+ * login ends at the first submit AFTER the last credential fill, so keep
+ * everything up to and including that step. Nothing matched ⇒ return the steps
+ * untouched (the user trims by hand — never silently drop their recording).
+ */
+function trimToLoginSteps(steps: WorkflowStep[]): WorkflowStep[] {
+  const isSecretFill = (s: WorkflowStep) =>
+    (s.type === 'fill' || s.type === 'type') &&
+    /\{\{secret:/.test(String(s.value ?? s.config?.value ?? s.config?.value_template ?? ''));
+  let lastCred = -1;
+  steps.forEach((s, i) => { if (isSecretFill(s)) lastCred = i; });
+  if (lastCred < 0) return steps;
+  // The submit that follows the credentials — a click, a press of Enter, or the
+  // 2FA step a submit leads into.
+  for (let i = lastCred + 1; i < steps.length; i += 1) {
+    const s = steps[i];
+    if (s.type === 'twofa') continue;  // 2FA is part of signing in — keep going.
+    if (s.type === 'click' || s.type === 'press' || s.type === 'login_post') {
+      // Keep any immediately following wait/navigation settle, then stop.
+      let end = i;
+      for (let j = i + 1; j < steps.length; j += 1) {
+        const n = steps[j];
+        if (n.type === 'wait' || n.type === 'navigated_to' || n.type === 'twofa') end = j;
+        else break;
+      }
+      return steps.slice(0, end + 1);
+    }
+  }
+  return steps;
+}
+
 
 function buildInitialForm(persona?: Persona | null, defaultDomain?: string, prefill?: PersonaPrefill): WizardForm {
   return {
@@ -115,13 +188,16 @@ function buildInitialForm(persona?: Persona | null, defaultDomain?: string, pref
     description: persona?.description || '',
     target_domain: persona?.target_domain || prefill?.target_domain || defaultDomain || '',
     login_username: persona?.login_username || prefill?.login_username || '',
-    password: '',
+    password: prefill?.password || '',
     // A linked login reports the same base secret name for username + password.
     loginSecretKey: persona?.linked_secrets?.password || persona?.linked_secrets?.username || '',
     // On edit, surface any vault-linked extra fields so the link is preserved.
-    extraFields: Object.entries(persona?.linked_secrets || {})
-      .filter(([field]) => field !== 'password' && field !== 'username')
-      .map(([field, secretKey]) => ({ key: field, value: '', secretKey })),
+    // On create from a recording, carry the extra credential fields it captured.
+    extraFields: persona
+      ? Object.entries(persona?.linked_secrets || {})
+          .filter(([field]) => field !== 'password' && field !== 'username')
+          .map(([field, secretKey]) => ({ key: field, value: '', secretKey }))
+      : (prefill?.extra_fields || []).map((f) => ({ key: f.key, value: f.value })),
     // Self-host supports none/totp/email_otp only — clamp an unsupported hint
     // (the recorder prefills 'sms' when the site texts codes) so the 2FA step
     // never opens on a method with no card that the coordinator would 422.
@@ -146,6 +222,16 @@ function buildInitialForm(persona?: Persona | null, defaultDomain?: string, pref
     fingerprintTouched: false,
     is_active: persona ? !!persona.is_active : true,
     login_workflow_id: persona?.login_workflow_id ?? null,
+    // A persona that already has a login keeps it ('existing'). Created from a
+    // RECORDING, the sign-in the user just performed is the obvious source, so
+    // that wins; otherwise the zero-effort path (AI signs in and records it).
+    loginSetup: (
+      persona?.login_workflow_id ? 'existing'
+        : (prefill?.recorded_steps || []).length > 0 ? 'recorded'
+          : 'ai'
+    ) as WizardForm['loginSetup'],
+    // Pre-trimmed to the sign-in; the user can drop more steps inline.
+    recordedLoginSteps: trimToLoginSteps(prefill?.recorded_steps || []),
     // Proxy secrets are write-only; on edit we only know whether one is set.
     proxy_server: '',
     proxy_username: '',
@@ -281,6 +367,7 @@ interface PersonaWizardProps {
 
 export const PersonaWizard: React.FC<PersonaWizardProps> = ({ isOpen, onClose, onSaved, defaultDomain, prefill, persona }) => {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const isEdit = !!persona;
   const [step, setStep] = useState<StepId>('identity');
   const [completed, setCompleted] = useState<Set<StepId>>(new Set());
@@ -354,6 +441,17 @@ export const PersonaWizard: React.FC<PersonaWizardProps> = ({ isOpen, onClose, o
       .catch(() => { if (alive) setSecrets([]); });
     return () => { alive = false; };
   }, [isOpen, persona, defaultDomain]);
+
+  // Does this persona have anything to sign in WITH? A linked vault credential
+  // and a stored password both count (the AI recording needs one of them).
+  const hasAnyCredentials = !!(
+    form.loginSecretKey ||
+    form.password ||
+    form.login_username.trim() ||
+    (isEdit && persona?.has_password)
+  );
+  // Offered only when the caller handed us a recording to derive from.
+  const hasRecordedSteps = (prefill?.recorded_steps || []).length > 0;
 
   const update = (patch: Partial<WizardForm>) => setForm((f) => ({ ...f, ...patch }));
   // Wrap credential edits so edit-mode knows the stored set should be replaced.
@@ -530,6 +628,35 @@ export const PersonaWizard: React.FC<PersonaWizardProps> = ({ isOpen, onClose, o
   const cleanSeed = () => form.totp_seed.replace(/\s/g, '').toUpperCase();
 
   // --- Save -----------------------------------------------------------------
+  /**
+   * Materialize the trimmed recording as this persona's login workflow.
+   *
+   * The steps arrive already parameterized ({{secret:…}}), so the workflow
+   * carries references and the PERSONA supplies the values at dispatch — the
+   * same contract as a hand-recorded login. Returns the persona as the server
+   * sees it after the link, or the unchanged persona if there was nothing to
+   * build. Failure is surfaced but never loses the persona itself.
+   */
+  const attachRecordedLogin = async (p: Persona): Promise<Persona> => {
+    const steps = form.recordedLoginSteps;
+    if (steps.length === 0) return p;
+    try {
+      const wf = await automationApi.createWorkflow({
+        name: `${p.name} login`,
+        description: t('Signs in as the persona “{{name}}”. Derived from the recorded sign-in; re-run automatically whenever the session expires.', { name: p.name }),
+        workflow_type: 'recorded',
+        steps,
+        entry_url: prefill?.entry_url || (p.target_domain ? `https://${p.target_domain}` : undefined),
+        default_persona_id: p.id,
+      });
+      return await personasApi.update(p.id, { login_workflow_id: wf.id });
+    } catch (e: any) {
+      const d = e?.response?.data?.detail;
+      toast.error(typeof d === 'string' ? d : t('Persona saved, but the login workflow could not be created — set up sign-in from the persona.'));
+      return p;
+    }
+  };
+
   const save = async () => {
     for (const s of STEPS) {
       const err = stepError(s);
@@ -548,7 +675,10 @@ export const PersonaWizard: React.FC<PersonaWizardProps> = ({ isOpen, onClose, o
           twofa_method: form.twofa_method,
           preferred_agent_id: form.preferred_agent_id || undefined,
           fingerprint: form.pinFingerprint && form.fingerprint ? form.fingerprint : undefined,
-          login_workflow_id: form.login_workflow_id ?? undefined,
+          // Only the 'existing' choice attaches a workflow at create time; 'ai'
+          // and 'manual' produce one right after, and wire it themselves.
+          login_workflow_id:
+            form.loginSetup === 'existing' ? (form.login_workflow_id ?? undefined) : undefined,
         };
         if (form.proxy_server.trim()) {
           payload.proxy_server = form.proxy_server.trim();
@@ -585,7 +715,34 @@ export const PersonaWizard: React.FC<PersonaWizardProps> = ({ isOpen, onClose, o
         }
 
         toast.success(t('Persona created'));
+
+        // ACT ON THE SIGN-IN CHOICE. 'recorded' derives the login workflow from
+        // the trimmed recording right now; 'manual' leaves for the recorder
+        // (which attaches its recording back onto this persona on completion);
+        // 'ai' lands on the success screen, where the sign-in section starts
+        // the AI recording itself and shows it live.
+        if (form.loginSetup === 'recorded') {
+          const linked = await attachRecordedLogin(p);
+          onSaved(linked);
+          setCreated(linked);
+          setPhase('success');
+          return;
+        }
         onSaved(p);
+
+        if (form.loginSetup === 'manual') {
+          const q = new URLSearchParams({
+            intent: 'callable',
+            login_for_persona: String(p.id),
+            name: t('{{persona}} login', { persona: p.name }),
+            login_return_to: '/personas',
+          });
+          if (p.target_domain) q.set('url', `https://${p.target_domain}`);
+          onClose();
+          navigate(`/workflows/new?${q.toString()}`);
+          return;
+        }
+
         setCreated(p);
         setPhase('success');
       } else {
@@ -599,7 +756,14 @@ export const PersonaWizard: React.FC<PersonaWizardProps> = ({ isOpen, onClose, o
           preferred_agent_id: form.preferred_agent_id || (null as any),
           is_active: form.is_active,
           // Explicit null DETACHES; the coordinator distinguishes absent from null.
-          login_workflow_id: form.login_workflow_id ?? (null as any),
+          // 'ai'/'manual' set up a NEW login right after this save, so they must
+          // not detach the current one here — leave the field untouched and let
+          // the chosen path replace it when it produces a workflow.
+          ...(form.loginSetup === 'existing'
+            ? { login_workflow_id: form.login_workflow_id ?? (null as any) }
+            : form.loginSetup === 'none'
+              ? { login_workflow_id: null as any }
+              : {}),
         };
         // Secrets: only overwrite when the user actually changed a credential
         // (typed a value, or linked/unlinked a secret). Saving replaces the
@@ -645,7 +809,32 @@ export const PersonaWizard: React.FC<PersonaWizardProps> = ({ isOpen, onClose, o
 
         const p = await personasApi.update(persona!.id, data);
         toast.success(t('Persona updated'));
+
+        // Same set-up-a-login paths as create.
+        if (form.loginSetup === 'recorded') {
+          onSaved(await attachRecordedLogin(p));
+          onClose();
+          return;
+        }
         onSaved(p);
+
+        if (form.loginSetup === 'manual') {
+          const q = new URLSearchParams({
+            intent: 'callable',
+            login_for_persona: String(p.id),
+            name: t('{{persona}} login', { persona: p.name }),
+            login_return_to: '/personas',
+          });
+          if (p.target_domain) q.set('url', `https://${p.target_domain}`);
+          onClose();
+          navigate(`/workflows/new?${q.toString()}`);
+          return;
+        }
+        if (form.loginSetup === 'ai' && !p.login_workflow_id) {
+          setCreated(p);
+          setPhase('success');
+          return;
+        }
         onClose();
       }
     } catch (err: any) {
@@ -848,22 +1037,123 @@ export const PersonaWizard: React.FC<PersonaWizardProps> = ({ isOpen, onClose, o
           actually performs the login, the persona can never authenticate a crawl,
           so this belongs on the Login step next to the credentials themselves. */}
       <div className="border-t border-border pt-4">
-        <label className="text-xs font-medium text-secondary block mb-1">{t('Login workflow')}</label>
-        <Select<string>
-          value={form.login_workflow_id == null ? '' : String(form.login_workflow_id)}
-          onChange={(v) => update({ login_workflow_id: v ? Number(v) : null })}
-          options={[
-            { value: '', label: t('None — this persona can\'t sign itself in') },
-            ...loginWorkflowOptions.map((w: any) => ({ value: String(w.id), label: w.name })),
-          ]}
-        />
-        <p className="text-[11px] text-tertiary mt-1.5">
-          {form.login_workflow_id
-            ? t('Runs whenever this persona needs a fresh session — including automatically mid-crawl.')
-            : isEdit
-              ? t('Pick the workflow that logs this account in, or record one from the persona once saved.')
-              : t('Pick the workflow that logs this account in. You can also record one after saving.')}
+        <label className="text-xs font-medium text-secondary block mb-1">{t('How this persona signs in')}</label>
+        <p className="text-[11px] text-tertiary mb-2.5">
+          {t('Credentials alone never sign anyone in — they are only values a sign-in flow types. Once this persona has a login flow, it re-logins on its own whenever its session expires.')}
         </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {hasRecordedSteps && (
+            <OptionCard
+              selected={form.loginSetup === 'recorded'}
+              onClick={() => update({ loginSetup: 'recorded', login_workflow_id: null })}
+              icon={<CheckBadgeIcon className="w-4 h-4" />}
+              title={t('Use the sign-in you just recorded')}
+              description={t('Saves the steps below as this persona’s login flow — no extra recording, no AI run.')}
+            />
+          )}
+          <OptionCard
+            selected={form.loginSetup === 'ai'}
+            onClick={() => update({ loginSetup: 'ai', login_workflow_id: null })}
+            icon={<SparklesIcon className="w-4 h-4" />}
+            title={t('Let AI sign in and record it')}
+            description={t('An AI session signs in with the credentials above and saves the steps as this persona’s login flow. It never sees the values — only placeholders.')}
+          />
+          <OptionCard
+            selected={form.loginSetup === 'manual'}
+            onClick={() => update({ loginSetup: 'manual', login_workflow_id: null })}
+            icon={<VideoCameraIcon className="w-4 h-4" />}
+            title={t('Record the sign-in myself')}
+            description={t('Opens the recorder on the site so you can sign in once. The recording is attached here automatically.')}
+          />
+          <OptionCard
+            selected={form.loginSetup === 'existing'}
+            onClick={() => update({ loginSetup: 'existing' })}
+            icon={<CheckBadgeIcon className="w-4 h-4" />}
+            title={t('Use an existing workflow')}
+            description={t('Pick a workflow you already recorded that logs this account in.')}
+          />
+          <OptionCard
+            selected={form.loginSetup === 'none'}
+            onClick={() => update({ loginSetup: 'none', login_workflow_id: null })}
+            icon={<NoSymbolIcon className="w-4 h-4" />}
+            title={t('Not now')}
+            description={t('This persona won’t be able to sign itself in — an expired session will stop crawls until you set this up.')}
+          />
+        </div>
+
+        {form.loginSetup === 'existing' && (
+          <div className="mt-3">
+            <Select<string>
+              value={form.login_workflow_id == null ? '' : String(form.login_workflow_id)}
+              onChange={(v) => update({ login_workflow_id: v ? Number(v) : null })}
+              options={[
+                { value: '', label: t('Pick the workflow that logs this account in…') },
+                ...loginWorkflowOptions.map((w: any) => ({ value: String(w.id), label: w.name })),
+              ]}
+            />
+            {form.login_workflow_id != null && (
+              <p className="text-[11px] text-tertiary mt-1.5">
+                {t('Runs whenever this persona needs a fresh session — including automatically mid-crawl.')}
+              </p>
+            )}
+          </div>
+        )}
+
+        {form.loginSetup === 'recorded' && (
+          <div className="mt-3 space-y-2">
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-[11px] text-tertiary">
+                {t('Keep only the sign-in steps — remove anything you did after logging in.')}
+              </span>
+              {form.recordedLoginSteps.length < (prefill?.recorded_steps || []).length && (
+                <button
+                  type="button"
+                  onClick={() => update({ recordedLoginSteps: prefill?.recorded_steps || [] })}
+                  className="text-[11px] text-secondary hover:text-ink shrink-0"
+                >
+                  {t('Restore all {{count}} steps', { count: (prefill?.recorded_steps || []).length })}
+                </button>
+              )}
+            </div>
+            {form.recordedLoginSteps.length === 0 ? (
+              <p className="text-[11px] text-tertiary border border-dashed border-border rounded-lg px-3 py-2">
+                {t('No steps left — restore them, or pick another way to sign in.')}
+              </p>
+            ) : (
+              <div className="border border-border rounded-xl divide-y divide-border overflow-hidden max-h-56 overflow-y-auto">
+                {form.recordedLoginSteps.map((s, i) => (
+                  <div key={s.id || i} className="flex items-center gap-2 px-2.5 py-1.5 bg-canvas/40">
+                    <span className="text-[10px] font-mono text-tertiary w-5 shrink-0">{i + 1}</span>
+                    <span className="text-[10px] font-semibold uppercase tracking-wide text-tertiary w-16 shrink-0">
+                      {s.type}
+                    </span>
+                    <span className="text-[11px] text-ink truncate flex-1 min-w-0" title={stepSummary(s)}>
+                      {stepSummary(s)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => update({ recordedLoginSteps: form.recordedLoginSteps.filter((_, j) => j !== i) })}
+                      className="p-1 text-tertiary hover:text-ink hover:bg-hover rounded-lg shrink-0"
+                      aria-label={t('Remove step')}
+                      title={t('Remove step')}
+                    >
+                      <TrashIcon className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="text-[11px] text-tertiary">
+              {t('Credentials in these steps are stored as references, not values — the persona supplies them at run time.')}
+            </p>
+          </div>
+        )}
+
+        {form.loginSetup === 'ai' && !hasAnyCredentials && (
+          <p className="text-[11px] text-tertiary mt-2 border border-border rounded-lg px-3 py-2 bg-canvas/60">
+            {t('Add a username and password above — the AI signs in with them. Without credentials there is nothing for it to type.')}
+          </p>
+        )}
       </div>
     </div>
   );
@@ -1301,6 +1591,20 @@ export const PersonaWizard: React.FC<PersonaWizardProps> = ({ isOpen, onClose, o
             : (isEdit && persona?.has_password ? t('Stored credentials kept') : t('No credentials — session-only persona')),
         step: 'login' as StepId,
       },
+      {
+        label: t('Sign-in'),
+        value: form.loginSetup === 'recorded'
+          ? t('From the recorded sign-in ({{count}} steps)', { count: form.recordedLoginSteps.length })
+          : form.loginSetup === 'ai'
+          ? t('AI signs in and records the flow after saving')
+          : form.loginSetup === 'manual'
+            ? t('You record the sign-in next')
+            : form.loginSetup === 'existing'
+              ? (loginWorkflowOptions.find((w: any) => w.id === form.login_workflow_id)?.name
+                 || t('No workflow picked yet'))
+              : t('Not set up — this persona can’t sign itself in'),
+        step: 'login' as StepId,
+      },
       { label: t('2FA'), value: twofaSummary, step: 'twofa' as StepId },
       {
         label: t('Execution'),
@@ -1350,6 +1654,24 @@ export const PersonaWizard: React.FC<PersonaWizardProps> = ({ isOpen, onClose, o
             <ShieldCheckIcon className="w-4 h-4" /> {t('Test 2FA now')}
           </Button>
           {testResult && <p className="text-[11px] text-secondary">{testResult}</p>}
+        </div>
+      )}
+      {/* SIGN-IN SETUP — the chosen path, carried out here. With 'ai' the
+          recording starts on mount and streams its progress; every other case
+          renders the same section's normal controls so the user is never left
+          with a persona that can't log in and no way to fix it. */}
+      {created && form.loginSetup !== 'none' && (
+        <div className="max-w-md mx-auto text-left rounded-xl border border-border p-3 bg-canvas/40">
+          <PersonaLoginWorkflow
+            persona={created}
+            autoStartAi={form.loginSetup === 'ai'}
+            returnTo="/personas"
+            onChanged={() => {
+              // The persona row now carries the wired login workflow — refresh
+              // the copy this screen renders (and the caller's list).
+              personasApi.get(created.id).then((p) => { setCreated(p); onSaved(p); }).catch(() => { /* keep current */ });
+            }}
+          />
         </div>
       )}
       <div className="pt-2">

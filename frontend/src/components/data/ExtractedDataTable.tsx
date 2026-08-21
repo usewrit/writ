@@ -105,6 +105,13 @@ const PAGE_SIZE = 50;
 // When pivoting to a nested collection we flatten the loaded records' items
 // client-side; pull a wider page of records so more items are in reach.
 const NESTED_RECORD_LIMIT = 200;
+// Grid requests ask the server to cut string cells to this many characters
+// (rows flag the cut fields under `_truncated`). The grid only ever renders
+// previews, so shipping a content dataset's full documents per page (50 crawl
+// pages of markdown = megabytes held in memory) bought nothing; the complete
+// record is fetched on demand when a row is expanded, viewed, copied, or sent.
+// Older backends ignore the param and serve full rows — both shapes must work.
+const PREVIEW_CHARS = 2048;
 
 // Fixed-layout column widths (px). Data columns get per-type defaults (see
 // defaultColWidth) and are user-resizable down to their header-label fit.
@@ -233,6 +240,9 @@ interface ViewRow extends RecordLike {
   key: string;
   /** By-date lens: a record the previous snapshot had but this one doesn't. */
   removed?: boolean;
+  /** Preview mode: fields the server cut to preview size — the full record
+   * must be hydrated (ensureFullRows) before any full-content use. */
+  truncated?: string[];
 }
 
 /** What the expanded record needs to fetch /history (null = lens has no lineage). */
@@ -694,7 +704,10 @@ export const ExtractedDataTable: React.FC<Props> = ({ workflowId, isCrawl = fals
         throw err;
       }
     },
-    { silent: true, enabled: !isNested && lineageSupported !== false },
+    // Crawl datasets never render lens/snapshot UI (the grid locks to All
+    // rows), and their "chain" is a shard fan-out, not temporal snapshots — the
+    // index would walk the whole corpus server-side for nothing. Skip it.
+    { silent: true, enabled: !isCrawl && !isNested && lineageSupported !== false },
   );
   const runsData = runsResult && !('unsupported' in runsResult) ? runsResult : null;
   // Adopt the capability answer as soon as a probe response lands. Keyed on the
@@ -727,12 +740,15 @@ export const ExtractedDataTable: React.FC<Props> = ({ workflowId, isCrawl = fals
   }
 
   const params: WorkflowDataParams = useMemo(() => {
+    // Nested pivots flatten records client-side, so they need the REAL nested
+    // objects — never previews.
     if (isNested) return { sort_by: 'run_at', sort_dir: 'desc', limit: NESTED_RECORD_LIMIT, offset: 0 };
     const base: WorkflowDataParams = {
       q: q || undefined,
       filters: filters.length ? filters : undefined,
       limit: PAGE_SIZE,
       offset: page * PAGE_SIZE,
+      preview_chars: PREVIEW_CHARS,
       // Omitting sort_by keeps the lens's server default (Current: change rank).
       sort_by: sortBy ?? (effLens === 'all' ? 'run_at' : undefined),
       sort_dir: sortBy || effLens === 'all' ? sortDir : undefined,
@@ -908,21 +924,77 @@ export const ExtractedDataTable: React.FC<Props> = ({ workflowId, isCrawl = fals
     setScope('records');
   }
 
+  // Preview-mode hydration: full fields fetched on demand for rows the server
+  // served truncated, keyed by their (run_id, record_index) ref — stable across
+  // lenses (a Current row's ref points at its newest version's backing slot).
+  const [hydrated, setHydrated] = useState<Map<string, Record<string, unknown>>>(new Map());
+  // Drop the cache when the workflow changes. Adjusted DURING RENDER, like the
+  // scope revert above, rather than from an effect: an effect clears it only after
+  // a frame has already been rendered, so the new workflow's grid would paint once
+  // against the previous workflow's hydrated rows. Self-terminating — the guard is
+  // false immediately after the first pass.
+  const [hydratedFor, setHydratedFor] = useState(workflowId);
+  if (hydratedFor !== workflowId) {
+    setHydratedFor(workflowId);
+    setHydrated(new Map());
+  }
+  const hydratedRef = useRef(hydrated);
+  hydratedRef.current = hydrated;
+  const rowRef = (v: { run_id: number; record_index: number }) => `${v.run_id}:${v.record_index}`;
+  /** Fetch the complete records for any still-truncated rows. Resolves to the
+   * ref → full-fields map (null when the fetch failed while rows still needed
+   * it — callers must NOT fall back to previews silently). */
+  const ensureFullRows = useCallback(
+    async (rowsToFill: ViewRow[]): Promise<Map<string, Record<string, unknown>> | null> => {
+      const have = hydratedRef.current;
+      const need = rowsToFill.filter(
+        (r) => r.truncated?.length && !r.removed && r.record_index >= 0 && !have.has(rowRef(r)),
+      );
+      if (need.length === 0) return have;
+      try {
+        const fetched = await workflowDataApi.getRowsByRefs(
+          workflowId,
+          need.map((r) => ({ run_id: r.run_id, record_index: r.record_index })),
+        );
+        const next = new Map(hydratedRef.current);
+        for (const row of fetched) next.set(rowRef(row), row.fields || {});
+        setHydrated(next);
+        return next;
+      } catch {
+        return null;
+      }
+    },
+    [workflowId],
+  );
+
   // Top-level records as view rows. Lineage rows key by uid (stable across the
   // dedup — a Current row's backing run/index moves as new versions land).
+  // Hydrated full fields overlay their preview the moment they land.
   const recordViewRows: ViewRow[] = useMemo(
     () =>
-      rows.map((r) => ({
-        key: r._lineage?.uid ? `uid:${r._lineage.uid}` : `${r.run_id}-${r.record_index}`,
-        fields: r.fields || {},
-        run_id: r.run_id,
-        run_at: r.run_at,
-        status: r.status,
-        record_index: r.record_index,
-        lineage: r._lineage,
-      })),
-    [rows],
+      rows.map((r) => {
+        const full = r._truncated?.length ? hydrated.get(`${r.run_id}:${r.record_index}`) : undefined;
+        return {
+          key: r._lineage?.uid ? `uid:${r._lineage.uid}` : `${r.run_id}-${r.record_index}`,
+          fields: full ?? r.fields ?? {},
+          run_id: r.run_id,
+          run_at: r.run_at,
+          status: r.status,
+          record_index: r.record_index,
+          lineage: r._lineage,
+          truncated: full ? undefined : r._truncated,
+        };
+      }),
+    [rows, hydrated],
   );
+
+  // Expanding a truncated record fetches its full content; the preview renders
+  // meanwhile and the complete values swap in when the fetch lands.
+  useEffect(() => {
+    if (!expanded) return;
+    const row = recordViewRows.find((v) => v.key === expanded);
+    if (row?.truncated?.length) void ensureFullRows([row]);
+  }, [expanded, recordViewRows, ensureFullRows]);
 
   // By date: records the previous snapshot had but this one doesn't — rendered
   // as a dimmed trailing group (display-only: not selectable, not expandable).
@@ -1366,16 +1438,27 @@ export const ExtractedDataTable: React.FC<Props> = ({ workflowId, isCrawl = fals
   };
 
   // Export / copy just the selected rows (client-side, always exactly what's
-  // selected — no hidden truncation).
-  const exportSelected = (format: 'csv' | 'json') => {
-    const objs = selectedRows.map((v) => v.fields);
+  // selected — no hidden truncation: preview-truncated rows hydrate their full
+  // content first, and a failed hydration aborts rather than shipping previews).
+  const selectedFullFields = async (): Promise<Record<string, unknown>[] | null> => {
+    const map = await ensureFullRows(selectedRows);
+    if (!map) {
+      toast.error(t("Couldn't load the full row content — try again"));
+      return null;
+    }
+    return selectedRows.map((v) => map.get(rowRef(v)) ?? v.fields);
+  };
+  const exportSelected = async (format: 'csv' | 'json') => {
+    const objs = await selectedFullFields();
+    if (!objs) return;
     const cols = unionColumns(objs, viewColumns);
     const text = format === 'csv' ? recordsToCsv(objs, cols) : recordsToJson(objs);
     const blob = new Blob([text], { type: format === 'csv' ? 'text/csv;charset=utf-8' : 'application/json' });
     downloadBlob(blob, `${baseName}-selected.${format}`);
   };
   const copySelected = async (fmt: 'json' | 'tsv' | 'md') => {
-    const objs = selectedRows.map((v) => v.fields);
+    const objs = await selectedFullFields();
+    if (!objs) return;
     const cols = unionColumns(objs, viewColumns);
     const text = fmt === 'json' ? recordsToJson(objs) : fmt === 'tsv' ? recordsToTsv(objs, cols) : recordsToMarkdown(objs, cols);
     const ok = await copyToClipboard(text);
@@ -1398,10 +1481,12 @@ export const ExtractedDataTable: React.FC<Props> = ({ workflowId, isCrawl = fals
   };
   const doSend = async () => {
     if (!sendTargetId) return;
+    const fullFields = await selectedFullFields();
+    if (!fullFields) return;
     setSending(true);
-    const payloads = selectedRows.map((v) => {
+    const payloads = fullFields.map((fields) => {
       const formData: Record<string, string> = {};
-      for (const [k, val] of Object.entries(v.fields)) {
+      for (const [k, val] of Object.entries(fields)) {
         if (val === null || val === undefined || val === '') continue;
         formData[k] = typeof val === 'string' ? val : typeof val === 'object' ? JSON.stringify(val) : String(val);
       }
@@ -1474,7 +1559,9 @@ export const ExtractedDataTable: React.FC<Props> = ({ workflowId, isCrawl = fals
       setExpanded((cur) => (cur && goneKeys.has(cur) ? null : cur));
       refresh();
       refreshFacets();
-      refreshRuns();
+      // refresh() on a disabled query still fetches — keep crawls out of the
+      // snapshot-index walk here too.
+      if (!isCrawl) refreshRuns();
     } catch {
       toast.error(t('Delete failed'));
     } finally {

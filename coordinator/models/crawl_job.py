@@ -90,13 +90,28 @@ class CrawlJob(Base):
                            comment="Audit of the AI-derived scope {include_paths, exclude_paths, max_depth, reason}")
 
     # --- Extraction ----------------------------------------------------------
-    # "markdown" = readability → clean markdown per page (Firecrawl-style).
-    # "schema"   = replay a prebuilt fn_type:"list"/api extractor (extract_schema)
-    #              on every matching page at ZERO marginal AI cost.
+    # Two orthogonal axes:
+    #
+    #   executor  — WHO reads the page:
+    #     "regular" = deterministic crawl (readability/CSS), free, fast.
+    #     "ai"      = the coordinator reads each fetched page against
+    #                 extract_prompt through the owner's OWN AI provider
+    #                 (Settings → AI, or a BYO-key agent). Self-host meters
+    #                 nothing — the only cost is the operator's own key.
+    #   extract_mode — the OUTPUT shape:
+    #     "markdown" = readability → clean markdown per page (Firecrawl-style).
+    #     "schema"   = structured records — for regular, replay a prebuilt
+    #                  fn_type:"list"/api extractor (extract_schema) on every
+    #                  matching page at ZERO AI cost; for ai, the records the
+    #                  extraction prompt describes.
+    executor = Column(String(20), nullable=False, default="regular",
+                      comment="regular | ai — deterministic crawl vs AI-read extraction")
     extract_mode = Column(String(20), nullable=False, default="markdown",
                           comment="markdown | schema")
     extract_schema = Column(JSON, nullable=True,
                             comment="For schema mode: the extractor spec (row_selector + fields, or api replay)")
+    extract_prompt = Column(Text, nullable=True,
+                            comment="For the ai executor: the extraction instruction applied to every page")
     # Content-selection spec (agents honor it in the markdown pipeline): which page ELEMENTS land in
     # the scrape. {preset: main|full|readable, include_comments, exclude_selectors, include_selectors,
     # keep:{images,tables,links}}. Null ⇒ default (main-content isolation, comments kept).
@@ -215,7 +230,9 @@ class CrawlJob(Base):
             # cached on first load, 404→globe glyph. See routers/crawl favicon.
             "favicon": f"/crawl/{self.id}/favicon",
             "status": self.status,
+            "executor": self.executor,
             "extract_mode": self.extract_mode,
+            "extract_prompt": self.extract_prompt,
             "intent": self.intent,
             "derived_scope": self.derived_scope,
             "relevance_threshold": self.relevance_threshold,

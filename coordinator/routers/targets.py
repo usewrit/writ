@@ -48,6 +48,30 @@ def _snapshot_proxy_path(target_id: int, change_id: int, kind: str, ref: Optiona
     return f"/targets/{target_id}/changes/{change_id}/snapshot/{kind}"
 
 
+def _validate_selector_syntax(selector: str) -> None:
+    """Reject malformed CSS with a 400 WITHOUT fetching the page.
+
+    The coordinator never fetches target URLs, so selector validation is
+    syntax-only: garbage like `div[unclosed` must fail at create/update time
+    instead of erroring on every agent check. soupsieve is BeautifulSoup's own
+    selector engine (the one the baseline/extraction paths match with), so this
+    can never reject a selector those paths would have accepted.
+    NotImplementedError (valid CSS soupsieve can't evaluate) is let through —
+    the browser's own selector engine may support it.
+    """
+    import soupsieve
+    try:
+        soupsieve.compile(selector)
+    except soupsieve.SelectorSyntaxError as e:
+        first_line = str(e).splitlines()[0] if str(e) else "invalid CSS selector"
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid CSS selector '{selector}': {first_line}",
+        )
+    except NotImplementedError:
+        pass
+
+
 async def trigger_auto_redistribution(db: AsyncSession, reason: str):
     """
     Trigger automatic target redistribution using capacity-aware distributor.
@@ -618,9 +642,13 @@ async def create_target(
     if request.ignore_regex:
         InputValidator.validate_regex(request.ignore_regex)
 
-    # Validate CSS selector if provided (optional - can use target_selectors instead)
+    # Validate CSS selector if provided (optional - can use target_selectors instead).
+    # The viewport-zone sentinel is a screenshot region, not CSS — skip the syntax
+    # screen for it (the length cap still applies).
     if request.selector:
         InputValidator.validate_css_selector(request.selector)
+        if not request.selector.startswith("viewport-zone"):
+            _validate_selector_syntax(request.selector)
 
     # Structured recurrence (SPEC §2/§3): validate + normalize the schedule fields.
     # A tenant-stripped coordinator has no plan-tier interval floor, so only the
@@ -688,15 +716,24 @@ async def create_target(
         # made with a selector is checkable out of the box (mirrors POST .../selectors).
         if request.check_type != "uptime" and request.selector:
             from models.target_selector import TargetSelector
+            _flat_is_visual = request.selector.startswith("viewport-zone")
             db.add(TargetSelector(
                 target_id=target.id,
                 name=request.selector[:255],
                 selector=request.selector,
-                content_type="text",
+                # viewport-zone selectors are screenshot-compared, not text-hashed
+                content_type="visual" if _flat_is_visual else "text",
                 enabled=True,
                 priority=0,
                 ignore_regex=request.ignore_regex,
             ))
+            # A visual region can only be captured in a real browser — route the
+            # target to a Playwright-capable agent (same promotion as POST
+            # .../selectors, the source of truth for this invariant) and
+            # recompute the coalescing key, which folds the browser lane in.
+            if _flat_is_visual and not target.requires_playwright:
+                target.requires_playwright = True
+                target.fetch_key = fetch_key_for_target(target)
             await db.flush()
 
         await db.commit()
@@ -767,10 +804,15 @@ async def update_target(
         # Update fields
         update_data = request.model_dump(exclude_unset=True)
 
+        # Function-scope import: the url / selector / ignore_regex screens below
+        # each need it, whichever subset of fields the PATCH carries. (It used to
+        # live inside the `if 'url'` block, so a PATCH without `url` hit the
+        # validate_regex call below with the name unbound — NameError, 500.)
+        from security.validation import InputValidator
+
         # Validate URL to prevent SSRF — DNS-resolving check (catches encoded-IP /
         # IPv6 / *.internal hosts the regex-only check misses).
         if 'url' in update_data:
-            from security.validation import InputValidator
             update_data['url'] = InputValidator.validate_url_with_dns(
                 update_data['url'],
                 allow_private=settings.allow_private_targets
@@ -789,13 +831,21 @@ async def update_target(
                     detail="check_type must be 'content' or 'uptime'",
                 )
 
-        # The coordinator NEVER fetches a target URL, so a changed selector/URL is
-        # NOT re-validated here — the next agent `target_check_batch` report
-        # re-establishes the baseline for the new selector. The ignore_regex is
-        # different: it gets executed, so it needs the SAME validation the create
-        # path applies (validate_regex — length, nesting and structural ReDoS
-        # caps). A bare `re.compile` only proves the syntax parses, and `(a+)+$`
-        # compiles perfectly well, which made create-then-PATCH a clean bypass.
+        # The coordinator NEVER fetches a target URL, so a changed selector gets
+        # the same fetch-free screens as create (length cap + soupsieve compile;
+        # the viewport-zone sentinel is a screenshot region, not CSS) — whether it
+        # matches anything on the page is proven by the next agent check, and the
+        # reconciliation below the setattr loop clears the stale baselines so that
+        # check SEEDS a fresh baseline instead of diffing against the old
+        # selector's. The ignore_regex is different: it gets executed, so it needs
+        # the SAME validation the create path applies (validate_regex — length,
+        # nesting and structural ReDoS caps). A bare `re.compile` only proves the
+        # syntax parses, and `(a+)+$` compiles perfectly well, which made
+        # create-then-PATCH a clean bypass.
+        if update_data.get('selector'):
+            InputValidator.validate_css_selector(update_data['selector'])
+            if not update_data['selector'].startswith("viewport-zone"):
+                _validate_selector_syntax(update_data['selector'])
         if 'ignore_regex' in update_data and update_data['ignore_regex']:
             InputValidator.validate_regex(update_data['ignore_regex'])
 
@@ -826,10 +876,97 @@ async def update_target(
         for _k in ('schedule_kind', 'schedule_time', 'schedule_days', 'schedule_tz'):
             update_data.pop(_k, None)
 
+        # Pre-update values for the baseline / selector-row reconciliation below.
+        old_selector = target.selector
+        old_url = target.url
+        old_ignore_regex = target.ignore_regex
+        old_requires_playwright = target.requires_playwright
+
         for field, value in update_data.items():
             setattr(target, field, value)
 
         target.updated_at = datetime.utcnow()
+
+        # Reconcile what agents actually check. Agents are shipped ONLY the
+        # target_selectors rows (routers/agents.py builds each check's selector
+        # list from `target.selectors`), so a flat `selector` edit must follow
+        # through to the row create_target minted — otherwise the monitor keeps
+        # checking the OLD selector while the API reports the new one. And any
+        # change to WHAT is monitored (selector / url / ignore_regex) or WHICH
+        # lane renders it (requires_playwright) makes the stored baselines stale:
+        # left in place, the next check diffs fresh content against them and
+        # fires a bogus change_detected. A cleared baseline is seeded, not
+        # diffed, by the next agent report (services/report_ingest.py).
+        minted_selector_row = False
+        if (target.check_type or "content") == "content":
+            selector_changed = 'selector' in update_data and target.selector != old_selector
+            url_changed = 'url' in update_data and target.url != old_url
+            regex_changed = 'ignore_regex' in update_data and target.ignore_regex != old_ignore_regex
+            lane_changed = 'requires_playwright' in update_data and target.requires_playwright != old_requires_playwright
+
+            if selector_changed or url_changed or regex_changed or lane_changed:
+                target.baseline_hash = None
+                target.baseline_content = None
+                target.baseline_fetched_at = None
+
+                from models.target_selector import TargetSelector
+                rows = (await db.execute(
+                    select(TargetSelector).where(TargetSelector.target_id == target.id)
+                )).scalars().all()
+
+                if selector_changed and target.selector:
+                    _new_is_visual = target.selector.startswith("viewport-zone")
+                    if not any(r.selector == target.selector for r in rows):
+                        renamed = next((r for r in rows if r.selector == old_selector), None)
+                        if renamed is not None:
+                            # create_target names the minted row after its selector
+                            # text — keep an auto-minted name in step with the
+                            # rename; a user-authored name is left alone.
+                            if old_selector and renamed.name == old_selector[:255]:
+                                renamed.name = target.selector[:255]
+                            renamed.selector = target.selector
+                            renamed.content_type = "visual" if _new_is_visual else "text"
+                        else:
+                            db.add(TargetSelector(
+                                target_id=target.id,
+                                name=target.selector[:255],
+                                selector=target.selector,
+                                content_type="visual" if _new_is_visual else "text",
+                                enabled=True,
+                                priority=0,
+                                ignore_regex=target.ignore_regex,
+                            ))
+                            minted_selector_row = True
+                    # else: a row for the new selector already exists (managed via
+                    # the selectors API) — leave it in place, only its baseline is
+                    # refreshed below.
+
+                    # A visual region can only be captured in a real browser —
+                    # route the target to a Playwright-capable agent (same
+                    # promotion as POST .../selectors, the source of truth for
+                    # this invariant; the fetch_key recompute below folds the
+                    # lane change in).
+                    if _new_is_visual and not target.requires_playwright:
+                        target.requires_playwright = True
+
+                if regex_changed:
+                    # The flat ignore_regex is mirrored onto the row carrying the
+                    # flat selector, exactly as create_target minted it.
+                    for r in rows:
+                        if r.selector == (target.selector or old_selector):
+                            r.ignore_regex = target.ignore_regex
+
+                # url / lane changes stale EVERY row's baseline; a selector or
+                # regex change only the mirrored row's.
+                if url_changed or lane_changed:
+                    stale_rows = rows
+                else:
+                    stale_rows = [r for r in rows if r.selector in (target.selector, old_selector)]
+                for r in stale_rows:
+                    r.baseline_hash = None
+                    r.baseline_content = None
+                    r.baseline_fetched_at = None
+                    r.baseline_screenshot = None
 
         # Recompute the coalescing key — url / interval / browser / region / auth
         # may have changed, which moves this check to a different physical fetch.
@@ -868,6 +1005,14 @@ async def update_target(
             distributor = CapacityAwareDistributor(db)
             stats = await distributor.distribute_timeslots_and_targets(global_period_ms)
             logger.info(f"Period changed - redistributed timeslots and targets: {stats}")
+
+        # A freshly minted row can be the FIRST selector on a previously inert
+        # zero-selector target (flat-selector targets from before create_target
+        # minted rows) — re-push assignments so the fleet picks it up now, the
+        # same reason POST .../selectors redistributes on create. Skip when a
+        # branch above already redistributed.
+        if minted_selector_row and target.enabled and not enabled_changed and not period_changed:
+            await trigger_auto_redistribution(db, "selector_created")
 
         return TargetInfo(
             id=target.id,
@@ -1564,7 +1709,20 @@ async def set_target_persona(
         raise HTTPException(status_code=404, detail="Persona not found")
 
     target.persona_id = persona.id
-    session = PersonaService.load_session(persona)
+    # SEED FROM A SESSION THE SITE STILL ACCEPTS. This is a COPY: once written it
+    # ages independently of the persona and is never re-probed, so seeding a stale
+    # or anonymous jar means every later check quietly runs signed-out against a
+    # target that reports healthy.
+    session = None
+    try:
+        from services.persona_login import ensure_fresh_session
+        _ok, _err, _fresh = await ensure_fresh_session(persona.id)
+        if _ok and _fresh:
+            session = _fresh
+    except Exception as _e:  # noqa: BLE001 — attaching must not fail on the guard
+        logger.warning(f"Target {target.id}: persona session refresh failed: {_e}")
+    if session is None:
+        session = PersonaService.load_session(persona)
     if session:
         # Match the Fernet(json) framing the check-auth path consumes.
         target.auth_session_encrypted = SecretEncryption.encrypt_secret(json.dumps(session))

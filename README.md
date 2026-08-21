@@ -294,11 +294,14 @@ claude mcp add writ-selfhost -e WRIT_API_KEY=<YOUR_API_KEY> -- npx -y writ-mcp -
 > (which registers as `writ`). The server identifies itself to the AI as *"Writ Self-Host
 > Coordinator"* — never confused with the desktop app.
 
-**The tools your assistant gets** — 31 of them, plus a `run_<name>` tool per saved workflow:
+**The tools your assistant gets** — 34 of them, plus a `run_<name>` tool per **pinned**
+workflow (pin with `writ_pin_workflow_tool`; every workflow — pinned or not — always runs
+via `writ_run_workflow`, so an account with hundreds of workflows doesn't advertise
+hundreds of tools):
 
 | Family | Tools |
 | --- | --- |
-| **Operate** | `writ_list_workflows` · `writ_run_workflow` · `writ_workflow_data` · `writ_search_data` · `writ_export_data` · `writ_workflow_runs` |
+| **Operate** | `writ_list_workflows` · `writ_run_workflow` · `writ_pin_workflow_tool` · `writ_workflow_data` · `writ_search_data` · `writ_export_data` · `writ_workflow_runs` |
 | **Automate** | `writ_set_schedule` · `writ_expose_workflow_api` · `writ_create_automation` · `writ_create_monitor` · `writ_wire_monitor` |
 | **Crawl** | `writ_crawl_site` · `writ_crawl_status` · `writ_saved_crawls` · `writ_run_saved_crawl` · `writ_saved_crawl_data` |
 | **Start a session** | `writ_browser_use` · `writ_record_website` · `writ_build` · `writ_website_to_api` |

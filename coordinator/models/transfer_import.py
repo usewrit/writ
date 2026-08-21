@@ -28,7 +28,7 @@ import created, in reverse dependency order, and refuses rows that have since ru
 or collected data.
 """
 from sqlalchemy import (
-    JSON, BigInteger, Column, DateTime, ForeignKey, Index, Integer, String, Text,
+    JSON, BigInteger, Column, DateTime, ForeignKey, Index, Integer, String, Text, Uuid,
 )
 from sqlalchemy.sql import func
 
@@ -55,8 +55,13 @@ class TransferImport(Base):
     # String, not a native UUID type: SQLite has none. Values are still uuid4
     # hex strings, so an id minted here is meaningful in a cloud install's logs too.
     id = Column(String(36), primary_key=True)
+    # MUST match users.id (Uuid), not this table's own String id: an FK whose
+    # column type differs from its target cannot be created at all, so create_all
+    # died here with "key columns are of incompatible types" and took the whole
+    # schema build with it. The sibling stored_file.created_by_user_id already
+    # gets this right.
     created_by_user_id = Column(
-        String(36),
+        Uuid(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )

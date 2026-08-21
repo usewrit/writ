@@ -49,10 +49,18 @@ logger = logging.getLogger(__name__)
 _MAX_SESSIONS = 8
 
 # A connected session is driven by a remote model; between two tool calls there
-# may be a long think/user pause. Reclaim on IDLENESS (not age — a session being
+# may be a think/user pause. Reclaim on IDLENESS (not age — a session being
 # actively driven must never be pulled out from under the client), with a hard
 # lifetime ceiling as a backstop.
-_IDLE_TTL_S = 60 * 30
+#
+# SIZED TO THE LONGEST *LEGITIMATE* GAP, not to a comfortable-looking round number.
+# A live loop pauses 5-60s while the model reads a page, and at most a few minutes
+# when it asks the user for a value in chat. Nothing healthy pauses longer — so a
+# TTL of 30 minutes (the original value) only ever caught sessions that had already
+# been leaking for half an hour, while a user who redirected the AI mid-task kept a
+# browser pinned the whole time. Reaping too early costs one reopen; reaping too
+# late holds a browser nobody is driving.
+_IDLE_TTL_S = 5 * 60
 _MAX_LIFETIME_S = 60 * 60 * 4
 
 # Retained captured calls, and the per-body character cap applied before storage.

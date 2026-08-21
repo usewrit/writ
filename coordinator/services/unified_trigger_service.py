@@ -189,6 +189,20 @@ class UnifiedTriggerService:
         now = datetime.now(timezone.utc)
         eval_context = {
             **change_context,
+            "event_type": "change_detected",
+            # Before/after excerpts off the DetectedChange row so conditions,
+            # templates and woken AI agents can reference more than the diff
+            # snippet (bounded — full documents do not belong in JSONB contexts).
+            "content_before": (
+                (detected_change.content_before or "")[:2000]
+                if detected_change is not None and getattr(detected_change, "content_before", None)
+                else None
+            ),
+            "content_after": (
+                (detected_change.content_after or "")[:2000]
+                if detected_change is not None and getattr(detected_change, "content_after", None)
+                else None
+            ),
             "extracted": extracted_data,
             "content": content,
             # Selector info for multi-selector targets
@@ -1725,14 +1739,20 @@ class UnifiedTriggerService:
         name_cfg = config.get("name")
         crawl_name = self._render_template(str(name_cfg), context).strip() if name_cfg else None
 
-        # The coordinator runs DETERMINISTIC crawls only, so `extract_mode` is the
-        # single output axis (there is no AI executor here). A block authored on the
-        # cloud with "ai" collapses to markdown rather than being rejected.
+        # Crawl has two orthogonal axes: `executor` (regular = deterministic crawl |
+        # ai = a per-page AI read on the owner's own provider) and `extract_mode`
+        # (markdown | schema output). The block UI collapses these into one "Collect"
+        # chooser, so a value of "ai" here selects the AI EXECUTOR rather than an
+        # output mode — it must not silently downgrade to markdown.
         extract_mode = config.get("extract_mode") or "markdown"
+        executor = config.get("executor") or "regular"
         if extract_mode == "ai":
+            executor = "ai"
             extract_mode = "schema" if config.get("extract_schema") else "markdown"
         if extract_mode not in ("markdown", "schema"):
             extract_mode = "markdown"
+        if executor not in ("regular", "ai"):
+            executor = "regular"
 
         persona_id = config.get("persona_id")
         try:
@@ -1745,8 +1765,10 @@ class UnifiedTriggerService:
                 self.db,
                 seed_url=seed_url,
                 name=crawl_name,
+                executor=executor,
                 extract_mode=extract_mode,
                 extract_schema=config.get("extract_schema"),
+                extract_prompt=config.get("extract_prompt"),
                 content_spec=config.get("content_spec") or config.get("content"),
                 render_mode=config.get("render_mode") or "auto",
                 ocr_mode=config.get("ocr_mode") or "auto",
@@ -1909,9 +1931,36 @@ class UnifiedTriggerService:
         goal = self._render_template(str(config.get("goal") or ""), context).strip()
         if not goal:
             return {"status": "skipped", "reason": "no goal configured"}
+        # The display name keys off the operator's goal alone — the wake note and
+        # threaded context appended below must not leak into it.
+        _base_goal = goal
+
+        # Unattended-spend guardrail (parity with cloud's ai_session action):
+        # config.cooldown_minutes suppresses re-wakes within the window. Self-host
+        # AiSession rows are per-run records with no trigger linkage, so the
+        # cooldown keys off trigger.last_triggered_at — at dispatch time it still
+        # holds the PREVIOUS fire (process_change stamps it after dispatch).
+        try:
+            _cooldown_min = float(config["cooldown_minutes"])
+        except (KeyError, TypeError, ValueError):
+            _cooldown_min = 0.0
+        if _cooldown_min and trigger.last_triggered_at:
+            _last = trigger.last_triggered_at
+            if _last.tzinfo is None:
+                _last = _last.replace(tzinfo=timezone.utc)
+            _elapsed_min = (datetime.now(timezone.utc) - _last).total_seconds() / 60.0
+            if _elapsed_min < _cooldown_min:
+                return {
+                    "status": "skipped",
+                    "reason": f"cooldown active ({_elapsed_min:.1f}/{_cooldown_min:g} min)",
+                }
 
         entry_url = config.get("entry_url")
         entry_url = self._render_template(str(entry_url), context).strip() if entry_url else None
+        if not entry_url:
+            # change_detected carries the monitored page — the natural place for
+            # a monitor-woken agent to start. Other events may carry no URL.
+            entry_url = context.get("target_url") or context.get("url")
 
         # `user_context` is what the operator threads in from upstream blocks; it is
         # additive to the goal rather than a separate agent input, because the
@@ -1921,6 +1970,39 @@ class UnifiedTriggerService:
             rendered = self._render_template(str(user_context), context).strip()
             if rendered:
                 goal = f"{goal}\n\nContext:\n{rendered}"
+
+        # Wake note (parity with cloud): a woken agent must know what fired it —
+        # which page changed and what the diff was — or it starts blind.
+        _note_lines = []
+        _evt = context.get("event_type") or (
+            "change_detected" if context.get("diff_snippet") is not None else "automation event"
+        )
+        _note_lines.append(
+            f"You were started automatically by the automation "
+            f"'{trigger.name or trigger.id}' on event: {_evt}."
+        )
+        _url_note = context.get("target_url") or context.get("url")
+        if _url_note:
+            _note_lines.append(f"Monitored page: {_url_note}")
+        _sel = context.get("selector_name") or context.get("selector")
+        if _sel and _sel != "Full page":
+            _note_lines.append(f"Watched element: {_sel}")
+        _diff = context.get("diff_snippet")
+        if _diff:
+            _diff = str(_diff)
+            if len(_diff) > 1200:
+                _diff = _diff[:1200] + " ...[truncated]"
+            _note_lines.append(f"What changed (diff snippet):\n{_diff}")
+        _extracted = context.get("extracted") or {}
+        if _extracted:
+            try:
+                _blob = json.dumps(_extracted, ensure_ascii=False, default=str)
+            except (TypeError, ValueError):
+                _blob = str(_extracted)
+            if len(_blob) > 800:
+                _blob = _blob[:800] + " ...[truncated]"
+            _note_lines.append(f"Extracted values: {_blob}")
+        goal = f"{goal}\n\n[Automation wake]\n" + "\n".join(_note_lines)
 
         # Render the form values the agent may fill with.
         available_data: Dict[str, Any] = {}
@@ -1959,7 +2041,7 @@ class UnifiedTriggerService:
             )
 
         session_id = str(uuid.uuid4())
-        name = f"AI: {goal}"[:500]
+        name = f"AI: {_base_goal}"[:500]
         generate_workflow = bool(config.get("generate_workflow", True))
         try:
             max_steps = int(config.get("max_steps") or 20)
@@ -2758,7 +2840,18 @@ class UnifiedTriggerService:
                     linked_block_id = config.get('linked_to_block')
                     if linked_block_id and linked_block_id in block_by_id:
                         prev_block = block_by_id[linked_block_id]
-                        continuation_filter['ai_session_id'] = prev_block.get('config', {}).get('session_ids', [None])[0]
+                        continuation_filter['ai_session_id'] = (
+                            prev_block.get('config', {}).get('session_ids') or [None]
+                        )[0]
+                    # Goal-shaped wakes have no session id at build time — the
+                    # dispatched row id lands in the branch context (result_data
+                    # 'ai_session_id'), mirroring workflow_completed's task_id.
+                    if not continuation_filter.get('ai_session_id'):
+                        branch_ctx = branch_contexts.get(branch_name, {}) if branch_name else {}
+                        _sid = branch_ctx.get('ai_session_id') or base_context.get('ai_session_id')
+                        if _sid:
+                            continuation_filter['ai_session_id'] = _sid
+                            logger.info(f"[BlockChain] Added ai_session_id={_sid} to ai_session_completed filter")
 
                 if block_subtype == 'workflow_completed' and not continuation_filter.get('workflow_id'):
                     linked_block_id = config.get('linked_to_block')

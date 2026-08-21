@@ -29,6 +29,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    ForeignKey,
     Integer,
     String,
     Text,
@@ -105,6 +106,19 @@ class AiSession(Base):
         Integer,
         nullable=True,
         comment="Iterations the agent took (reported in the completion frame).",
+    )
+    # LOGIN-RECORDING session: set when this session exists to RECORD how the named
+    # persona signs in ("Let AI record the login"). On the terminal frame the
+    # coordinator materializes the returned recipe as its OWN AutomationWorkflow and
+    # points personas.login_workflow_id at it — the agent-side workflow id is a
+    # different namespace and can never be used for that link. Durable so the wiring
+    # survives a coordinator restart between dispatch and reply.
+    login_for_persona_id = Column(
+        Integer,
+        ForeignKey("personas.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="Persona whose sign-in this session records; completion wires login_workflow_id",
     )
     error = Column(
         Text,

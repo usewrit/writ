@@ -523,6 +523,10 @@ class PersonaSignInResponse(BaseModel):
     error: Optional[str] = None
     has_warm_session: bool = False
     session_expires_at: Optional[datetime] = None
+    # True only when the captured session carries material that actually proves a
+    # login (a session/auth cookie or a token store) — NOT merely an anonymous
+    # cookie a logged-out page left behind. The UI shows "Signed in" only on this.
+    authenticated: bool = False
 
 
 @router.post("/{persona_id}/sign-in", response_model=PersonaSignInResponse, dependencies=[_FEATURE])
@@ -547,11 +551,29 @@ async def sign_in_persona(
     if not p:
         raise HTTPException(404, "Persona not found")
 
-    from services.persona_login import ensure_fresh_session
+    from services.persona_login import ensure_fresh_session, session_has_auth_material
 
     ok, error, _session = await ensure_fresh_session(
         persona_id, force=bool(body and body.force),
     )
+
+    # VERIFY THE LOGIN ACTUALLY TOOK — a run that landed back on the sign-in page
+    # still captures the site's anonymous cookies, which would read as "signed in".
+    # The test the user clicked must confirm real AUTH material.
+    authenticated = bool(ok) and session_has_auth_material(_session)
+    if ok and not authenticated:
+        ok = False
+        error = error or (
+            "The login ran but no session cookie or auth token was captured — it "
+            "likely didn't sign in (landed back on the login page, or the site uses "
+            "a login this persona can't complete). Check the login workflow ends on "
+            "a logged-in page, then try again."
+        )
+        try:
+            from services.persona_login import _record_login_error
+            await _record_login_error(persona_id, error)
+        except Exception:  # noqa: BLE001
+            pass
 
     # Re-read: ensure_fresh_session writes the captured session (and last_login_at /
     # last_login_error) from its OWN sessions, so `p` here is stale by construction.
@@ -561,6 +583,63 @@ async def sign_in_persona(
         error=error,
         has_warm_session=bool(p.session_state_encrypted),
         session_expires_at=p.expires_at,
+        authenticated=authenticated,
+    )
+
+
+class PersonaRecordLoginAIRequest(BaseModel):
+    # Exact sign-in page when the user knows it; defaults to the persona's domain
+    # root (the AI finds the login form from there).
+    login_url: Optional[str] = Field(None, max_length=2048)
+    # Pin the fleet agent that runs the recording; omitted = the usual pick.
+    agent_id: Optional[str] = Field(None, max_length=255)
+
+
+class PersonaRecordLoginAIResponse(BaseModel):
+    # The dispatched (or already-running) AI session. Poll it via
+    # GET /ai-sessions/{id}; on completion the coordinator has already wired
+    # personas.login_workflow_id — re-read the persona for the outcome.
+    session_id: int
+    already_running: bool = False
+
+
+@router.post(
+    "/{persona_id}/record-login-ai",
+    response_model=PersonaRecordLoginAIResponse,
+    dependencies=[_FEATURE],
+)
+async def record_login_ai(
+    persona_id: int,
+    body: Optional[PersonaRecordLoginAIRequest] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Have a fleet agent sign in AS this persona and RECORD the flow.
+
+    The agent runs the whole autonomous loop locally (this coordinator has no
+    brain); its terminal frame returns the recorded recipe, which the coordinator
+    materializes as a workflow and attaches as the persona's sign-in — so the
+    wiring lands even if the user closes the tab.
+
+    The persona's credentials are sealed under the agent's channel key; the model
+    only ever sees `[SECURE:key]` placeholders and the recording stores
+    `{{secret:key}}` references, never a value. Single-flight per persona.
+    """
+    p = await PersonaService.get_owned(db, persona_id)
+    if not p:
+        raise HTTPException(404, "Persona not found")
+    if not p.is_active:
+        raise HTTPException(422, "This persona is deactivated — reactivate it first.")
+
+    from services.persona_login_record import start_login_record_session
+
+    session_pk, already_running = await start_login_record_session(
+        db,
+        p,
+        login_url=(body.login_url if body else None),
+        agent_id=(body.agent_id if body else None),
+    )
+    return PersonaRecordLoginAIResponse(
+        session_id=session_pk, already_running=already_running,
     )
 
 

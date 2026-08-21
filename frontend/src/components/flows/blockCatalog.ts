@@ -413,8 +413,11 @@ export const BLOCK_CATALOG: Record<string, BlockDef> = {
       { key: 'seed_url', type: 'template', help: 'URL to crawl. Blank = the monitor that fired this flow. Supports {{placeholders}}.' },
       { key: 'name', type: 'template', help: 'Optional label for the crawl' },
       { key: 'intent', type: 'template', help: 'Plain-English goal — scopes the crawl and crawls matching pages first' },
-      { key: 'extract_mode', type: 'enum', enumValues: ['markdown', 'schema'], help: 'markdown = full page text; schema = structured extraction' },
+      { key: 'extract_mode', type: 'enum', enumValues: ['markdown', 'schema', 'ai'], help: 'markdown = full page text; schema/ai = structured extraction (ai selects the AI executor — it reads every page against extract_prompt on your configured provider)' },
       { key: 'extract_schema', type: 'object', help: 'Field schema when extract_mode=schema' },
+      { key: 'extract_prompt', type: 'string', help: 'Extraction instruction when extract_mode=ai' },
+      { key: 'render_mode', type: 'enum', enumValues: ['auto', 'http', 'browser'], help: 'How each page is FETCHED, independent of extract_mode: auto = HTTP first and a warm browser only for JS-challenge/thin pages; http = never render (fastest, static HTML); browser = warm-render every page (JS/SPA sites)' },
+      { key: 'ocr_mode', type: 'enum', enumValues: ['auto', 'off', 'force'], help: 'PDFs, office docs and images: auto reads the text layer and OCRs only scans; off skips documents; force OCRs everything' },
       { key: 'persona_id', type: 'ref', ref: 'persona', help: 'Logged-in identity for authenticated crawls' },
       { key: 'max_depth', type: 'number', help: 'How many links deep to follow (default 4)' },
       { key: 'page_budget', type: 'number', help: 'Max pages to collect (default 1000)' },
@@ -457,17 +460,18 @@ export const BLOCK_CATALOG: Record<string, BlockDef> = {
     category: 'action',
     blockType: 'ai_session',
     label: 'Run AI Agent',
-    summary: 'Fires one autonomous AI browser session: the agent works toward your goal, then saves its steps as a replayable workflow.',
-    when: 'One-shot autonomy, not a chat: the agent opens a browser, navigates/clicks/extracts toward the goal on its own, and records what it did as a replayable workflow (this is NOT Scribe, the chat concierge). Runs on the desktop daemon (using your configured AI provider) or in the cloud.',
+    summary: 'Wakes an autonomous AI browser agent with a task prompt (goal). A monitor-woken agent starts on the changed page with the diff and extracted values.',
+    when: 'One-shot autonomy, not a chat: the agent opens a browser, navigates/clicks/extracts toward the goal on its own (this is NOT Scribe, the chat concierge). The classic "wake an agent on change": chain it after change_detected with a goal. Runs on a connected fleet agent with local AI.',
     platforms: BOTH,
     // GOAL-shaped, unlike cloud's `session_ids`. Self-host has no saved AI-session
     // recipes to reference — `ai_sessions` rows are run records and the start
     // endpoint takes the goal inline. See _dispatch_ai_session in
     // services/unified_trigger_service.py.
     config: [
-      { key: 'goal', type: 'string', help: 'What the agent should accomplish' },
-      { key: 'entry_url', type: 'string', help: 'Where it starts (optional)' },
+      { key: 'goal', type: 'string', help: 'What the agent should accomplish; {{placeholders}} like {{diff_snippet}} allowed' },
+      { key: 'entry_url', type: 'string', help: 'Where it starts; defaults to the monitored page on change_detected' },
       { key: 'max_steps', type: 'number', help: 'Iteration budget' },
+      { key: 'cooldown_minutes', type: 'number', help: 'Minimum minutes between wakes (0 disables)' },
       { key: 'generate_workflow', type: 'boolean', help: 'Save the run as a replayable workflow' },
       { key: 'user_context', type: 'string' },
       { key: 'form_data', type: 'object' },

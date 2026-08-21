@@ -161,6 +161,18 @@ export const AIPreviewModal: React.FC<AIPreviewModalProps> = ({
             setConnectionState('error');
             break;
 
+          case 'spectate_ended':
+            // Agent-reported terminal state: the page behind the stream is gone
+            // (browser died or the session ended). Without this the frames just
+            // stop and the modal keeps waiting on a socket that will never paint.
+            toast.error(
+              data.reason === 'browser_closed'
+                ? t('The browser session ended or failed — there is nothing left to stream.')
+                : t('The session has ended.'),
+            );
+            setConnectionState('error');
+            break;
+
           case 'pong':
           default:
             break;

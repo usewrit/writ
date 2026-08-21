@@ -10,7 +10,7 @@ import os
 from datetime import datetime, timezone
 from typing import List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, or_
 from sqlalchemy.orm import undefer
 from models.agent import Agent, AgentStatus
 from models.target import Target
@@ -1039,7 +1039,16 @@ class CapacityAwareDistributor:
             select(AutomationWorkflow)
             .where(
                 AutomationWorkflow.schedule_enabled == True,
-                AutomationWorkflow.schedule_interval_ms.isnot(None)
+                AutomationWorkflow.schedule_interval_ms.isnot(None),
+                # INTERVAL kind only: the agent-side TimeSlotScheduler knows
+                # nothing of time-of-day/timezone, so daily/weekly must never be
+                # assigned — with a leftover interval_ms from before a kind
+                # switch they would run on the old interval cadence. Calendar
+                # kinds dispatch from the coordinator scheduler instead.
+                or_(
+                    AutomationWorkflow.schedule_kind.is_(None),
+                    AutomationWorkflow.schedule_kind == "interval",
+                ),
             )
         )
         all_workflows = list(result.scalars().all())

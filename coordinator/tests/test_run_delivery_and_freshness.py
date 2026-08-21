@@ -72,7 +72,7 @@ def test_terminal_vocabulary_matches_the_rest_of_the_platform():
 def test_run_controls_are_advertised():
     """They were honoured but undocumented, so no client could know they existed."""
     from routers.mcp_server import RUN_CONTROL_PROPERTIES, FRESHNESS_ARG
-    assert set(RUN_CONTROL_PROPERTIES) == {"wait", "timeout_seconds", FRESHNESS_ARG}
+    assert set(RUN_CONTROL_PROPERTIES) == {"wait", "timeout_seconds", "persona_id", FRESHNESS_ARG}
     freshness = RUN_CONTROL_PROPERTIES[FRESHNESS_ARG]
     assert freshness["type"] == "integer"
     assert freshness["minimum"] == 0
@@ -84,7 +84,7 @@ def test_derived_run_tools_expose_the_controls():
     from routers.mcp_server import _derived_run_tools, RUN_CONTROL_PROPERTIES
 
     tools = _derived_run_tools([
-        {"id": 7, "name": "Price check", "form_data": {"sku": ""}},
+        {"id": 7, "name": "Price check", "form_data": {"sku": ""}, "mcp_tool_pinned": True},
     ])
 
     assert len(tools) == 1
@@ -99,7 +99,7 @@ def test_a_workflow_input_named_like_a_control_wins():
     from routers.mcp_server import _derived_run_tools, FRESHNESS_ARG
 
     tools = _derived_run_tools([
-        {"id": 7, "name": "wf", "form_data": {FRESHNESS_ARG: ""}},
+        {"id": 7, "name": "wf", "form_data": {FRESHNESS_ARG: ""}, "mcp_tool_pinned": True},
     ])
 
     prop = tools[0]["inputSchema"]["properties"][FRESHNESS_ARG]

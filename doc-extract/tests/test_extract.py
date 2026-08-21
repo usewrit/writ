@@ -36,6 +36,14 @@ _HEAVY_DEPS = [
     ("python-docx", "docx"),
     ("openpyxl", "openpyxl"),
     ("python-pptx", "pptx"),
+    # HTML → markdown ladder (mislabeled-.pdf lane + the structure-acceptance
+    # guard's fallback). All of these are in requirements.txt, so an absence
+    # must fail here rather than silently skip the GFM-fallback tests.
+    ("trafilatura", "trafilatura"),
+    ("readability-lxml", "readability"),
+    ("markdownify", "markdownify"),
+    ("beautifulsoup4", "bs4"),
+    ("lxml", "lxml"),
 ]
 
 
@@ -207,6 +215,7 @@ def _make_image_only_pdf(png: bytes, width: int, height: int) -> bytes:
 
 
 def test_pdf_text_layer_no_ocr():
+    pytest.importorskip("pdfplumber")
     data = _make_text_pdf("Hello crawled document world")
     res = extractor.extract(data, "application/pdf", "https://x/doc.pdf", ocr_mode="auto")
     assert res["kind"] == "pdf"
@@ -217,6 +226,7 @@ def test_pdf_text_layer_no_ocr():
 
 
 def test_pdf_ocr_off_still_returns_text_layer():
+    pytest.importorskip("pdfplumber")
     data = _make_text_pdf("Text layer present")
     res = extractor.extract(data, "application/pdf", "", ocr_mode="off")
     assert "Text layer present" in res["text"]
@@ -420,3 +430,121 @@ def test_prose_filled_raggedness_rejected_even_without_word_cuts():
     # fixture isolates the filled-count consistency bar.
     assert pdf_infer._word_split_fraction(ragged) < 0.35
     assert pdf_infer._plausible_table(ragged, strict=True) is False
+
+
+# --- HTML engine: structure-acceptance guard (trafilatura release drift) -----
+# Mirrors the crawl agent's _EngineStub acceptance tests against this engine's
+# own ladder: a drifted trafilatura that destroys structure (2.2.0's one-line
+# collapse, 1.x's pipe-less table rows) must be rejected so the
+# readability+markdownify fallback serves real GFM.
+
+
+class _EngineStub:
+    """Stands in for the trafilatura module with a canned ``extract`` body, so the
+    structure-acceptance guard is exercised deterministically whatever trafilatura
+    version (or none at all) is installed."""
+
+    def __init__(self, body):
+        self._body = body
+
+    def extract(self, *_a, **_k):
+        return self._body
+
+    def extract_metadata(self, *_a, **_k):
+        return None
+
+
+_RICH_HTML = """<!doctype html><html><head>
+<title>  Quarterly Pricing — Acme Corp </title>
+<meta name="description" content="Acme's Q3 pricing tiers and what each plan includes.">
+</head><body>
+<header class="site-header"><a href="/">Home</a><nav class="main-nav"><ul>
+  <li><a href="/pricing">Pricing</a></li><li><a href="/docs">Docs</a></li></ul></nav></header>
+<aside class="sidebar related-links"><h3>Related</h3><ul><li><a href="/blog/1">Post 1</a></li></ul></aside>
+<main><article>
+  <h1>Quarterly Pricing</h1>
+  <p>Our plans scale with your team. Every tier includes <strong>unlimited</strong> crawls.</p>
+  <h2>Plan comparison</h2>
+  <table>
+    <thead><tr><th>Plan</th><th>Price</th><th>Seats</th></tr></thead>
+    <tbody>
+      <tr><td>Starter</td><td>$0</td><td>1</td></tr>
+      <tr><td>Team</td><td>$49</td><td>10</td></tr>
+      <tr><td>Scale</td><td>$199</td><td>Unlimited</td></tr>
+    </tbody>
+  </table>
+  <h2>What's included</h2>
+  <ul><li>Scheduled crawls</li><li>API access</li><li>Priority support</li></ul>
+</article></main>
+<footer class="site-footer"><p>© 2026 Acme Corp. All rights reserved.</p>
+  <a href="/privacy">Privacy</a></footer>
+<script>var track = 'tracking-pixel-junk';</script>
+</body></html>"""
+
+_RICH_URL = "https://acme.example/pricing"
+
+
+def test_flattened_engine_body_rejected_and_fallback_serves_gfm(monkeypatch):
+    # trafilatura 2.2.0 can collapse a whole page into ONE line — headings, list
+    # items and table cells concatenated ("PlanPriceSeats"). That mush must never
+    # be trusted: the guard rejects it and the readability+markdownify layer
+    # renders real GFM instead.
+    pytest.importorskip("markdownify")
+    from engines import html_engine
+
+    mush = (
+        "Quarterly Pricing Our plans scale with your team. Every tier includes "
+        "unlimited crawls. Plan comparison PlanPriceSeats Starter$01 Team$4910 "
+        "Scale$199Unlimited What's included Scheduled crawlsAPI accessPriority support"
+    )
+    monkeypatch.setattr(html_engine, "_trafilatura", _EngineStub(mush))
+    _, md, _ = html_engine.to_markdown(_RICH_HTML, _RICH_URL)
+    assert "PlanPriceSeats" not in md
+    assert "| Plan | Price | Seats |" in md
+    assert "# Quarterly Pricing" in md
+    assert "- Scheduled crawls" in md
+
+
+def test_non_gfm_table_rows_rejected_and_fallback_serves_gfm(monkeypatch):
+    # trafilatura 1.x rendered table rows WITHOUT the leading pipe
+    # ("Plan | Price | Seats |"), which markdown consumers read as prose. A
+    # header-carrying <table> that yields no GFM row is a miss, not a table.
+    pytest.importorskip("markdownify")
+    from engines import html_engine
+
+    onex = (
+        "# Quarterly Pricing\n\nOur plans scale with your team.\n\n"
+        "## Plan comparison\nPlan | Price | Seats |\nStarter | $0 | 1 |"
+    )
+    monkeypatch.setattr(html_engine, "_trafilatura", _EngineStub(onex))
+    _, md, _ = html_engine.to_markdown(_RICH_HTML, _RICH_URL)
+    assert "| Plan | Price | Seats |" in md
+    assert "| Starter | $0 | 1 |" in md
+
+
+def test_structured_engine_body_kept_when_page_has_no_data_table(monkeypatch):
+    # A page whose only <table> is layout (no <th>/<thead>) imposes no GFM-row
+    # demand: a structured, table-free engine body is accepted as-is.
+    from engines import html_engine
+
+    html = (
+        "<html><body><table><tr><td><h1>Forum thread</h1>"
+        "<p>" + ("insightful prose " * 12) + "</p></td></tr></table></body></html>"
+    )
+    kept = "# Forum thread\n\nENGINE BODY KEPT despite the layout table."
+    monkeypatch.setattr(html_engine, "_trafilatura", _EngineStub(kept))
+    _, md, _ = html_engine.to_markdown(html, "https://x.test/t")
+    assert "ENGINE BODY KEPT" in md
+
+
+def test_single_block_page_single_line_body_accepted(monkeypatch):
+    # One-block pages legitimately yield one-line bodies — never treated as mush.
+    from engines import html_engine
+
+    html = "<html><body><p>A single short standalone paragraph.</p></body></html>"
+    monkeypatch.setattr(
+        html_engine, "_trafilatura", _EngineStub("A single short standalone paragraph.")
+    )
+    _, md, wc = html_engine.to_markdown(html, "https://x.test/p")
+    assert "A single short standalone paragraph." in md
+    assert wc == 5

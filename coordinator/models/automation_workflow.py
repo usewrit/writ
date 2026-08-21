@@ -376,6 +376,22 @@ class AutomationWorkflow(Base):
         comment="Max re-login attempts when session is detected as expired",
     )
 
+    # Record-time pinned session: the RECORDING browser's cookies/storage/
+    # fingerprint, captured when the recorded workflow was saved. Captcha
+    # clearance and logins earned during recording live here, so replays seed
+    # from it whenever no persona is linked (a linked persona's warm session
+    # always takes precedence). Refreshed after successful runs.
+    recorded_session_encrypted = Column(
+        Text,
+        nullable=True,
+        comment="gzip+Fernet auth session captured from the recording browser at save",
+    )
+    recorded_session_captured_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="When the pinned recorded session was captured or last refreshed",
+    )
+
     # Browserless HTTP execution lane
     auth_config = Column(
         JSON,
@@ -402,6 +418,19 @@ class AutomationWorkflow(Base):
         JSON,
         nullable=True,
         comment="Callable functions: step-groups, script handlers, extraction queries",
+    )
+
+    # Opt-in exposure as a dedicated tool on the coordinator's MCP server (/mcp).
+    # When True, routers/mcp_server mints a run_<name> tool for this workflow
+    # (subject to a server-side cap). Default OFF — every workflow is always
+    # callable through writ_run_workflow; unbounded per-workflow tools blow MCP
+    # clients' context windows and tool caps once an account holds many workflows.
+    mcp_tool_pinned = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        comment="Expose this workflow as its own run_<name> tool on the MCP server (opt-in, capped).",
     )
 
     execution_target = deferred(Column(

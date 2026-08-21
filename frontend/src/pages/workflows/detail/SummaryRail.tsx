@@ -13,6 +13,7 @@ import { mcpPublishApi } from '../../../api/publish';
 import type { McpEndpoint } from '../../../api/endpoints';
 import { formatRelativeTime } from '../../../utils/format';
 import { TYPE_META } from './meta';
+import { scheduleFromApi, scheduleLabel as scheduleSummary } from '../../../utils/schedule';
 
 const COLLAPSE_KEY = 'wfDetailRailCollapsed';
 
@@ -123,10 +124,10 @@ export const SummaryRail: React.FC<SummaryRailProps> = ({
     statusDetail = formatRelativeTime(lastRunAt);
   }
 
-  const scheduleLabel = workflow.schedule_enabled && workflow.schedule_interval_ms
-    ? (workflow.schedule_interval_ms >= 3600000
-        ? t('Every {{n}}h', { n: workflow.schedule_interval_ms / 3600000 })
-        : t('Every {{n}}m', { n: workflow.schedule_interval_ms / 60000 }))
+  // Kind-aware summary via the shared util: a daily/weekly schedule must read
+  // "Daily at 16:28", never the leftover interval_ms from before a kind switch.
+  const scheduleLabel = workflow.schedule_enabled
+    ? scheduleSummary(scheduleFromApi(workflow, workflow.schedule_interval_ms || 3_600_000))
     : t('Off');
 
 
